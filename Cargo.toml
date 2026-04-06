@@ -47,7 +47,7 @@ eventsource-stream = { version = "0.2" }
 uuid         = { version = "1", features = ["v4"] }
 
 # ── Workspace crates ──────────────────────────────────────────
-wuhu-core      = { path = "crates/wuhu-core" }
-wuhu-engine    = { path = "crates/wuhu-engine" }
-wuhu-compress  = { path = "crates/wuhu-compress" }
-wuhu-providers = { path = "crates/wuhu-providers" }
+wuhu-core      = { path = "crates/wuhu-core",      version = "0.1.0" }
+wuhu-engine    = { path = "crates/wuhu-engine",    version = "0.1.0" }
+wuhu-compress  = { path = "crates/wuhu-compress",  version = "0.1.0" }
+wuhu-providers = { path = "crates/wuhu-providers", version = "0.1.0" }
