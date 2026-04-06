@@ -1,0 +1,25 @@
+[package]
+name        = "wuhu-engine"
+description = "The Wuhu execution engine: streaming loop, concurrent tools, HITL."
+version.workspace     = true
+edition.workspace     = true
+license.workspace     = true
+repository.workspace  = true
+keywords.workspace    = true
+categories.workspace  = true
+rust-version.workspace = true
+
+[dependencies]
+wuhu-core    = { workspace = true }
+wuhu-compress = { workspace = true }
+
+async-trait  = { workspace = true }
+tokio        = { workspace = true }
+tokio-stream = { workspace = true }
+tokio-util   = { workspace = true }
+futures      = { workspace = true }
+jsonschema   = "0.28"
+serde_json   = { workspace = true }
+thiserror    = { workspace = true }
+tracing      = { workspace = true }
+uuid         = { workspace = true }

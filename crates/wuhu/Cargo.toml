@@ -1,0 +1,34 @@
+[package]
+name        = "wuhu"
+description = "A Rust framework for building LLM agents. Streaming, concurrent, graceful."
+version.workspace      = true
+edition.workspace      = true
+license.workspace      = true
+repository.workspace   = true
+keywords.workspace     = true
+categories.workspace   = true
+rust-version.workspace = true
+
+[features]
+default   = []
+anthropic = ["wuhu-providers/anthropic"]
+openai    = ["wuhu-providers/openai"]
+
+[dependencies]
+wuhu-core      = { workspace = true }
+wuhu-engine    = { workspace = true }
+wuhu-compress  = { workspace = true }
+wuhu-providers = { workspace = true }
+
+async-trait  = { workspace = true }
+tokio        = { workspace = true }
+tokio-stream = { workspace = true }
+futures      = { workspace = true }
+serde_json   = { workspace = true }
+thiserror    = { workspace = true }
+tokio-util   = { workspace = true }
+tracing      = { workspace = true }
+uuid         = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

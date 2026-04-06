@@ -1,0 +1,53 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/wuhu-core",
+    "crates/wuhu-engine",
+    "crates/wuhu-compress",
+    "crates/wuhu-providers",
+    "crates/wuhu",
+]
+
+[workspace.package]
+version      = "0.1.0"
+edition      = "2021"
+license      = "MIT OR Apache-2.0"
+repository   = "https://github.com/wuhu-rs/wuhu"
+homepage     = "https://github.com/wuhu-rs/wuhu"
+keywords     = ["agent", "llm", "ai", "streaming", "async"]
+categories   = ["asynchronous", "api-bindings"]
+rust-version = "1.75"
+
+[workspace.dependencies]
+# ── Async runtime ─────────────────────────────────────────────
+tokio        = { version = "1",   features = ["full"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+tokio-util   = { version = "0.7", features = ["rt"] }
+futures      = { version = "0.3" }
+
+# ── Serialization ─────────────────────────────────────────────
+serde        = { version = "1", features = ["derive"] }
+serde_json   = { version = "1" }
+
+# ── Error handling ────────────────────────────────────────────
+thiserror    = { version = "2" }
+anyhow       = { version = "1" }
+
+# ── Async traits ──────────────────────────────────────────────
+async-trait  = { version = "0.1" }
+
+# ── Tracing ───────────────────────────────────────────────────
+tracing      = { version = "0.1" }
+
+# ── HTTP (providers) ──────────────────────────────────────────
+reqwest      = { version = "0.12", features = ["json", "stream"], default-features = false }
+eventsource-stream = { version = "0.2" }
+
+# ── Utils ─────────────────────────────────────────────────────
+uuid         = { version = "1", features = ["v4"] }
+
+# ── Workspace crates ──────────────────────────────────────────
+wuhu-core      = { path = "crates/wuhu-core" }
+wuhu-engine    = { path = "crates/wuhu-engine" }
+wuhu-compress  = { path = "crates/wuhu-compress" }
+wuhu-providers = { path = "crates/wuhu-providers" }

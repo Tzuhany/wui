@@ -1,0 +1,27 @@
+[package]
+name        = "wuhu-providers"
+description = "LLM provider adapters for the Wuhu agent framework (Anthropic, OpenAI)."
+version.workspace      = true
+edition.workspace      = true
+license.workspace      = true
+repository.workspace   = true
+keywords.workspace     = true
+categories.workspace   = true
+rust-version.workspace = true
+
+[features]
+default    = []
+anthropic  = ["dep:reqwest", "dep:eventsource-stream"]
+openai     = ["dep:reqwest", "dep:eventsource-stream"]
+
+[dependencies]
+wuhu-core  = { workspace = true }
+
+serde      = { workspace = true }
+serde_json = { workspace = true }
+thiserror  = { workspace = true }
+futures    = { workspace = true }
+tracing    = { workspace = true }
+
+reqwest             = { workspace = true, optional = true }
+eventsource-stream  = { workspace = true, optional = true }

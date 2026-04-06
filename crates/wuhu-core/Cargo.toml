@@ -1,0 +1,22 @@
+[package]
+name        = "wuhu-core"
+description = "Core traits and types for the Wuhu agent framework."
+version.workspace     = true
+edition.workspace     = true
+license.workspace     = true
+repository.workspace  = true
+keywords.workspace    = true
+categories.workspace  = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow       = { workspace = true }
+async-trait  = { workspace = true }
+futures      = { workspace = true }
+serde        = { workspace = true }
+serde_json   = { workspace = true }
+thiserror    = { workspace = true }
+tokio        = { workspace = true }
+tokio-util   = { workspace = true }
+tracing      = { workspace = true }
+uuid         = { workspace = true }
