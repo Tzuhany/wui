@@ -254,16 +254,20 @@ fn make_ctx(
     tool_id:   String,
     tool_name: String,
 ) -> ToolCtx {
+    // Clone once here so the closure captures owned Strings rather than
+    // cloning on every ctx.report() call.
+    let id_cap   = tool_id.clone();
+    let name_cap = tool_name.clone();
     ToolCtx {
         cancel,
         messages,
         on_progress: Box::new(move |text: String| {
-            tracing::debug!(tool = %tool_name, progress = %text);
+            tracing::debug!(tool = %name_cap, progress = %text);
             // Non-blocking send — a full channel drops the event rather than
             // blocking the tool. Progress is best-effort.
             let _ = tx.try_send(AgentEvent::ToolProgress {
-                tool_id:   tool_id.clone(),
-                tool_name: tool_name.clone(),
+                tool_id:   id_cap.clone(),
+                tool_name: name_cap.clone(),
                 text,
             });
         }),

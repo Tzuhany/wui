@@ -457,9 +457,9 @@ async fn run_loop(
                         });
 
                         match authorize_tool(&config, id.clone(), name.clone(), &input, tx, &mut messages).await {
-                            Err(done) => {
-                                emit_tool_event(&done, tx).await;
-                                completed_map.insert(done.id.clone(), done);
+                            Err(denied) => {
+                                emit_tool_event(&denied, tx).await;
+                                completed_map.insert(denied.id.clone(), denied);
                             }
                             Ok(()) => {
                                 let history_snap: Arc<[Message]> = messages.as_slice().into();
@@ -578,12 +578,7 @@ async fn run_loop(
 
         // ── Stop condition ─────────────────────────────────────────
         if stop_reason == StopReason::EndTurn {
-            let last_text = messages.iter().rev()
-                .find(|m| m.role == Role::Assistant)
-                .and_then(|m| m.content.iter().find_map(|b| {
-                    if let ContentBlock::Text { text } = b { Some(text.as_str()) } else { None }
-                }))
-                .unwrap_or("");
+            let last_text = last_assistant_text(&messages);
 
             if let HookDecision::Block { reason } = config.hooks.pre_complete(last_text).await {
                 messages.push(Message {
@@ -718,7 +713,10 @@ async fn authorize_tool(
 
             // Suspend until the human responds.
             let response = rx.await.unwrap_or_else(|_| {
-                wuhu_core::event::ControlResponse::deny(request_id, "session dropped")
+                wuhu_core::event::ControlResponse::deny(
+                    request_id,
+                    "control handle dropped before response was sent",
+                )
             });
 
             // Inject decision as a system message visible to the LLM.
@@ -750,6 +748,18 @@ async fn authorize_tool(
     }
 
     Ok(())
+}
+
+/// Extract the text content of the most recent assistant message.
+fn last_assistant_text(messages: &[Message]) -> &str {
+    messages.iter().rev()
+        .find_map(|m| {
+            if m.role != Role::Assistant { return None; }
+            m.content.iter().find_map(|b| {
+                if let ContentBlock::Text { text } = b { Some(text.as_str()) } else { None }
+            })
+        })
+        .unwrap_or("")
 }
 
 /// Append a deferred-tools listing to the system prompt when needed.

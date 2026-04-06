@@ -55,6 +55,15 @@ impl Message {
             content: vec![ContentBlock::Text { text: text.into() }],
         }
     }
+
+    /// Construct a message with an explicit id.
+    ///
+    /// Use when reconstructing messages from storage (checkpoints, databases)
+    /// where the original id must be preserved for continuity or auditing.
+    /// For new messages, prefer the role-specific constructors.
+    pub fn with_id(id: impl Into<String>, role: Role, content: Vec<ContentBlock>) -> Self {
+        Self { id: id.into(), role, content }
+    }
 }
 
 /// Who produced this message.

@@ -11,6 +11,8 @@
 // stops at the first Block decision. Register multiple hooks freely.
 // ============================================================================
 
+use std::collections::HashSet;
+
 use async_trait::async_trait;
 use serde_json::Value;
 
@@ -105,7 +107,7 @@ impl HookDecision {
 ///     .build()
 /// ```
 pub struct DenyList {
-    denied: Vec<String>,
+    denied: HashSet<String>,
 }
 
 impl DenyList {
@@ -122,7 +124,7 @@ impl Hook for DenyList {
 
     async fn evaluate(&self, event: &HookEvent<'_>) -> HookDecision {
         if let HookEvent::PreToolUse { name, .. } = event {
-            if self.denied.iter().any(|d| d == name) {
+            if self.denied.contains(*name) {
                 return HookDecision::block(
                     format!("tool '{name}' is not allowed in this context")
                 );

@@ -205,9 +205,18 @@ impl SseParser {
                     }
                     "input_json_delta" => {
                         // Resolve the tool_use_id by content-block index.
-                        let id = self.tool_index.get(&index)
-                            .cloned()
-                            .unwrap_or_else(|| index.to_string()); // fallback: should not happen
+                        let id = match self.tool_index.get(&index) {
+                            Some(id) => id.clone(),
+                            None => {
+                                // This should never happen — the provider sent
+                                // input_json_delta for an index we never saw a
+                                // content_block_start for.
+                                tracing::error!(
+                                    index, "input_json_delta for unknown content-block index"
+                                );
+                                format!("unknown_tool_{index}")
+                            }
+                        };
                         let chunk = v["delta"]["partial_json"].as_str().unwrap_or("").to_string();
                         Ok(Some(StreamEvent::ToolInputDelta { id, chunk }))
                     }
