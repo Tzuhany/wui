@@ -175,7 +175,8 @@ impl CompressPipeline {
     // ── L2: Collapse ──────────────────────────────────────────────────────────
     //
     // Keep the most recent `keep` messages intact; fold everything older into
-    // a Compressed placeholder.
+    // a Collapsed placeholder. The original messages survive elsewhere —
+    // this is a reversible operation (in principle).
 
     fn l2_collapse(&self, messages: &[Message]) -> Vec<Message> {
         let keep = self.keep_count(messages.len());
@@ -185,16 +186,22 @@ impl CompressPipeline {
         }
 
         let (old, recent) = messages.split_at(messages.len() - keep);
-        let folded_count  = old.len();
+        let folded_count  = old.len() as u32;
+
+        // Record the ID range so storage-aware applications can re-expand.
+        let first_id = old.first().map(|m| m.id.clone());
+        let last_id  = old.last().map(|m| m.id.clone());
 
         let placeholder = Message {
             id:      uuid::Uuid::new_v4().to_string(),
             role:    Role::System,
-            content: vec![ContentBlock::Compressed {
+            content: vec![ContentBlock::Collapsed {
                 summary: format!(
-                    "[{folded_count} earlier messages condensed to save context.]"
+                    "[{folded_count} earlier messages folded to save context.]"
                 ),
                 folded_count,
+                first_id,
+                last_id,
             }],
         };
 
@@ -270,10 +277,7 @@ impl CompressPipeline {
         let placeholder = Message {
             id:      uuid::Uuid::new_v4().to_string(),
             role:    Role::System,
-            content: vec![ContentBlock::Compressed {
-                summary,
-                folded_count: old.len(),
-            }],
+            content: vec![ContentBlock::CompactBoundary { summary }],
         };
 
         let mut result = vec![placeholder];
@@ -284,11 +288,12 @@ impl CompressPipeline {
 
 fn block_text(block: &ContentBlock) -> String {
     match block {
-        ContentBlock::Text       { text }              => text.clone(),
-        ContentBlock::Thinking   { text }              => text.clone(),
-        ContentBlock::ToolUse    { name, input, .. }   => format!("[Tool: {name}] {input}"),
-        ContentBlock::ToolResult { content, .. }       => content.clone(),
-        ContentBlock::Compressed { summary, .. }       => summary.clone(),
+        ContentBlock::Text             { text }          => text.clone(),
+        ContentBlock::Thinking         { text }          => text.clone(),
+        ContentBlock::ToolUse          { name, input, .. } => format!("[Tool: {name}] {input}"),
+        ContentBlock::ToolResult       { content, .. }   => content.clone(),
+        ContentBlock::Collapsed        { summary, .. }   => summary.clone(),
+        ContentBlock::CompactBoundary  { summary }       => summary.clone(),
     }
 }
 
@@ -458,7 +463,7 @@ mod tests {
         assert_eq!(out.len(), 6, "expected placeholder + 5 recent");
 
         // First message should be the Compressed placeholder.
-        if let ContentBlock::Compressed { folded_count, summary } = &out[0].content[0] {
+        if let ContentBlock::Collapsed { folded_count, summary, .. } = &out[0].content[0] {
             assert_eq!(*folded_count, 5);
             assert!(summary.contains('5'), "summary should mention folded count");
         } else {
@@ -477,7 +482,7 @@ mod tests {
         let out = p.l2_collapse(&messages);
         // keep = max(2, 1) = 2 → fold 6 → placeholder + 2 = 3
         assert_eq!(out.len(), 3, "expected placeholder + 2 recent");
-        if let ContentBlock::Compressed { folded_count, .. } = &out[0].content[0] {
+        if let ContentBlock::Collapsed { folded_count, .. } = &out[0].content[0] {
             assert_eq!(*folded_count, 6);
         }
     }
@@ -493,7 +498,7 @@ mod tests {
         let out = p.l2_collapse(&messages);
         // keep = max(1, 8) = 8 → fold 2 → placeholder + 8 = 9
         assert_eq!(out.len(), 9);
-        if let ContentBlock::Compressed { folded_count, .. } = &out[0].content[0] {
+        if let ContentBlock::Collapsed { folded_count, .. } = &out[0].content[0] {
             assert_eq!(*folded_count, 2);
         }
     }
@@ -607,7 +612,7 @@ mod tests {
                 assert!(out.len() < messages.len(), "L2 should reduce message count");
                 assert!(freed > 0);
                 // First message should be the placeholder.
-                assert!(matches!(out[0].content[0], ContentBlock::Compressed { .. }));
+                assert!(matches!(out[0].content[0], ContentBlock::Collapsed { .. }));
             }
             Some((_, method, _)) => panic!("expected Collapse, got {method:?}"),
             None => panic!("expected L2 compression"),

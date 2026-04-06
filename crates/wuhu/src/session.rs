@@ -34,8 +34,9 @@ use futures::StreamExt;
 use wuhu_core::checkpoint::{Checkpoint, SessionSnapshot};
 use wuhu_core::event::AgentEvent;
 use wuhu_core::message::Message;
-use wuhu_engine::{HookRunner, RunConfig, SessionPermissions, ToolRegistry, run};
+use wuhu_engine::{HookRunner, RunConfig, SessionPermissions, run};
 
+use crate::agent::build_registry;
 use crate::builder::AgentConfig;
 
 /// An active multi-turn conversation.
@@ -154,7 +155,7 @@ impl Session {
     fn make_run_config(&self) -> RunConfig {
         RunConfig {
             provider:      self.config.provider.clone(),
-            tools:         Arc::new(ToolRegistry::new(self.config.tools.clone())),
+            tools:         Arc::new(build_registry(&self.config.tools)),
             hooks:         Arc::new(HookRunner::new(self.config.hooks.clone())),
             compress:      self.config.compress.clone(),
             permission:    self.config.permission.clone(),
@@ -167,6 +168,7 @@ impl Session {
             extensions:         self.config.extensions.clone(),
             initial_extensions: self.config.initial_extensions.clone(),
             spawn:              self.config.spawn.clone(),
+            query_chain:        self.config.query_chain.clone(),
         }
     }
 }

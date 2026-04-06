@@ -27,20 +27,25 @@ pub use wuhu_core::event::{
 pub use wuhu_core::hook::{DenyList, Hook, HookDecision, HookEvent};
 pub use wuhu_core::message::{ContentBlock, Message, Role};
 pub use wuhu_core::provider::Provider;
-pub use wuhu_core::tool::{FailureKind, SpawnFn, Tool, ToolCtx, ToolOutput};
+pub use wuhu_core::tool::{
+    Artifact, ArtifactContent, FailureKind, SpawnFn,
+    Tool, ToolCtx, ToolInput, ToolOutput,
+};
 pub use wuhu_core::checkpoint::{Checkpoint, InMemory, SessionSnapshot};
 pub use wuhu_core::memory::{Memory, MemoryEntry, NewMemory};
-pub use wuhu_engine::PermissionMode;
+pub use wuhu_engine::{PermissionMode, QueryChain};
 pub use wuhu_compress::CompressPipeline;
 
 /// The prelude. `use wuhu::prelude::*` to bring the most-used types into scope.
 pub mod prelude {
     pub use super::{
         Agent, AgentEvent, AgentError, AgentBuilder,
+        Artifact, ArtifactContent,
         ControlResponse, CompressPipeline,
         DenyList, Hook, HookDecision,
-        InMemory, Message, PermissionMode,
-        Provider, RunStopReason, Session, Tool, ToolCtx, ToolOutput,
+        InMemory, Message, PermissionMode, QueryChain,
+        Provider, RunStopReason, Session,
+        Tool, ToolCtx, ToolInput, ToolOutput,
     };
     pub use futures::StreamExt;
 }

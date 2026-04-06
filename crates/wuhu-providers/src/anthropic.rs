@@ -301,7 +301,10 @@ fn blocks_to_json(blocks: &[ContentBlock]) -> Value {
             "content":     content,
             "is_error":    is_error,
         })),
-        ContentBlock::Compressed { summary, .. } => Some(json!({"type":"text","text":summary})),
+        // Framework compression markers are translated to plain text so the LLM
+        // sees the summary as part of the conversation context.
+        ContentBlock::Collapsed       { summary, .. } => Some(json!({"type":"text","text":summary})),
+        ContentBlock::CompactBoundary { summary }     => Some(json!({"type":"text","text":summary})),
     }).collect())
 }
 

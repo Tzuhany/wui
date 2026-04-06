@@ -15,7 +15,7 @@ use wuhu_core::hook::Hook;
 use wuhu_core::provider::Provider;
 use wuhu_core::tool::{SpawnFn, Tool};
 use wuhu_compress::CompressPipeline;
-use wuhu_engine::PermissionMode;
+use wuhu_engine::{PermissionMode, QueryChain};
 
 use crate::Agent;
 
@@ -35,6 +35,7 @@ pub struct AgentConfig {
     pub extensions:         HashMap<String, serde_json::Value>,
     pub initial_extensions: HashMap<String, serde_json::Value>,
     pub spawn:              Option<SpawnFn>,
+    pub query_chain:        Option<QueryChain>,
 }
 
 /// Fluent builder for `Agent`.
@@ -60,6 +61,7 @@ impl AgentBuilder {
                 extensions:         HashMap::new(),
                 initial_extensions: HashMap::new(),
                 spawn:              None,
+                query_chain:        None,
             },
         }
     }
@@ -174,6 +176,15 @@ impl AgentBuilder {
     /// ```
     pub fn initial_extension(mut self, key: impl Into<String>, value: impl Into<serde_json::Value>) -> Self {
         self.config.initial_extensions.insert(key.into(), value.into());
+        self
+    }
+
+    /// Set the sub-agent chain for depth tracking.
+    ///
+    /// Pass `parent_chain.child()?` when building a sub-agent to inherit
+    /// the chain ID and enforce the depth ceiling.
+    pub fn query_chain(mut self, chain: QueryChain) -> Self {
+        self.config.query_chain = Some(chain);
         self
     }
 

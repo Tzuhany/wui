@@ -1,28 +1,36 @@
 // ============================================================================
 // Tool — the agent's hands.
 //
-// Tools are stateless. They are Send + Sync + 'static so the executor can
-// spawn them freely across tokio tasks without lifetime friction.
-//
-// State lives in ToolCtx, not in the tool. A tool is pure logic: given an
-// input and a context, produce an output. That is all.
+// Tools are stateless, Send + Sync + 'static. The executor spawns them freely
+// across tokio tasks without lifetime friction. State lives in ToolCtx.
 //
 // ── is_concurrent_for(input) ──────────────────────────────────────────────────
 //
-// Concurrency is a per-invocation decision, not a per-tool-type decision.
-// A shell tool, for example, can allow read-only commands to run in parallel
-// while serialising writes. The input is inspected at submission time; the
-// executor routes accordingly.
+// Concurrency is a per-invocation decision. A shell tool can run read-only
+// commands in parallel while serialising writes. The input is inspected at
+// submission time; the executor routes accordingly.
 //
-// ── ToolOutput and FailureKind ────────────────────────────────────────────────
+// ── FailureKind ───────────────────────────────────────────────────────────────
 //
-// When a tool fails, the kind of failure matters. A schema validation error
-// suggests the LLM should retry with corrected arguments. A permission denial
-// means it should stop and explain. An execution error might be retried after
-// fixing the underlying condition.
+// A schema error suggests the LLM should retry with corrected arguments.
+// A permission denial means it should stop and explain.
+// An execution error might be retried after fixing the underlying condition.
 //
 // FailureKind gives the harness — and the LLM — structured information to
-// act on, rather than a generic `is_error: bool`.
+// act on, rather than a generic boolean.
+//
+// ── Artifact ──────────────────────────────────────────────────────────────────
+//
+// Tools can produce more than text. An artifact is any discrete output that
+// warrants separate delivery: a generated file, a rendered chart, a binary
+// blob. Artifacts travel alongside ToolOutput but are emitted as their own
+// AgentEvent so callers can route them independently.
+//
+// ── ToolInput ────────────────────────────────────────────────────────────────
+//
+// Every tool's call() receives a raw serde_json::Value. ToolInput wraps it
+// with typed accessors so each extraction is one clear line instead of
+// nested match arms and unwrap chains.
 // ============================================================================
 
 use std::sync::Arc;
@@ -34,6 +42,8 @@ use serde_json::Value;
 
 use crate::message::Message;
 
+// ── Tool trait ────────────────────────────────────────────────────────────────
+
 /// The interface every tool implements.
 #[async_trait]
 pub trait Tool: Send + Sync + 'static {
@@ -43,8 +53,8 @@ pub trait Tool: Send + Sync + 'static {
     /// One-line description shown to the LLM in the tool listing.
     fn description(&self) -> &str;
 
-    /// Full usage instructions. May be loaded lazily via a ToolSearch tool
-    /// if `defer_loading()` returns true — only injected into context when
+    /// Full usage instructions. May be loaded lazily via `ToolSearch` when
+    /// `defer_loading()` returns `true` — injected into context only when
     /// the LLM explicitly requests details.
     fn prompt(&self) -> String;
 
@@ -52,31 +62,29 @@ pub trait Tool: Send + Sync + 'static {
     ///
     /// The executor validates every invocation against this schema before
     /// calling `call()`. Invalid input produces an immediate error result
-    /// that the LLM sees and can self-correct from — `call()` is never
-    /// invoked with malformed arguments.
+    /// that the LLM sees and can self-correct from.
     fn input_schema(&self) -> Value;
 
     /// Whether to defer this tool's full description until requested.
     ///
     /// When `true`, only `name()` and `description()` appear in the initial
-    /// system prompt. The LLM must call `ToolSearch` to fetch `prompt()` and
-    /// `input_schema()` before it can use the tool. Useful for large tool
-    /// libraries where injecting every schema would consume too many tokens.
+    /// system prompt. The LLM calls `ToolSearch` to load the full schema.
+    /// Use this for large tool libraries where every schema would consume
+    /// too many tokens.
     fn defer_loading(&self) -> bool {
         false
     }
 
-    /// A short hint for the ToolSearch tool (3–10 words).
-    ///
-    /// Only relevant when `defer_loading()` returns `true`.
+    /// A short hint for `ToolSearch` (3–10 words describing what this tool
+    /// does). Only used when `defer_loading()` returns `true`.
     fn search_hint(&self) -> Option<&str> {
         None
     }
 
     /// Whether this tool has no observable side effects.
     ///
-    /// Defaults to `false` (assume the tool mutates state). Override to
-    /// return `true` for pure read operations: web search, file read, etc.
+    /// Defaults to `false`. Override to return `true` for pure read
+    /// operations: web search, file read, etc.
     ///
     /// Used by `PermissionMode::Readonly`: only tools returning `true` are
     /// permitted; all others are blocked without prompting the user.
@@ -87,8 +95,7 @@ pub trait Tool: Send + Sync + 'static {
     /// Whether this specific invocation can run concurrently with others.
     ///
     /// Defaults to `true`. Override to inspect `input` when the safety
-    /// decision depends on arguments — e.g. a shell tool that runs read-only
-    /// commands concurrently but serialises writes:
+    /// decision depends on arguments:
     ///
     /// ```rust,ignore
     /// fn is_concurrent_for(&self, input: &Value) -> bool {
@@ -106,8 +113,7 @@ pub trait Tool: Send + Sync + 'static {
     /// Execute the tool.
     ///
     /// Called only after input has been validated against `input_schema()`.
-    /// `ctx` provides the conversation history, a cancellation token, and
-    /// a progress reporter.
+    /// `ctx` provides the conversation history, cancellation, and progress.
     async fn call(&self, input: Value, ctx: &ToolCtx) -> ToolOutput;
 }
 
@@ -120,14 +126,10 @@ pub struct ToolCtx {
 
     /// The conversation history at the time of this invocation (read-only).
     ///
-    /// `Arc<[Message]>` rather than `Vec<Message>`: the history is shared
-    /// across all concurrent tool invocations without copying. Clone the Arc
-    /// to pass it around cheaply; call `.to_vec()` only if you need mutation.
+    /// `Arc<[Message]>` — shared across concurrent tools without copying.
     pub messages: Arc<[Message]>,
 
     /// Report incremental progress to the stream.
-    ///
-    /// Each call emits a log line; the framework forwards it as a trace event.
     pub on_progress: Box<dyn Fn(String) + Send + Sync>,
 
     /// Sub-agent spawn capability, if configured.
@@ -150,9 +152,8 @@ impl ToolCtx {
 
 /// The closure type used to spawn sub-agents.
 ///
-/// Captured by the engine after `RunConfig` is constructed and injected
-/// into `ToolCtx` at execution time. The `Tool` trait never imports engine
-/// types — it depends only on `wuhu-core`.
+/// Injected into `ToolCtx` at execution time. The `Tool` trait depends only
+/// on `wuhu-core` — it never imports engine types directly.
 pub type SpawnFn =
     Arc<dyn Fn(String) -> BoxFuture<'static, anyhow::Result<String>> + Send + Sync>;
 
@@ -163,50 +164,74 @@ pub type SpawnFn =
 /// When the tool succeeds, `failure` is `None`.
 /// When it fails, `failure` carries the reason — not just a boolean — so the
 /// harness and the LLM can respond appropriately to each failure kind.
-#[derive(Debug, Clone)]
+///
+/// Tools may attach `artifacts` (files, images, charts) and `extra_messages`
+/// (additional context to inject into the conversation) alongside the primary
+/// text `content`. These are processed after all tool results are collected.
+#[derive(Debug, Clone, Default)]
 pub struct ToolOutput {
     /// The content returned to the LLM (description, result, or error message).
     pub content: String,
     /// `None` on success. `Some(kind)` on failure.
     pub failure: Option<FailureKind>,
+    /// Artifacts produced by this tool: files, images, structured data.
+    ///
+    /// Emitted as `AgentEvent::Artifact` events so callers can handle them
+    /// independently from the text response (save to disk, render in UI, etc.).
+    pub artifacts: Vec<Artifact>,
+    /// Extra messages to inject into the conversation history after this turn.
+    ///
+    /// Use sparingly. Typical use: a tool that fetches documentation injects
+    /// a system message with the doc content so the LLM sees it in context
+    /// without the user having to ask again.
+    pub extra_messages: Vec<Message>,
 }
 
 impl ToolOutput {
-    // ── Public constructors ────────────────────────────────────────────────
+    // ── Constructors ──────────────────────────────────────────────────────
 
     /// Successful tool execution.
     pub fn success(content: impl Into<String>) -> Self {
-        Self { content: content.into(), failure: None }
+        Self { content: content.into(), ..Default::default() }
     }
 
     /// Failed execution — the tool ran but produced an error.
-    ///
-    /// This is the constructor tool implementors use. More specific failures
-    /// (schema violations, permission denials) are created by the engine.
     pub fn error(content: impl Into<String>) -> Self {
-        Self { content: content.into(), failure: Some(FailureKind::Execution) }
+        Self { content: content.into(), failure: Some(FailureKind::Execution), ..Default::default() }
     }
-
-    // ── Engine-internal constructors ───────────────────────────────────────
 
     /// The tool's input did not satisfy its JSON Schema.
     pub fn invalid_input(content: impl Into<String>) -> Self {
-        Self { content: content.into(), failure: Some(FailureKind::InvalidInput) }
+        Self { content: content.into(), failure: Some(FailureKind::InvalidInput), ..Default::default() }
     }
 
     /// The tool was not found in the registry.
     pub fn not_found(content: impl Into<String>) -> Self {
-        Self { content: content.into(), failure: Some(FailureKind::NotFound) }
+        Self { content: content.into(), failure: Some(FailureKind::NotFound), ..Default::default() }
     }
 
     /// The tool was blocked by a hook before execution.
     pub fn hook_blocked(content: impl Into<String>) -> Self {
-        Self { content: content.into(), failure: Some(FailureKind::HookBlocked) }
+        Self { content: content.into(), failure: Some(FailureKind::HookBlocked), ..Default::default() }
     }
 
     /// The tool was denied by the permission system.
     pub fn permission_denied(content: impl Into<String>) -> Self {
-        Self { content: content.into(), failure: Some(FailureKind::PermissionDenied) }
+        Self { content: content.into(), failure: Some(FailureKind::PermissionDenied), ..Default::default() }
+    }
+
+    // ── Builders ──────────────────────────────────────────────────────────
+
+    /// Attach artifacts to a successful result.
+    pub fn with_artifacts(mut self, artifacts: Vec<Artifact>) -> Self {
+        self.artifacts = artifacts;
+        self
+    }
+
+    /// Attach extra messages to inject into the conversation.
+    pub fn with_extra_messages(mut self, messages: Vec<Message>) -> Self {
+        self.extra_messages = messages;
+        self
     }
 
     // ── Accessors ─────────────────────────────────────────────────────────
@@ -226,13 +251,13 @@ impl ToolOutput {
 ///
 /// The harness and the LLM use this to decide how to recover:
 ///
-/// | Kind              | Typical recovery                                     |
-/// |-------------------|------------------------------------------------------|
-/// | `Execution`       | Surface the error; LLM decides whether to retry     |
-/// | `InvalidInput`    | Inject schema hints; LLM retries with correct args  |
-/// | `NotFound`        | Inform the LLM; do not retry                         |
-/// | `HookBlocked`     | Inject reason; LLM may seek an alternative approach |
-/// | `PermissionDenied`| Inject reason; LLM must not retry this tool         |
+/// | Kind              | Typical recovery                                      |
+/// |-------------------|-------------------------------------------------------|
+/// | `Execution`       | Surface the error; LLM decides whether to retry      |
+/// | `InvalidInput`    | Inject schema hints; LLM retries with correct args   |
+/// | `NotFound`        | Inform the LLM; do not retry                          |
+/// | `HookBlocked`     | Inject reason; LLM may seek an alternative approach  |
+/// | `PermissionDenied`| Inject reason; LLM must not retry this tool          |
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FailureKind {
@@ -246,4 +271,145 @@ pub enum FailureKind {
     HookBlocked,
     /// The permission system denied the tool call.
     PermissionDenied,
+}
+
+// ── Artifact ──────────────────────────────────────────────────────────────────
+
+/// A discrete output produced by a tool — beyond the primary text content.
+///
+/// Artifacts are emitted as `AgentEvent::Artifact` events, separate from
+/// `ToolDone`, so callers can route them to the right destination:
+/// save files to disk, render images in a UI, index structured data, etc.
+///
+/// The `kind` field is open-ended — the framework does not interpret it.
+/// Producers and consumers agree on their own convention:
+///   `"file"`, `"image"`, `"chart"`, `"json"`, `"diff"`, ...
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Artifact {
+    /// Open-ended type tag. The framework does not interpret this.
+    pub kind: String,
+    /// Human-readable title for display.
+    pub title: String,
+    /// MIME type, if known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mime_type: Option<String>,
+    /// The actual content: inline bytes or a URI reference.
+    pub content: ArtifactContent,
+}
+
+/// The data carried by an `Artifact`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ArtifactContent {
+    /// Raw bytes embedded directly.
+    Inline { data: Vec<u8> },
+    /// A reference to external storage (URI, path, object key, etc.).
+    Reference { uri: String },
+}
+
+impl Artifact {
+    /// Construct a text artifact (UTF-8 content as inline bytes).
+    pub fn text(kind: impl Into<String>, title: impl Into<String>, text: impl Into<String>) -> Self {
+        Self {
+            kind:      kind.into(),
+            title:     title.into(),
+            mime_type: Some("text/plain".to_string()),
+            content:   ArtifactContent::Inline { data: text.into().into_bytes() },
+        }
+    }
+
+    /// Construct a file artifact from raw bytes.
+    pub fn bytes(
+        kind:      impl Into<String>,
+        title:     impl Into<String>,
+        mime_type: impl Into<String>,
+        data:      Vec<u8>,
+    ) -> Self {
+        Self {
+            kind:      kind.into(),
+            title:     title.into(),
+            mime_type: Some(mime_type.into()),
+            content:   ArtifactContent::Inline { data },
+        }
+    }
+
+    /// Construct a reference artifact (the content lives elsewhere).
+    pub fn reference(
+        kind:  impl Into<String>,
+        title: impl Into<String>,
+        uri:   impl Into<String>,
+    ) -> Self {
+        Self {
+            kind:      kind.into(),
+            title:     title.into(),
+            mime_type: None,
+            content:   ArtifactContent::Reference { uri: uri.into() },
+        }
+    }
+}
+
+// ── ToolInput ─────────────────────────────────────────────────────────────────
+
+/// Ergonomic wrapper for extracting typed fields from a JSON tool input.
+///
+/// Reduces boilerplate in `Tool::call()` implementations:
+///
+/// ```rust,ignore
+/// async fn call(&self, input: Value, _ctx: &ToolCtx) -> ToolOutput {
+///     let inp = ToolInput(&input);
+///     let url   = match inp.required_str("url")   { Ok(v) => v, Err(e) => return ToolOutput::error(e) };
+///     let limit = inp.optional_u64("limit").unwrap_or(100);
+///     ...
+/// }
+/// ```
+pub struct ToolInput<'a>(pub &'a Value);
+
+impl<'a> ToolInput<'a> {
+    /// Extract a required, non-empty string field.
+    pub fn required_str(&self, key: &str) -> Result<&'a str, String> {
+        match self.0[key].as_str().filter(|s| !s.is_empty()) {
+            Some(s) => Ok(s),
+            None    => Err(format!("'{key}' is required")),
+        }
+    }
+
+    /// Extract an optional string field. Returns `None` when absent or null.
+    pub fn optional_str(&self, key: &str) -> Option<&'a str> {
+        self.0[key].as_str()
+    }
+
+    /// Extract a required boolean field.
+    pub fn required_bool(&self, key: &str) -> Result<bool, String> {
+        self.0[key].as_bool().ok_or_else(|| format!("'{key}' is required (bool)"))
+    }
+
+    /// Extract an optional boolean field.
+    pub fn optional_bool(&self, key: &str) -> Option<bool> {
+        self.0[key].as_bool()
+    }
+
+    /// Extract a required integer field.
+    pub fn required_u64(&self, key: &str) -> Result<u64, String> {
+        self.0[key].as_u64().ok_or_else(|| format!("'{key}' is required (integer)"))
+    }
+
+    /// Extract an optional integer field.
+    pub fn optional_u64(&self, key: &str) -> Option<u64> {
+        self.0[key].as_u64()
+    }
+
+    /// Extract an optional float field.
+    pub fn optional_f64(&self, key: &str) -> Option<f64> {
+        self.0[key].as_f64()
+    }
+
+    /// Extract an optional array field.
+    pub fn optional_array(&self, key: &str) -> Option<&'a Vec<Value>> {
+        self.0[key].as_array()
+    }
+
+    /// Extract an optional object field.
+    pub fn optional_object(&self, key: &str) -> Option<&'a serde_json::Map<String, Value>> {
+        self.0[key].as_object()
+    }
 }

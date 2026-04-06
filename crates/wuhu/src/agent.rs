@@ -20,7 +20,7 @@ use wuhu_core::event::AgentEvent;
 use wuhu_core::message::Message;
 use wuhu_core::provider::Provider;
 use wuhu_core::tool::SpawnFn;
-use wuhu_engine::{HookRunner, RunConfig, SessionPermissions, ToolRegistry, run};
+use wuhu_engine::{HookRunner, RunConfig, SessionPermissions, ToolRegistry, ToolSearch, run};
 
 use crate::builder::{AgentBuilder, AgentConfig};
 use crate::session::Session;
@@ -148,7 +148,7 @@ impl Agent {
     fn make_run_config(&self) -> RunConfig {
         RunConfig {
             provider:      self.config.provider.clone(),
-            tools:         Arc::new(ToolRegistry::new(self.config.tools.clone())),
+            tools:         Arc::new(build_registry(&self.config.tools)),
             hooks:         Arc::new(HookRunner::new(self.config.hooks.clone())),
             compress:      self.config.compress.clone(),
             permission:    self.config.permission.clone(),
@@ -161,6 +161,24 @@ impl Agent {
             extensions:         self.config.extensions.clone(),
             initial_extensions: self.config.initial_extensions.clone(),
             spawn:              self.config.spawn.clone(),
+            query_chain:        self.config.query_chain.clone(),
         }
     }
+}
+
+/// Build the tool registry, automatically injecting `ToolSearch` when
+/// deferred tools are present. The LLM needs ToolSearch to discover and
+/// load their schemas before calling them.
+pub(crate) fn build_registry(tools: &[Arc<dyn wuhu_core::tool::Tool>]) -> ToolRegistry {
+    let has_deferred = tools.iter().any(|t| t.defer_loading());
+    if !has_deferred {
+        return ToolRegistry::new(tools.to_vec());
+    }
+    let deferred: Vec<_> = tools.iter()
+        .filter(|t| t.defer_loading())
+        .cloned()
+        .collect();
+    let mut all = tools.to_vec();
+    all.push(Arc::new(ToolSearch::new(deferred)));
+    ToolRegistry::new(all)
 }

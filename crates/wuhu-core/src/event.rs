@@ -137,6 +137,19 @@ pub enum AgentEvent {
     /// `handle.deny("reason")`, or `handle.deny_always("reason")` to resume.
     Control(ControlHandle),
 
+    // ── Artifacts ─────────────────────────────────────────────────────
+    /// A discrete output produced by a tool — a file, image, chart, etc.
+    ///
+    /// Emitted before `ToolDone` so callers receive the artifact while the
+    /// tool result is still being processed. Route it to wherever it belongs:
+    /// disk, object storage, a UI renderer.
+    Artifact {
+        /// ID of the tool call that produced this artifact.
+        tool_id:   String,
+        tool_name: String,
+        artifact:  crate::tool::Artifact,
+    },
+
     // ── Context management ────────────────────────────────────────────
     /// Context compression was applied.
     Compressed {

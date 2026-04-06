@@ -35,5 +35,8 @@ pub mod prelude {
     pub use crate::memory::{Memory, MemoryEntry, MemoryError, NewMemory};
     pub use crate::message::{ContentBlock, Message, Role};
     pub use crate::provider::{ChatRequest, Provider, ProviderError, ToolDef};
-    pub use crate::tool::{FailureKind, SpawnFn, Tool, ToolCtx, ToolOutput};
+    pub use crate::tool::{
+        Artifact, ArtifactContent, FailureKind, SpawnFn,
+        Tool, ToolCtx, ToolInput, ToolOutput,
+    };
 }

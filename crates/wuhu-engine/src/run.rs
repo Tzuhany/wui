@@ -70,6 +70,7 @@ use wuhu_compress::CompressPipeline;
 use crate::executor::{CompletedTool, PendingTool, ToolExecutor};
 use crate::hooks::HookRunner;
 use crate::permission::{self, PermissionMode, PermissionOutcome, SessionPermissions};
+use crate::query_chain::QueryChain;
 use crate::registry::ToolRegistry;
 
 /// Maximum number of events buffered between the loop and the caller.
@@ -108,7 +109,14 @@ pub struct RunConfig {
     /// conflict). On all later iterations they are absent from the request.
     pub initial_extensions: HashMap<String, serde_json::Value>,
 
-    pub spawn:              Option<SpawnFn>,
+    pub spawn: Option<SpawnFn>,
+
+    /// Sub-agent depth tracker. `None` for top-level runs.
+    ///
+    /// When set, the engine logs the chain ID and depth for every iteration
+    /// and rejects runs where `chain.depth > chain.max_depth`. Pass
+    /// `chain.child()?` when spawning sub-agents to enforce the ceiling.
+    pub query_chain: Option<QueryChain>,
 }
 
 // ── Public entry point ────────────────────────────────────────────────────────
@@ -140,9 +148,11 @@ async fn run_task(
 ) {
     let span = tracing::info_span!(
         "agent.run",
-        model     = %config.model,
-        max_iter  = config.max_iter,
-        tools     = config.tools.len(),
+        model      = %config.model,
+        max_iter   = config.max_iter,
+        tools      = config.tools.len(),
+        chain_id   = config.query_chain.as_ref().map(|c| c.chain_id.as_str()).unwrap_or(""),
+        depth      = config.query_chain.as_ref().map(|c| c.depth).unwrap_or(0),
     );
     let result = run_loop(config, messages, cancel, &tx).instrument(span).await;
     match result {
@@ -159,6 +169,23 @@ async fn run_loop(
     cancel:       CancellationToken,
     tx:           &mpsc::Sender<AgentEvent>,
 ) -> Result<RunSummary, AgentError> {
+    // Enforce sub-agent depth ceiling before doing any work.
+    if let Some(chain) = &config.query_chain {
+        if chain.depth > chain.max_depth {
+            return Err(AgentError {
+                message:   format!(
+                    "sub-agent depth limit {} reached (chain {})",
+                    chain.max_depth, chain.chain_id,
+                ),
+                retryable: false,
+            });
+        }
+    }
+
+    // Augment the system prompt with deferred tool listings once, before the loop.
+    // This tells the LLM which additional tools exist so it can call ToolSearch.
+    let system = augment_system(&config.system, &config.tools);
+
     let mut total_usage = TokenUsage::default();
     let mut iterations  = 0u32;
 
@@ -213,7 +240,7 @@ async fn run_loop(
             model:       config.model.clone(),
             max_tokens:  config.max_tokens,
             temperature: config.temperature,
-            system:      config.system.clone(),
+            system:      system.clone(),
             messages:    messages.clone(),
             tools:       config.tools.tool_defs(),
             extensions,
@@ -464,15 +491,28 @@ async fn run_loop(
         // causes an API error. We reconstruct submission order from
         // `submission_order` + `completed_map` regardless of completion order.
         if !submission_order.is_empty() {
-            let result_blocks: Vec<ContentBlock> = submission_order.iter()
+            // Collect in submission order — drain the map.
+            let done_tools: Vec<CompletedTool> = submission_order.iter()
                 .filter_map(|id| completed_map.remove(id))
-                .map(|done| {
-                    let is_error = done.output.is_error();
-                    ContentBlock::ToolResult {
-                        tool_use_id: done.id,
-                        content:     done.output.content,
-                        is_error,
-                    }
+                .collect();
+
+            // Emit artifacts before the ToolResult so callers receive them
+            // while the tool result is still being processed.
+            for done in &done_tools {
+                for artifact in &done.output.artifacts {
+                    tx.send(AgentEvent::Artifact {
+                        tool_id:   done.id.clone(),
+                        tool_name: done.name.clone(),
+                        artifact:  artifact.clone(),
+                    }).await.ok();
+                }
+            }
+
+            let result_blocks: Vec<ContentBlock> = done_tools.iter()
+                .map(|done| ContentBlock::ToolResult {
+                    tool_use_id: done.id.clone(),
+                    content:     done.output.content.clone(),
+                    is_error:    done.output.is_error(),
                 })
                 .collect();
 
@@ -482,6 +522,13 @@ async fn run_loop(
                     role:    Role::User,
                     content: result_blocks,
                 });
+            }
+
+            // Inject extra messages after the tool results.
+            // These are additional context the tools want the LLM to see
+            // on the next turn (e.g. injected documentation, memory recall).
+            for done in done_tools {
+                messages.extend(done.output.extra_messages);
             }
         }
 
@@ -575,4 +622,32 @@ async fn emit_tool_event(done: &CompletedTool, tx: &mpsc::Sender<AgentEvent>) {
 /// Create an immediately-completed failed tool (no execution, no timer).
 fn instant_failure(id: String, name: String, output: ToolOutput) -> CompletedTool {
     CompletedTool { id, name, output, ms: 0 }
+}
+
+/// Append a deferred-tools listing to the system prompt when needed.
+///
+/// If the registry has no deferred tools, returns the base unchanged.
+/// Otherwise appends an "## Additional tools" section so the LLM knows
+/// these tools exist and should call ToolSearch to get their schemas.
+fn augment_system(base: &str, registry: &ToolRegistry) -> String {
+    let deferred = registry.deferred_entries();
+    if deferred.is_empty() {
+        return base.to_string();
+    }
+
+    let listing = deferred.iter()
+        .map(|e| match &e.hint {
+            Some(h) => format!("- **{}**: {} ({})", e.name, e.description, h),
+            None    => format!("- **{}**: {}",       e.name, e.description),
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    format!(
+        "{base}\n\n\
+        ## Additional tools\n\
+        These tools are available but require loading. \
+        Call `ToolSearch` with the tool name or a keyword before using them:\n\n\
+        {listing}"
+    )
 }
