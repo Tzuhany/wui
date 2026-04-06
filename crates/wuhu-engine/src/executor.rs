@@ -176,10 +176,7 @@ impl ToolExecutor {
         while let Some(tool) = self.sequential.pop_front() {
             let start = Instant::now();
             let ctx   = make_ctx(self.cancel.clone(), tool.messages, self.spawn.clone());
-            let out = std::panic::AssertUnwindSafe(tool.impl_.call(tool.input, &ctx))
-                .catch_unwind()
-                .await
-                .unwrap_or_else(|_| ToolOutput::error("tool panicked unexpectedly"));
+            let out   = run_tool_safely(tool.impl_, tool.input, &ctx).await;
             let ms    = start.elapsed().as_millis() as u64;
             results.push(CompletedTool { id: tool.id, name: tool.name, output: out, ms });
         }
@@ -200,13 +197,7 @@ impl ToolExecutor {
         self.pending.spawn(async move {
             let start = Instant::now();
             let ctx   = make_ctx(cancel, messages, spawn);
-            // Wrap in catch_unwind so a panicking tool produces an error result
-            // rather than silently leaving a missing ToolResult in the history
-            // (which would cause a 400 on the next API call).
-            let out = std::panic::AssertUnwindSafe(impl_.call(input, &ctx))
-                .catch_unwind()
-                .await
-                .unwrap_or_else(|_| ToolOutput::error("tool panicked unexpectedly"));
+            let out   = run_tool_safely(impl_, input, &ctx).await;
             let ms    = start.elapsed().as_millis() as u64;
             (id, name, out, ms)
         });
@@ -214,6 +205,22 @@ impl ToolExecutor {
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
+
+/// Execute a tool, converting a panic into an error result.
+///
+/// A panicking tool must not leave a missing ToolResult in the history —
+/// that would cause a 400 on the next API call. `catch_unwind` ensures
+/// every submitted tool produces *some* output, even if it crashes.
+async fn run_tool_safely(
+    impl_: Arc<dyn Tool>,
+    input: serde_json::Value,
+    ctx:   &ToolCtx,
+) -> ToolOutput {
+    std::panic::AssertUnwindSafe(impl_.call(input, ctx))
+        .catch_unwind()
+        .await
+        .unwrap_or_else(|_| ToolOutput::error("tool panicked unexpectedly"))
+}
 
 fn make_ctx(
     cancel:   CancellationToken,

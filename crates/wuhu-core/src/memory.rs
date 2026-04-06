@@ -38,8 +38,10 @@ pub trait Memory: Send + Sync + 'static {
     /// `query` is typically the latest user message or a summary of recent
     /// context. The implementation decides how to interpret it.
     ///
-    /// The engine injects the returned entries into the system prompt before
-    /// each LLM call, ordered by `importance` descending.
+    /// The engine does **not** auto-inject these results. You are responsible
+    /// for deciding when and how recalled entries enter the agent's context —
+    /// either by prepending them to the system prompt before session creation,
+    /// or by returning them from a MemoryRecall tool.
     async fn recall(&self, query: &str) -> Result<Vec<MemoryEntry>, MemoryError>;
 
     /// Persist a new memory entry.

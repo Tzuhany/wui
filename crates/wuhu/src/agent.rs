@@ -20,7 +20,7 @@ use wuhu_core::event::AgentEvent;
 use wuhu_core::message::Message;
 use wuhu_core::provider::Provider;
 use wuhu_core::tool::SpawnFn;
-use wuhu_engine::{HookRunner, RunConfig, SessionPermissions, ToolRegistry, ToolSearch, run};
+use wuhu_engine::{HookRunner, QueryChain, RunConfig, SessionPermissions, ToolRegistry, ToolSearch, run};
 
 use crate::builder::{AgentBuilder, AgentConfig};
 use crate::session::Session;
@@ -133,11 +133,22 @@ impl Agent {
     /// It does not share conversation history with the parent — it receives
     /// only the prompt string and returns only the final text response.
     pub fn as_spawn_fn(&self) -> SpawnFn {
-        let agent = Arc::new(self.clone());
+        let config = self.config.clone();
         Arc::new(move |prompt: String| {
-            let agent = agent.clone();
+            let config = config.clone();
             Box::pin(async move {
-                agent.run(prompt).await
+                // Derive a child chain — increment depth from parent, or start
+                // a root chain if this agent has none. Fail fast if at the ceiling.
+                let child_chain = match &config.query_chain {
+                    Some(chain) => chain.child(),
+                    None        => QueryChain::root().child(),
+                }.map_err(|e| anyhow::anyhow!("{e}"))?;
+
+                // Build a one-off agent with the incremented chain.
+                let mut child_config = (*config).clone();
+                child_config.query_chain = Some(child_chain);
+                Agent { config: Arc::new(child_config) }
+                    .run(prompt).await
                     .map_err(|e| anyhow::anyhow!("{}", e.message))
             })
         })
@@ -146,23 +157,31 @@ impl Agent {
     // ── Internal ──────────────────────────────────────────────────────────────
 
     fn make_run_config(&self) -> RunConfig {
-        RunConfig {
-            provider:      self.config.provider.clone(),
-            tools:         Arc::new(build_registry(&self.config.tools)),
-            hooks:         Arc::new(HookRunner::new(self.config.hooks.clone())),
-            compress:      self.config.compress.clone(),
-            permission:    self.config.permission.clone(),
-            session_perms: Arc::new(SessionPermissions::new()),
-            system:        self.config.system.clone(),
-            model:         self.config.model.clone(),
-            max_tokens:    self.config.max_tokens,
-            temperature:   self.config.temperature,
-            max_iter:      self.config.max_iter,
-            extensions:         self.config.extensions.clone(),
-            initial_extensions: self.config.initial_extensions.clone(),
-            spawn:              self.config.spawn.clone(),
-            query_chain:        self.config.query_chain.clone(),
-        }
+        build_run_config(&self.config, Arc::new(SessionPermissions::new()))
+    }
+}
+
+/// Build a `RunConfig` from an `AgentConfig` with an explicit permission store.
+///
+/// `session_perms` is separated out so `Agent` (fresh perms each run) and
+/// `Session` (shared perms across turns) can use the same construction logic.
+pub(crate) fn build_run_config(config: &AgentConfig, session_perms: Arc<SessionPermissions>) -> RunConfig {
+    RunConfig {
+        provider:           config.provider.clone(),
+        tools:              Arc::new(build_registry(&config.tools)),
+        hooks:              Arc::new(HookRunner::new(config.hooks.clone())),
+        compress:           config.compress.clone(),
+        permission:         config.permission.clone(),
+        session_perms,
+        system:             config.system.clone(),
+        model:              config.model.clone(),
+        max_tokens:         config.max_tokens,
+        temperature:        config.temperature,
+        max_iter:           config.max_iter,
+        extensions:         config.extensions.clone(),
+        initial_extensions: config.initial_extensions.clone(),
+        spawn:              config.spawn.clone(),
+        query_chain:        config.query_chain.clone(),
     }
 }
 

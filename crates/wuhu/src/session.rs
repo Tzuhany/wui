@@ -34,9 +34,9 @@ use futures::StreamExt;
 use wuhu_core::checkpoint::{Checkpoint, SessionSnapshot};
 use wuhu_core::event::AgentEvent;
 use wuhu_core::message::Message;
-use wuhu_engine::{HookRunner, RunConfig, SessionPermissions, run};
+use wuhu_engine::{RunConfig, SessionPermissions, run};
 
-use crate::agent::build_registry;
+use crate::agent::build_run_config;
 use crate::builder::AgentConfig;
 
 /// An active multi-turn conversation.
@@ -126,8 +126,6 @@ impl Session {
                         let snapshot = SessionSnapshot {
                             session_id: sid.clone(),
                             messages:   updated,
-                            pending:    None,
-                            archive:    Vec::new(),
                         };
                         if let Err(e) = cp.save(&sid, &snapshot).await {
                             tracing::warn!(session_id = %sid, error = %e, "checkpoint save failed");
@@ -153,22 +151,6 @@ impl Session {
     }
 
     fn make_run_config(&self) -> RunConfig {
-        RunConfig {
-            provider:      self.config.provider.clone(),
-            tools:         Arc::new(build_registry(&self.config.tools)),
-            hooks:         Arc::new(HookRunner::new(self.config.hooks.clone())),
-            compress:      self.config.compress.clone(),
-            permission:    self.config.permission.clone(),
-            session_perms: self.session_perms.clone(),
-            system:        self.config.system.clone(),
-            model:         self.config.model.clone(),
-            max_tokens:    self.config.max_tokens,
-            temperature:   self.config.temperature,
-            max_iter:      self.config.max_iter,
-            extensions:         self.config.extensions.clone(),
-            initial_extensions: self.config.initial_extensions.clone(),
-            spawn:              self.config.spawn.clone(),
-            query_chain:        self.config.query_chain.clone(),
-        }
+        build_run_config(&self.config, self.session_perms.clone())
     }
 }

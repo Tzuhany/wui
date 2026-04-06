@@ -20,6 +20,7 @@ use wuhu_engine::{PermissionMode, QueryChain};
 use crate::Agent;
 
 /// All configuration needed to build an `Agent`.
+#[derive(Clone)]
 pub struct AgentConfig {
     pub provider:    Arc<dyn Provider>,
     pub tools:       Vec<Arc<dyn Tool>>,

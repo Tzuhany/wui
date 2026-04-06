@@ -318,131 +318,29 @@ async fn run_loop(
                         // ToolUse in the assistant message to have a matching
                         // ToolResult in the following user message — even when
                         // the tool is denied, blocked, or fails validation.
-                        // Add the ToolUse block NOW, before any deny `continue` paths.
+                        // Add the ToolUse block NOW, before any deny paths.
                         assistant_blocks.push(ContentBlock::ToolUse {
                             id:    id.clone(),
                             name:  name.clone(),
                             input: input.clone(),
                         });
 
-                        // Pre-tool hook.
-                        let decision = config.hooks.pre_tool_use(&name, &input).await;
-                        if let HookDecision::Block { reason } = decision {
-                            let done = instant_failure(
-                                id, name,
-                                ToolOutput::hook_blocked(reason),
-                            );
-                            emit_tool_event(&done, tx).await;
-                            completed_map.insert(done.id.clone(), done);
-                            continue;
-                        }
-
-                        // Session memory check — before the full permission dance.
-                        if config.session_perms.is_always_denied(&name).await {
-                            let done = instant_failure(
-                                id, name.clone(),
-                                ToolOutput::permission_denied(format!(
-                                    "tool '{name}' was previously denied for this session"
-                                )),
-                            );
-                            emit_tool_event(&done, tx).await;
-                            completed_map.insert(done.id.clone(), done);
-                            continue;
-                        }
-
-                        let tool_is_readonly = config.tools.get(&name)
-                            .map(|t| t.is_readonly())
-                            .unwrap_or(false);
-
-                        let ctrl_req = ControlRequest {
-                            id:   uuid::Uuid::new_v4().to_string(),
-                            kind: ControlKind::PermissionRequest {
-                                tool_name:   name.clone(),
-                                description: format!("call {name}"),
-                            },
-                        };
-
-                        if !config.session_perms.is_always_allowed(&name).await {
-                            match permission::check(&config.permission, &ctrl_req, tool_is_readonly) {
-                                PermissionOutcome::Allowed => {}
-
-                                PermissionOutcome::Denied { reason } => {
-                                    let done = instant_failure(
-                                        id, name,
-                                        ToolOutput::permission_denied(reason),
-                                    );
-                                    emit_tool_event(&done, tx).await;
-                                    completed_map.insert(done.id.clone(), done);
-                                    continue;
-                                }
-
-                                PermissionOutcome::NeedsApproval => {
-                                    let request_id    = ctrl_req.id.clone();
-                                    let (handle, rx)  = ControlHandle::new(ctrl_req);
-                                    tx.send(AgentEvent::Control(handle)).await.ok();
-
-                                    // Suspend until the human responds.
-                                    let response = rx.await.unwrap_or_else(|_| {
-                                        wuhu_core::event::ControlResponse::deny(
-                                            request_id,
-                                            "session dropped",
-                                        )
-                                    });
-
-                                    // Inject decision as a system message visible to the LLM.
-                                    let sys = permission::response_to_system_message(&response);
-                                    messages.push(Message {
-                                        id:      uuid::Uuid::new_v4().to_string(),
-                                        role:    Role::System,
-                                        content: vec![ContentBlock::Text { text: sys }],
-                                    });
-
-                                    match &response.decision {
-                                        ControlDecision::Deny { reason } => {
-                                            let done = instant_failure(
-                                                id, name,
-                                                ToolOutput::permission_denied(reason.clone()),
-                                            );
-                                            emit_tool_event(&done, tx).await;
-                                            completed_map.insert(done.id.clone(), done);
-                                            continue;
-                                        }
-
-                                        ControlDecision::DenyAlways { reason } => {
-                                            config.session_perms.set_always_deny(name.clone()).await;
-                                            let done = instant_failure(
-                                                id, name,
-                                                ToolOutput::permission_denied(reason.clone()),
-                                            );
-                                            emit_tool_event(&done, tx).await;
-                                            completed_map.insert(done.id.clone(), done);
-                                            continue;
-                                        }
-
-                                        ControlDecision::ApproveAlways => {
-                                            config.session_perms.set_always_allow(name.clone()).await;
-                                        }
-
-                                        ControlDecision::Approve { .. } => {}
-                                    }
-                                }
+                        match authorize_tool(&config, id.clone(), name.clone(), &input, tx, &mut messages).await {
+                            Err(done) => {
+                                emit_tool_event(&done, tx).await;
+                                completed_map.insert(done.id.clone(), done);
+                            }
+                            Ok(()) => {
+                                let history_snap: Arc<[Message]> = messages.as_slice().into();
+                                tracing::debug!(tool = %name, "tool dispatched");
+                                tx.send(AgentEvent::ToolStart {
+                                    id:    id.clone(),
+                                    name:  name.clone(),
+                                    input: input.clone(),
+                                }).await.ok();
+                                executor.submit(PendingTool { id, name, input, messages: history_snap });
                             }
                         }
-
-                        // The tool is approved — snapshot history and submit.
-                        let history_snap: Arc<[Message]> = messages.as_slice().into();
-                        tracing::debug!(tool = %name, "tool dispatched");
-                        tx.send(AgentEvent::ToolStart {
-                            id:    id.clone(),
-                            name:  name.clone(),
-                            input: input.clone(),
-                        }).await.ok();
-                        executor.submit(PendingTool {
-                            id,
-                            name,
-                            input,
-                            messages: history_snap,
-                        });
                     }
                 }
 
@@ -624,6 +522,103 @@ async fn emit_tool_event(done: &CompletedTool, tx: &mpsc::Sender<AgentEvent>) {
 /// Create an immediately-completed failed tool (no execution, no timer).
 fn instant_failure(id: String, name: String, output: ToolOutput) -> CompletedTool {
     CompletedTool { id, name, output, ms: 0 }
+}
+
+/// Verify that a tool call is permitted to run.
+///
+/// Runs pre-tool hooks, session permission checks, and the full permission
+/// dance (possibly suspending for human approval). Returns `Ok(())` when
+/// the tool is cleared to execute, or `Err(CompletedTool)` with an instant
+/// failure record when it is blocked or denied.
+///
+/// The caller is responsible for emitting the `CompletedTool` event and
+/// inserting it into `completed_map` on the `Err` path.
+async fn authorize_tool(
+    config:   &RunConfig,
+    id:       String,
+    name:     String,
+    input:    &serde_json::Value,
+    tx:       &mpsc::Sender<AgentEvent>,
+    messages: &mut Vec<Message>,
+) -> Result<(), CompletedTool> {
+    // Pre-tool hook.
+    if let HookDecision::Block { reason } = config.hooks.pre_tool_use(&name, input).await {
+        return Err(instant_failure(id, name, ToolOutput::hook_blocked(reason)));
+    }
+
+    // Session memory check — short-circuit before the full permission dance.
+    if config.session_perms.is_always_denied(&name).await {
+        return Err(instant_failure(
+            id, name.clone(),
+            ToolOutput::permission_denied(format!(
+                "tool '{name}' was previously denied for this session"
+            )),
+        ));
+    }
+
+    // If always-allowed, skip the permission check entirely.
+    if config.session_perms.is_always_allowed(&name).await {
+        return Ok(());
+    }
+
+    let tool_is_readonly = config.tools.get(&name)
+        .map(|t| t.is_readonly())
+        .unwrap_or(false);
+
+    let ctrl_req = ControlRequest {
+        id:   uuid::Uuid::new_v4().to_string(),
+        kind: ControlKind::PermissionRequest {
+            tool_name:   name.clone(),
+            description: format!("call {name}"),
+        },
+    };
+
+    match permission::check(&config.permission, &ctrl_req, tool_is_readonly) {
+        PermissionOutcome::Allowed => {}
+
+        PermissionOutcome::Denied { reason } => {
+            return Err(instant_failure(id, name, ToolOutput::permission_denied(reason)));
+        }
+
+        PermissionOutcome::NeedsApproval => {
+            let request_id   = ctrl_req.id.clone();
+            let (handle, rx) = ControlHandle::new(ctrl_req);
+            tx.send(AgentEvent::Control(handle)).await.ok();
+
+            // Suspend until the human responds.
+            let response = rx.await.unwrap_or_else(|_| {
+                wuhu_core::event::ControlResponse::deny(request_id, "session dropped")
+            });
+
+            // Inject decision as a system message visible to the LLM.
+            let sys = permission::response_to_system_message(&response);
+            messages.push(Message {
+                id:      uuid::Uuid::new_v4().to_string(),
+                role:    Role::System,
+                content: vec![ContentBlock::Text { text: sys }],
+            });
+
+            match &response.decision {
+                ControlDecision::Deny { reason } => {
+                    return Err(instant_failure(
+                        id, name, ToolOutput::permission_denied(reason.clone()),
+                    ));
+                }
+                ControlDecision::DenyAlways { reason } => {
+                    config.session_perms.set_always_deny(name.clone()).await;
+                    return Err(instant_failure(
+                        id, name, ToolOutput::permission_denied(reason.clone()),
+                    ));
+                }
+                ControlDecision::ApproveAlways => {
+                    config.session_perms.set_always_allow(name.clone()).await;
+                }
+                ControlDecision::Approve { .. } => {}
+            }
+        }
+    }
+
+    Ok(())
 }
 
 /// Append a deferred-tools listing to the system prompt when needed.

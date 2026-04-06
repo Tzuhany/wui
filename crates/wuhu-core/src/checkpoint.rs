@@ -12,7 +12,6 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use crate::event::ControlRequest;
 use crate::message::Message;
 
 /// Pluggable session persistence.
@@ -43,25 +42,13 @@ pub trait Checkpoint: Send + Sync + 'static {
 
 /// The serialisable state of a session at a point in time.
 ///
-/// Everything needed to resume a session exactly where it left off:
-/// the message history, any pending human decision, and the original
-/// (pre-compression) message archive for L2 recovery.
+/// Everything needed to resume a session exactly where it left off.
+/// Pass this to `Checkpoint::save()` after each turn and retrieve it
+/// via `Checkpoint::load()` at session startup.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionSnapshot {
-    pub session_id:  String,
-    pub messages:    Vec<Message>,
-
-    /// If the session was paused waiting for a human response, this holds
-    /// the control request so it can be replayed after a restart.
-    pub pending:     Option<PendingControl>,
-
-    /// The complete uncompressed message archive.
-    ///
-    /// L2 (collapse) compression replaces messages with placeholders in
-    /// `messages` but archives the originals here. This allows the full
-    /// history to be surfaced for display or forking while keeping the
-    /// working context small.
-    pub archive:     Vec<Message>,
+    pub session_id: String,
+    pub messages:   Vec<Message>,
 }
 
 impl SessionSnapshot {
@@ -69,19 +56,8 @@ impl SessionSnapshot {
         Self {
             session_id: session_id.into(),
             messages:   Vec::new(),
-            pending:    None,
-            archive:    Vec::new(),
         }
     }
-}
-
-/// A paused control request waiting for a human response.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PendingControl {
-    pub request:   ControlRequest,
-    /// Index into `messages` where the pause happened.
-    /// Used to resume from exactly the right position.
-    pub resume_at: usize,
 }
 
 // ── Checkpoint Error ──────────────────────────────────────────────────────────
