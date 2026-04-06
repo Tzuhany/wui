@@ -49,6 +49,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use futures::StreamExt;
 use tokio::sync::mpsc;
@@ -78,6 +79,94 @@ use crate::registry::ToolRegistry;
 /// If the caller stops consuming, the loop pauses here. Tune this for your
 /// use case — larger values trade memory for smoother streaming under jitter.
 const EVENT_CHANNEL_CAPACITY: usize = 256;
+
+// ── Retry Policy ──────────────────────────────────────────────────────────────
+
+/// Exponential back-off for transient provider errors.
+///
+/// Applied when the provider returns `is_retryable: true` — network hiccups,
+/// rate-limit 429s, intermittent 5xx. Non-retryable errors bypass this entirely.
+///
+/// The default (`RetryPolicy::default()`) retries up to 3 times with 500 ms
+/// initial delay doubling on each attempt, capped at 10 s.
+#[derive(Debug, Clone)]
+pub struct RetryPolicy {
+    /// Maximum number of retry attempts. `0` disables retrying.
+    pub max_attempts:     u32,
+    /// Wait before the first retry (milliseconds).
+    pub initial_delay_ms: u64,
+    /// Multiplier applied to the delay after each failure.
+    pub multiplier:       f64,
+    /// Hard cap on the delay between retries (milliseconds).
+    pub max_delay_ms:     u64,
+}
+
+impl Default for RetryPolicy {
+    fn default() -> Self {
+        Self {
+            max_attempts:     3,
+            initial_delay_ms: 500,
+            multiplier:       2.0,
+            max_delay_ms:     10_000,
+        }
+    }
+}
+
+// ── Run Stream ────────────────────────────────────────────────────────────────
+
+/// The event stream for a running agent.
+///
+/// Implements `Stream<Item = AgentEvent>`. Dropping the stream cancels the
+/// underlying run immediately — no orphaned tasks, no wasted tokens.
+///
+/// ```rust,ignore
+/// let mut stream = agent.stream("Hello").await;
+///
+/// // Cancel explicitly:
+/// stream.cancel();
+///
+/// // Share the cancel signal with another task:
+/// let token = stream.cancel_token();
+/// tokio::spawn(async move { /* call token.cancel() when needed */ });
+/// ```
+pub struct RunStream {
+    inner:  ReceiverStream<AgentEvent>,
+    cancel: CancellationToken,
+}
+
+impl RunStream {
+    /// Cancel the run immediately.
+    pub fn cancel(&self) {
+        self.cancel.cancel();
+    }
+
+    /// Clone the `CancellationToken` for this run.
+    ///
+    /// Use when you need to cancel the run from a separate task or store
+    /// the handle for later (e.g., a cancel button in a UI).
+    pub fn cancel_token(&self) -> CancellationToken {
+        self.cancel.clone()
+    }
+}
+
+impl futures::Stream for RunStream {
+    type Item = AgentEvent;
+    fn poll_next(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        std::pin::Pin::new(&mut self.inner).poll_next(cx)
+    }
+}
+
+impl Drop for RunStream {
+    fn drop(&mut self) {
+        // Cancel the spawned task when the stream is abandoned.
+        // Without this, the run loop continues burning tokens even though
+        // nobody is consuming its output.
+        self.cancel.cancel();
+    }
+}
 
 // ── Run Config ────────────────────────────────────────────────────────────────
 
@@ -117,25 +206,33 @@ pub struct RunConfig {
     /// and rejects runs where `chain.depth > chain.max_depth`. Pass
     /// `chain.child()?` when spawning sub-agents to enforce the ceiling.
     pub query_chain: Option<QueryChain>,
+
+    /// Back-off policy for transient provider errors.
+    pub retry: RetryPolicy,
+
+    /// Default execution timeout applied to every tool that doesn't declare
+    /// its own `Tool::timeout()`. `None` means tools may run indefinitely.
+    pub tool_timeout: Option<Duration>,
 }
 
 // ── Public entry point ────────────────────────────────────────────────────────
 
-/// Run the agent loop and return a stream of events.
+/// Run the agent loop and return an event stream.
 ///
 /// Spawns an internal task. The stream yields events until `AgentEvent::Done`
 /// or `AgentEvent::Error` is received.
 ///
-/// The stream is bounded: if you stop consuming, the loop pauses. Always
-/// drain the stream fully to avoid leaving the loop task suspended.
+/// Dropping the returned `RunStream` cancels the run immediately — safe
+/// to drop at any point without leaking the background task. Call
+/// `stream.cancel()` or `stream.cancel_token()` for explicit control.
 pub fn run(
     config:   Arc<RunConfig>,
     messages: Vec<Message>,
-    cancel:   CancellationToken,
-) -> impl futures::Stream<Item = AgentEvent> {
+) -> RunStream {
+    let cancel = CancellationToken::new();
     let (tx, rx) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
-    tokio::spawn(run_task(config, messages, cancel, tx));
-    ReceiverStream::new(rx)
+    tokio::spawn(run_task(config, messages, cancel.clone(), tx));
+    RunStream { inner: ReceiverStream::new(rx), cancel }
 }
 
 // ── Internal task ─────────────────────────────────────────────────────────────
@@ -246,14 +343,39 @@ async fn run_loop(
             extensions,
         };
 
-        // ── Stream ────────────────────────────────────────────────
-        let stream = config.provider.stream(req).await
-            .map_err(|e| AgentError { message: e.to_string(), retryable: e.is_retryable() })?;
+        // ── Call provider with retry ───────────────────────────────
+        let stream = {
+            let mut delay_ms = config.retry.initial_delay_ms;
+            let mut attempt  = 0u32;
+            loop {
+                match config.provider.stream(req.clone()).await {
+                    Ok(s) => break s,
+                    Err(e) if e.is_retryable() && attempt < config.retry.max_attempts => {
+                        attempt += 1;
+                        tracing::warn!(
+                            attempt, max = config.retry.max_attempts,
+                            error = %e, delay_ms, "provider error — retrying"
+                        );
+                        tx.send(AgentEvent::Retrying {
+                            attempt,
+                            delay_ms,
+                            reason: e.to_string(),
+                        }).await.ok();
+                        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                        delay_ms = (delay_ms as f64 * config.retry.multiplier)
+                            .min(config.retry.max_delay_ms as f64) as u64;
+                    }
+                    Err(e) => return Err(AgentError { message: e.to_string(), retryable: false }),
+                }
+            }
+        };
 
         let mut executor = ToolExecutor::new(
             config.tools.clone(),
             cancel.clone(),
             config.spawn.clone(),
+            tx.clone(),
+            config.tool_timeout,
         );
 
         // Accumulate tool input JSON chunks keyed by tool_use_id.

@@ -14,13 +14,12 @@
 use std::sync::Arc;
 
 use futures::StreamExt;
-use tokio_util::sync::CancellationToken;
 
 use wuhu_core::event::AgentEvent;
 use wuhu_core::message::Message;
 use wuhu_core::provider::Provider;
 use wuhu_core::tool::SpawnFn;
-use wuhu_engine::{HookRunner, QueryChain, RunConfig, SessionPermissions, ToolRegistry, ToolSearch, run};
+use wuhu_engine::{HookRunner, QueryChain, RunConfig, RunStream, SessionPermissions, ToolRegistry, ToolSearch, run};
 
 use crate::builder::{AgentBuilder, AgentConfig};
 use crate::session::Session;
@@ -62,8 +61,8 @@ impl Agent {
     ///
     /// For tool visibility, streaming output, or HITL, use `stream()` directly.
     pub async fn run(&self, prompt: impl Into<String>) -> Result<String, wuhu_core::event::AgentError> {
-        let mut text = String::new();
-        let mut stream = self.stream(prompt).await;
+        let mut text   = String::new();
+        let mut stream = self.stream(prompt);
 
         while let Some(event) = stream.next().await {
             match event {
@@ -81,17 +80,15 @@ impl Agent {
 
     // ── Single-turn stream ────────────────────────────────────────────────────
 
-    /// Run a single prompt and return a stream of `AgentEvent`s.
+    /// Run a single prompt and return a `RunStream` of `AgentEvent`s.
     ///
     /// The stream ends with `AgentEvent::Done` or `AgentEvent::Error`.
-    pub async fn stream(
-        &self,
-        prompt: impl Into<String>,
-    ) -> impl futures::Stream<Item = AgentEvent> {
+    /// Dropping the stream cancels the run. Call `stream.cancel()` for
+    /// explicit cancellation or `stream.cancel_token()` to share the
+    /// signal with other tasks.
+    pub fn stream(&self, prompt: impl Into<String>) -> RunStream {
         let messages = vec![Message::user(prompt.into())];
-        let config   = self.make_run_config();
-        let cancel   = CancellationToken::new();
-        run(Arc::new(config), messages, cancel)
+        run(Arc::new(self.make_run_config()), messages)
     }
 
     // ── Multi-turn ────────────────────────────────────────────────────────────
@@ -106,7 +103,7 @@ impl Agent {
     /// let stream = session.send("Hello").await;
     /// ```
     pub async fn session(&self, id: impl Into<String>) -> Session {
-        Session::new(id, self.config.clone()).await
+        Session::new(id.into(), self.config.clone()).await
     }
 
     // ── Sub-agent ─────────────────────────────────────────────────────────────
@@ -182,6 +179,8 @@ pub(crate) fn build_run_config(config: &AgentConfig, session_perms: Arc<SessionP
         initial_extensions: config.initial_extensions.clone(),
         spawn:              config.spawn.clone(),
         query_chain:        config.query_chain.clone(),
+        retry:              config.retry.clone(),
+        tool_timeout:       config.tool_timeout,
     }
 }
 

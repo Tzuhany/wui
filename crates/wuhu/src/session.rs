@@ -25,11 +25,18 @@
 // `SessionPermissions` is shared with the run loop. `ApproveAlways` /
 // `DenyAlways` responses from ControlHandle are stored here and honoured
 // for subsequent tool calls within this session — no re-prompting needed.
+//
+// ── Cancellation ─────────────────────────────────────────────────────────────
+//
+// Each `send()` call stores its `CancellationToken` in `current_cancel`.
+// Calling `cancel_current()` or dropping the `SessionStream` aborts the run
+// immediately. A new `send()` replaces the token for that turn.
 // ============================================================================
 
 use std::sync::{Arc, Mutex};
 
 use futures::StreamExt;
+use tokio_util::sync::CancellationToken;
 
 use wuhu_core::checkpoint::{Checkpoint, SessionSnapshot};
 use wuhu_core::event::AgentEvent;
@@ -41,17 +48,17 @@ use crate::builder::AgentConfig;
 
 /// An active multi-turn conversation.
 pub struct Session {
-    id:           String,
-    config:       Arc<AgentConfig>,
-    messages:     Arc<Mutex<Vec<Message>>>,
-    checkpoint:   Option<Arc<dyn Checkpoint>>,
-    session_perms: Arc<SessionPermissions>,
+    id:             String,
+    config:         Arc<AgentConfig>,
+    messages:       Arc<Mutex<Vec<Message>>>,
+    checkpoint:     Option<Arc<dyn Checkpoint>>,
+    session_perms:  Arc<SessionPermissions>,
+    /// Cancel token for the currently running turn, if any.
+    current_cancel: Arc<Mutex<Option<CancellationToken>>>,
 }
 
 impl Session {
-    pub(crate) async fn new(id: impl Into<String>, config: Arc<AgentConfig>) -> Self {
-        let id = id.into();
-
+    pub(crate) async fn new(id: String, config: Arc<AgentConfig>) -> Self {
         // Restore from checkpoint if available, otherwise start fresh.
         let messages = if let Some(cp) = &config.checkpoint {
             match cp.load(&id).await {
@@ -73,8 +80,9 @@ impl Session {
             id,
             checkpoint: config.checkpoint.clone(),
             config,
-            messages:      Arc::new(Mutex::new(messages)),
-            session_perms: Arc::new(SessionPermissions::new()),
+            messages:       Arc::new(Mutex::new(messages)),
+            session_perms:  Arc::new(SessionPermissions::new()),
+            current_cancel: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -83,7 +91,10 @@ impl Session {
     /// Consume the stream fully. When `AgentEvent::Done` is yielded,
     /// session history has already been updated in memory — the next `send()`
     /// immediately sees this turn's full context.
-    pub async fn send(
+    ///
+    /// Dropping the returned stream cancels the current run. Use
+    /// `session.cancel_current()` to abort the run without dropping the stream.
+    pub fn send(
         &self,
         content: impl Into<String>,
     ) -> impl futures::Stream<Item = AgentEvent> + Unpin + '_ {
@@ -96,29 +107,37 @@ impl Session {
             .expect("session messages poisoned")
             .clone();
         let run_config = self.make_run_config();
-        let cancel     = tokio_util::sync::CancellationToken::new();
-        let stream     = run(Arc::new(run_config), messages, cancel);
+        let run_stream = run(Arc::new(run_config), messages);
+
+        // Store the cancel token for this turn so cancel_current() can abort it.
+        *self.current_cancel.lock().expect("current_cancel poisoned")
+            = Some(run_stream.cancel_token());
 
         // Wire Done back to session state.
-        let messages_ref = self.messages.clone();
-        let checkpoint   = self.checkpoint.clone();
-        let session_id   = self.id.clone();
+        let messages_ref  = self.messages.clone();
+        let checkpoint    = self.checkpoint.clone();
+        let session_id    = self.id.clone();
+        let cancel_store  = self.current_cancel.clone();
 
         // Use `then` (async map) so checkpoint I/O completes before `Done` is
         // yielded to the caller. This guarantees that by the time the caller
         // sees `Done`, both in-memory history and the checkpoint are up to date.
         // Box::pin makes the result Unpin so callers can use `stream.next().await`
         // without pinning manually.
-        Box::pin(stream.then(move |event| {
-            let messages_ref = messages_ref.clone();
-            let checkpoint   = checkpoint.clone();
-            let session_id   = session_id.clone();
+        Box::pin(run_stream.then(move |event| {
+            let messages_ref  = messages_ref.clone();
+            let checkpoint    = checkpoint.clone();
+            let session_id    = session_id.clone();
+            let cancel_store  = cancel_store.clone();
             async move {
                 if let AgentEvent::Done(ref summary) = event {
                     let updated = summary.messages.clone();
 
                     // Update in-memory history synchronously.
                     *messages_ref.lock().expect("session messages poisoned") = updated.clone();
+
+                    // Clear the stored cancel token — the run is done.
+                    *cancel_store.lock().expect("current_cancel poisoned") = None;
 
                     // Persist checkpoint inline — caller sees Done only after save.
                     if let Some(cp) = checkpoint {
@@ -135,6 +154,19 @@ impl Session {
                 event
             }
         }))
+    }
+
+    /// Cancel the currently running turn, if any.
+    ///
+    /// The run loop will emit `AgentEvent::Done` with `stop_reason: Cancelled`
+    /// and exit. Has no effect if no turn is running.
+    pub fn cancel_current(&self) {
+        if let Some(token) = self.current_cancel
+            .lock().expect("current_cancel poisoned")
+            .as_ref()
+        {
+            token.cancel();
+        }
     }
 
     /// The current message history for this session (read-only snapshot).
@@ -154,3 +186,4 @@ impl Session {
         build_run_config(&self.config, self.session_perms.clone())
     }
 }
+

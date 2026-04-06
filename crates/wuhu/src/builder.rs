@@ -15,7 +15,7 @@ use wuhu_core::hook::Hook;
 use wuhu_core::provider::Provider;
 use wuhu_core::tool::{SpawnFn, Tool};
 use wuhu_compress::CompressPipeline;
-use wuhu_engine::{PermissionMode, QueryChain};
+use wuhu_engine::{PermissionMode, QueryChain, RetryPolicy};
 
 use crate::Agent;
 
@@ -37,6 +37,8 @@ pub struct AgentConfig {
     pub initial_extensions: HashMap<String, serde_json::Value>,
     pub spawn:              Option<SpawnFn>,
     pub query_chain:        Option<QueryChain>,
+    pub retry:              RetryPolicy,
+    pub tool_timeout:       Option<std::time::Duration>,
 }
 
 /// Fluent builder for `Agent`.
@@ -63,6 +65,8 @@ impl AgentBuilder {
                 initial_extensions: HashMap::new(),
                 spawn:              None,
                 query_chain:        None,
+                retry:              RetryPolicy::default(),
+                tool_timeout:       None,
             },
         }
     }
@@ -186,6 +190,26 @@ impl AgentBuilder {
     /// the chain ID and enforce the depth ceiling.
     pub fn query_chain(mut self, chain: QueryChain) -> Self {
         self.config.query_chain = Some(chain);
+        self
+    }
+
+    /// Override the retry policy for transient provider errors.
+    ///
+    /// The default policy retries up to 3 times with exponential back-off
+    /// starting at 500 ms, capped at 10 s. Pass `RetryPolicy { max_attempts: 0, .. }`
+    /// to disable retrying entirely.
+    pub fn retry(mut self, policy: RetryPolicy) -> Self {
+        self.config.retry = policy;
+        self
+    }
+
+    /// Set a default timeout for tool execution.
+    ///
+    /// Applied to every tool that doesn't declare its own `Tool::timeout()`.
+    /// When a tool exceeds this duration, the executor returns a
+    /// `"tool timed out"` error result and the LLM is informed.
+    pub fn tool_timeout(mut self, duration: std::time::Duration) -> Self {
+        self.config.tool_timeout = Some(duration);
         self
     }
 

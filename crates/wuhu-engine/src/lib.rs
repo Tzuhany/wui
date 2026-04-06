@@ -17,5 +17,5 @@ pub use hooks::HookRunner;
 pub use permission::{PermissionMode, SessionPermissions};
 pub use query_chain::{DepthExceeded, QueryChain};
 pub use registry::{DeferredEntry, ToolRegistry};
-pub use run::{run, RunConfig};
+pub use run::{run, RetryPolicy, RunConfig, RunStream};
 pub use tool_search::ToolSearch;

@@ -150,12 +150,34 @@ pub enum AgentEvent {
         artifact:  crate::tool::Artifact,
     },
 
+    // ── Tool progress ─────────────────────────────────────────────────
+    /// Incremental progress reported by a running tool via `ctx.report()`.
+    ///
+    /// Emitted in real time — use this to stream tool status to a UI
+    /// without waiting for the tool to complete.
+    ToolProgress {
+        tool_id:   String,
+        tool_name: String,
+        text:      String,
+    },
+
     // ── Context management ────────────────────────────────────────────
     /// Context compression was applied.
     Compressed {
         method: CompressMethod,
         /// Approximate tokens freed.
         freed:  usize,
+    },
+
+    // ── Retry ─────────────────────────────────────────────────────────
+    /// The provider returned a transient error; the engine is about to retry.
+    ///
+    /// `attempt` is 1-indexed. `delay_ms` is the back-off wait before this
+    /// attempt. Use to show a "retrying…" indicator rather than a hard error.
+    Retrying {
+        attempt:  u32,
+        delay_ms: u64,
+        reason:   String,
     },
 
     // ── Terminal ──────────────────────────────────────────────────────

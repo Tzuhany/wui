@@ -38,12 +38,14 @@
 
 use std::collections::VecDeque;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use futures::FutureExt as _;
+use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
+use wuhu_core::event::AgentEvent;
 use wuhu_core::message::Message;
 use wuhu_core::tool::{SpawnFn, Tool, ToolCtx, ToolOutput};
 
@@ -82,23 +84,31 @@ struct QueuedTool {
 
 /// Executes tools concurrently while the LLM streams.
 pub struct ToolExecutor {
-    registry:   Arc<ToolRegistry>,
-    cancel:     CancellationToken,
-    spawn:      Option<SpawnFn>,
-    pending:    JoinSet<(String, String, ToolOutput, u64)>,
-    sequential: VecDeque<QueuedTool>,
+    registry:        Arc<ToolRegistry>,
+    cancel:          CancellationToken,
+    spawn:           Option<SpawnFn>,
+    /// Channel to the caller's event stream — used for `ToolProgress` events.
+    tx:              mpsc::Sender<AgentEvent>,
+    /// Global tool timeout, applied when a tool doesn't declare its own.
+    default_timeout: Option<Duration>,
+    pending:         JoinSet<(String, String, ToolOutput, u64)>,
+    sequential:      VecDeque<QueuedTool>,
 }
 
 impl ToolExecutor {
     pub fn new(
-        registry: Arc<ToolRegistry>,
-        cancel:   CancellationToken,
-        spawn:    Option<SpawnFn>,
+        registry:        Arc<ToolRegistry>,
+        cancel:          CancellationToken,
+        spawn:           Option<SpawnFn>,
+        tx:              mpsc::Sender<AgentEvent>,
+        default_timeout: Option<Duration>,
     ) -> Self {
         Self {
             registry,
             cancel,
             spawn,
+            tx,
+            default_timeout,
             pending:    JoinSet::new(),
             sequential: VecDeque::new(),
         }
@@ -174,10 +184,14 @@ impl ToolExecutor {
 
         // Run sequential tools in submission order.
         while let Some(tool) = self.sequential.pop_front() {
-            let start = Instant::now();
-            let ctx   = make_ctx(self.cancel.clone(), tool.messages, self.spawn.clone());
-            let out   = run_tool_safely(tool.impl_, tool.input, &ctx).await;
-            let ms    = start.elapsed().as_millis() as u64;
+            let start   = Instant::now();
+            let timeout = tool.impl_.timeout().or(self.default_timeout);
+            let ctx     = make_ctx(
+                self.cancel.clone(), tool.messages, self.spawn.clone(),
+                self.tx.clone(), tool.id.clone(), tool.name.clone(),
+            );
+            let out = run_tool_safely(tool.impl_, tool.input, &ctx, timeout).await;
+            let ms  = start.elapsed().as_millis() as u64;
             results.push(CompletedTool { id: tool.id, name: tool.name, output: out, ms });
         }
 
@@ -192,12 +206,14 @@ impl ToolExecutor {
         messages: Arc<[Message]>,
         impl_:    Arc<dyn Tool>,
     ) {
-        let cancel = self.cancel.clone();
-        let spawn  = self.spawn.clone();
+        let cancel  = self.cancel.clone();
+        let spawn   = self.spawn.clone();
+        let tx      = self.tx.clone();
+        let timeout = impl_.timeout().or(self.default_timeout);
         self.pending.spawn(async move {
             let start = Instant::now();
-            let ctx   = make_ctx(cancel, messages, spawn);
-            let out   = run_tool_safely(impl_, input, &ctx).await;
+            let ctx   = make_ctx(cancel, messages, spawn, tx, id.clone(), name.clone());
+            let out   = run_tool_safely(impl_, input, &ctx, timeout).await;
             let ms    = start.elapsed().as_millis() as u64;
             (id, name, out, ms)
         });
@@ -206,31 +222,51 @@ impl ToolExecutor {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-/// Execute a tool, converting a panic into an error result.
+/// Execute a tool, converting a panic or timeout into an error result.
 ///
 /// A panicking tool must not leave a missing ToolResult in the history —
 /// that would cause a 400 on the next API call. `catch_unwind` ensures
 /// every submitted tool produces *some* output, even if it crashes.
+///
+/// When `timeout` is set and the tool exceeds it, a `"tool timed out"` error
+/// is returned immediately and the underlying future is dropped.
 async fn run_tool_safely(
-    impl_: Arc<dyn Tool>,
-    input: serde_json::Value,
-    ctx:   &ToolCtx,
+    impl_:   Arc<dyn Tool>,
+    input:   serde_json::Value,
+    ctx:     &ToolCtx,
+    timeout: Option<Duration>,
 ) -> ToolOutput {
-    std::panic::AssertUnwindSafe(impl_.call(input, ctx))
-        .catch_unwind()
-        .await
-        .unwrap_or_else(|_| ToolOutput::error("tool panicked unexpectedly"))
+    let fut = std::panic::AssertUnwindSafe(impl_.call(input, ctx)).catch_unwind();
+    let result = if let Some(d) = timeout {
+        tokio::time::timeout(d, fut).await
+            .unwrap_or_else(|_| Ok(ToolOutput::error("tool timed out")))
+    } else {
+        fut.await
+    };
+    result.unwrap_or_else(|_| ToolOutput::error("tool panicked unexpectedly"))
 }
 
 fn make_ctx(
-    cancel:   CancellationToken,
-    messages: Arc<[Message]>,
-    spawn:    Option<SpawnFn>,
+    cancel:    CancellationToken,
+    messages:  Arc<[Message]>,
+    spawn:     Option<SpawnFn>,
+    tx:        mpsc::Sender<AgentEvent>,
+    tool_id:   String,
+    tool_name: String,
 ) -> ToolCtx {
     ToolCtx {
         cancel,
         messages,
-        on_progress: Box::new(|msg| tracing::debug!(progress = %msg)),
+        on_progress: Box::new(move |text: String| {
+            tracing::debug!(tool = %tool_name, progress = %text);
+            // Non-blocking send — a full channel drops the event rather than
+            // blocking the tool. Progress is best-effort.
+            let _ = tx.try_send(AgentEvent::ToolProgress {
+                tool_id:   tool_id.clone(),
+                tool_name: tool_name.clone(),
+                text,
+            });
+        }),
         spawn,
     }
 }

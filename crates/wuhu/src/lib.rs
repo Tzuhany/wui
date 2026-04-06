@@ -34,7 +34,7 @@ pub use wuhu_core::tool::{
 };
 pub use wuhu_core::checkpoint::{Checkpoint, InMemory, SessionSnapshot};
 pub use wuhu_core::memory::{Memory, MemoryEntry, NewMemory};
-pub use wuhu_engine::{PermissionMode, QueryChain};
+pub use wuhu_engine::{PermissionMode, QueryChain, RetryPolicy, RunStream};
 pub use wuhu_compress::CompressPipeline;
 
 /// The prelude. `use wuhu::prelude::*` to bring the most-used types into scope.
@@ -44,7 +44,7 @@ pub mod prelude {
         Artifact, ArtifactContent,
         ControlResponse, CompressPipeline,
         DenyList, Hook, HookDecision,
-        InMemory, Message, PermissionMode, QueryChain,
+        InMemory, Message, PermissionMode, QueryChain, RetryPolicy, RunStream,
         Provider, RunStopReason, Session,
         Tool, ToolCtx, ToolInput, ToolOutput,
     };

@@ -92,6 +92,22 @@ pub trait Tool: Send + Sync + 'static {
         false
     }
 
+    /// How long the executor waits before cancelling this tool.
+    ///
+    /// `None` means no timeout. Override to protect against hung tools:
+    ///
+    /// ```rust,ignore
+    /// fn timeout(&self) -> Option<std::time::Duration> {
+    ///     Some(std::time::Duration::from_secs(30))
+    /// }
+    /// ```
+    ///
+    /// Per-tool timeouts take precedence over the global `tool_timeout`
+    /// set on `AgentBuilder`. Both are `None` by default.
+    fn timeout(&self) -> Option<std::time::Duration> {
+        None
+    }
+
     /// Whether this specific invocation can run concurrently with others.
     ///
     /// Defaults to `true`. Override to inspect `input` when the safety
