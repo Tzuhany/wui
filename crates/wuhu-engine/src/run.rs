@@ -95,7 +95,8 @@ pub struct RetryPolicy {
     pub max_attempts:     u32,
     /// Wait before the first retry (milliseconds).
     pub initial_delay_ms: u64,
-    /// Multiplier applied to the delay after each failure.
+    /// Multiplier applied to the delay after each failure (exponential back-off).
+    /// `2.0` doubles the delay each time: 500 ms → 1 s → 2 s → …, capped at `max_delay_ms`.
     pub multiplier:       f64,
     /// Hard cap on the delay between retries (milliseconds).
     pub max_delay_ms:     u64,
@@ -132,6 +133,14 @@ impl Default for RetryPolicy {
 pub struct RunStream {
     inner:  ReceiverStream<AgentEvent>,
     cancel: CancellationToken,
+}
+
+impl std::fmt::Debug for RunStream {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RunStream")
+            .field("cancelled", &self.cancel.is_cancelled())
+            .finish_non_exhaustive()
+    }
 }
 
 impl RunStream {

@@ -27,7 +27,7 @@ pub struct ToolRegistry {
 
 /// A brief entry for a deferred tool — enough to appear in the system prompt.
 #[derive(Debug, Clone)]
-pub struct DeferredEntry {
+pub(crate) struct DeferredEntry {
     pub name:        String,
     pub description: String,
     /// Optional 3–10 word hint for ToolSearch.
@@ -69,7 +69,7 @@ impl ToolRegistry {
     ///
     /// Used to build the "Additional tools" section of the system prompt
     /// so the LLM knows these tools exist and can call ToolSearch to learn more.
-    pub fn deferred_entries(&self) -> Vec<DeferredEntry> {
+    pub(crate) fn deferred_entries(&self) -> Vec<DeferredEntry> {
         let mut entries: Vec<DeferredEntry> = self.tools
             .values()
             .filter(|t| t.defer_loading())

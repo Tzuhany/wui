@@ -239,14 +239,14 @@ impl ToolOutput {
     // ── Builders ──────────────────────────────────────────────────────────
 
     /// Attach artifacts to a successful result.
-    pub fn with_artifacts(mut self, artifacts: Vec<Artifact>) -> Self {
-        self.artifacts = artifacts;
+    pub fn with_artifacts(mut self, artifacts: impl IntoIterator<Item = Artifact>) -> Self {
+        self.artifacts = artifacts.into_iter().collect();
         self
     }
 
     /// Attach extra messages to inject into the conversation.
-    pub fn with_extra_messages(mut self, messages: Vec<Message>) -> Self {
-        self.extra_messages = messages;
+    pub fn with_extra_messages(mut self, messages: impl IntoIterator<Item = Message>) -> Self {
+        self.extra_messages = messages.into_iter().collect();
         self
     }
 
@@ -378,9 +378,12 @@ impl Artifact {
 ///     ...
 /// }
 /// ```
+#[derive(Copy, Clone)]
 pub struct ToolInput<'a>(pub &'a Value);
 
 impl<'a> ToolInput<'a> {
+    // ── String ────────────────────────────────────────────────────────
+
     /// Extract a required, non-empty string field.
     pub fn required_str(&self, key: &str) -> Result<&'a str, String> {
         match self.0[key].as_str().filter(|s| !s.is_empty()) {
@@ -394,6 +397,8 @@ impl<'a> ToolInput<'a> {
         self.0[key].as_str()
     }
 
+    // ── Boolean ───────────────────────────────────────────────────────
+
     /// Extract a required boolean field.
     pub fn required_bool(&self, key: &str) -> Result<bool, String> {
         self.0[key].as_bool().ok_or_else(|| format!("'{key}' is required (bool)"))
@@ -404,24 +409,52 @@ impl<'a> ToolInput<'a> {
         self.0[key].as_bool()
     }
 
-    /// Extract a required integer field.
+    // ── Integer ───────────────────────────────────────────────────────
+
+    /// Extract a required unsigned integer field.
     pub fn required_u64(&self, key: &str) -> Result<u64, String> {
         self.0[key].as_u64().ok_or_else(|| format!("'{key}' is required (integer)"))
     }
 
-    /// Extract an optional integer field.
+    /// Extract an optional unsigned integer field.
     pub fn optional_u64(&self, key: &str) -> Option<u64> {
         self.0[key].as_u64()
     }
+
+    /// Extract a required signed integer field.
+    pub fn required_i64(&self, key: &str) -> Result<i64, String> {
+        self.0[key].as_i64().ok_or_else(|| format!("'{key}' is required (integer)"))
+    }
+
+    /// Extract an optional signed integer field.
+    pub fn optional_i64(&self, key: &str) -> Option<i64> {
+        self.0[key].as_i64()
+    }
+
+    // ── Float ─────────────────────────────────────────────────────────
 
     /// Extract an optional float field.
     pub fn optional_f64(&self, key: &str) -> Option<f64> {
         self.0[key].as_f64()
     }
 
+    // ── Array ─────────────────────────────────────────────────────────
+
+    /// Extract a required array field.
+    pub fn required_array(&self, key: &str) -> Result<&'a Vec<Value>, String> {
+        self.0[key].as_array().ok_or_else(|| format!("'{key}' is required (array)"))
+    }
+
     /// Extract an optional array field.
     pub fn optional_array(&self, key: &str) -> Option<&'a Vec<Value>> {
         self.0[key].as_array()
+    }
+
+    // ── Object ────────────────────────────────────────────────────────
+
+    /// Extract a required object field.
+    pub fn required_object(&self, key: &str) -> Result<&'a serde_json::Map<String, Value>, String> {
+        self.0[key].as_object().ok_or_else(|| format!("'{key}' is required (object)"))
     }
 
     /// Extract an optional object field.

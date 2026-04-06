@@ -22,12 +22,18 @@ use std::sync::Arc;
 
 use tokio::sync::RwLock;
 
+use serde::{Deserialize, Serialize};
+
 use wuhu_core::event::{ControlDecision, ControlRequest, ControlResponse};
 
 // ── Permission Mode ───────────────────────────────────────────────────────────
 
 /// How the engine handles tool permission checks.
-#[derive(Debug, Clone, Default)]
+///
+/// Serializes as lowercase strings (`"auto"`, `"ask"`, `"readonly"`) so
+/// permission mode can be loaded directly from config files.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum PermissionMode {
     /// All tools are allowed without asking. Use in trusted, automated
     /// environments where every tool in the registry is pre-approved.
