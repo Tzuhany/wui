@@ -13,6 +13,7 @@
 
 pub mod checkpoint;
 pub mod event;
+pub mod fmt;
 pub mod hook;
 pub mod memory;
 pub mod message;

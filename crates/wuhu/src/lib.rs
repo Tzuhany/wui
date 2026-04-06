@@ -27,6 +27,7 @@ pub use wuhu_core::event::{
 pub use wuhu_core::hook::{DenyList, Hook, HookDecision, HookEvent};
 pub use wuhu_core::message::{ContentBlock, Message, Role};
 pub use wuhu_core::provider::Provider;
+pub use wuhu_core::fmt;
 pub use wuhu_core::tool::{
     Artifact, ArtifactContent, FailureKind, SpawnFn,
     Tool, ToolCtx, ToolInput, ToolOutput,

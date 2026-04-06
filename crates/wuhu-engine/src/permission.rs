@@ -150,8 +150,11 @@ fn tool_name_from_request(request: &ControlRequest) -> &str {
 }
 
 /// Convert a human's `ControlResponse` into a message the LLM will see.
+///
+/// The message is wrapped in `<system-reminder>` so the LLM can clearly
+/// distinguish this framework-injected decision from user conversation.
 pub fn response_to_system_message(response: &ControlResponse) -> String {
-    match &response.decision {
+    let body = match &response.decision {
         ControlDecision::Approve { modification: None } =>
             "The user approved your request. You may proceed.".to_string(),
 
@@ -166,5 +169,6 @@ pub fn response_to_system_message(response: &ControlResponse) -> String {
 
         ControlDecision::DenyAlways { reason } =>
             format!("The user denied your request and will never allow this tool. Reason: {reason}. Do not attempt this action again."),
-    }
+    };
+    wuhu_core::fmt::system_reminder(&body)
 }

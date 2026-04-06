@@ -560,7 +560,9 @@ async fn run_loop(
                 messages.push(Message {
                     id:      uuid::Uuid::new_v4().to_string(),
                     role:    Role::System,
-                    content: vec![ContentBlock::Text { text: reason }],
+                    content: vec![ContentBlock::Text {
+                        text: wuhu_core::fmt::system_reminder(&reason),
+                    }],
                 });
                 continue;
             }
@@ -643,11 +645,12 @@ fn augment_system(base: &str, registry: &ToolRegistry) -> String {
         .collect::<Vec<_>>()
         .join("\n");
 
-    format!(
-        "{base}\n\n\
-        ## Additional tools\n\
+    let section = format!(
+        "## Additional tools\n\
         These tools are available but require loading. \
         Call `ToolSearch` with the tool name or a keyword before using them:\n\n\
         {listing}"
-    )
+    );
+
+    format!("{base}\n\n{}", wuhu_core::fmt::system_reminder(&section))
 }
