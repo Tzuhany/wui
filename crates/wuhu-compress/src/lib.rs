@@ -89,8 +89,19 @@ impl CompressPipeline {
             .sum()
     }
 
-    fn pressure(&self, messages: &[Message]) -> f64 {
+    /// Fraction of `window_tokens` currently in use. `1.0` = completely full.
+    pub fn pressure(&self, messages: &[Message]) -> f64 {
         self.total_tokens(messages) as f64 / self.window_tokens.max(1) as f64
+    }
+
+    /// Whether the context has filled or exceeded the hard token ceiling.
+    ///
+    /// Unlike `compact_threshold` (which triggers compression at e.g. 80%),
+    /// this returns `true` only when the context is truly full — no further
+    /// LLM call can succeed without shedding messages. The run loop uses this
+    /// after compression to decide whether to emit `ContextOverflow`.
+    pub fn is_critically_full(&self, messages: &[Message]) -> bool {
+        self.total_tokens(messages) >= self.window_tokens
     }
 
     /// How many recent messages to keep during L2/L3 compression.

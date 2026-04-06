@@ -179,8 +179,9 @@ pub(crate) fn build_run_config(config: &AgentConfig, session_perms: Arc<SessionP
         initial_extensions: config.initial_extensions.clone(),
         spawn:              config.spawn.clone(),
         query_chain:        config.query_chain.clone(),
-        retry:              config.retry.clone(),
-        tool_timeout:       config.tool_timeout,
+        retry:                      config.retry.clone(),
+        tool_timeout:               config.tool_timeout,
+        ignore_diminishing_returns: config.ignore_diminishing_returns,
     }
 }
 

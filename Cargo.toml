@@ -45,6 +45,7 @@ eventsource-stream = { version = "0.2" }
 
 # ── Utils ─────────────────────────────────────────────────────
 uuid         = { version = "1", features = ["v4"] }
+rand         = { version = "0.8" }
 
 # ── Workspace crates ──────────────────────────────────────────
 wuhu-core      = { path = "crates/wuhu-core",      version = "0.1.5" }

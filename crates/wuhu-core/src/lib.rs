@@ -18,6 +18,7 @@ pub mod hook;
 pub mod memory;
 pub mod message;
 pub mod provider;
+pub mod query_chain;
 pub mod tool;
 
 // ── Prelude ───────────────────────────────────────────────────────────────────
@@ -36,8 +37,9 @@ pub mod prelude {
     pub use crate::memory::{Memory, MemoryEntry, MemoryError, NewMemory};
     pub use crate::message::{ContentBlock, Message, Role};
     pub use crate::provider::{ChatRequest, Provider, ProviderError, ToolDef};
+    pub use crate::query_chain::{DepthExceeded, QueryChain};
     pub use crate::tool::{
-        Artifact, ArtifactContent, FailureKind, SpawnFn,
+        Artifact, ArtifactContent, ContextInjection, FailureKind, SpawnFn,
         Tool, ToolCtx, ToolInput, ToolOutput,
     };
 }

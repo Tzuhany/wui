@@ -41,6 +41,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::message::Message;
+use crate::query_chain::QueryChain;
 
 // ── Tool trait ────────────────────────────────────────────────────────────────
 
@@ -150,6 +151,13 @@ pub struct ToolCtx {
 
     /// Sub-agent spawn capability, if configured.
     pub spawn: Option<SpawnFn>,
+
+    /// Position in the sub-agent delegation tree, if this tool is running
+    /// inside a sub-agent. `None` for tools running in a top-level agent.
+    ///
+    /// Tools can inspect `chain.depth` and `chain.remaining()` before
+    /// spawning further sub-agents to avoid runaway delegation.
+    pub chain: Option<QueryChain>,
 }
 
 impl ToolCtx {
@@ -181,9 +189,9 @@ pub type SpawnFn =
 /// When it fails, `failure` carries the reason — not just a boolean — so the
 /// harness and the LLM can respond appropriately to each failure kind.
 ///
-/// Tools may attach `artifacts` (files, images, charts) and `extra_messages`
-/// (additional context to inject into the conversation) alongside the primary
-/// text `content`. These are processed after all tool results are collected.
+/// Tools may attach `artifacts` (files, images, charts) and `injections`
+/// (system-level context) alongside the primary text `content`.
+/// These are processed after all tool results are collected.
 #[derive(Debug, Clone, Default)]
 pub struct ToolOutput {
     /// The content returned to the LLM (description, result, or error message).
@@ -195,12 +203,15 @@ pub struct ToolOutput {
     /// Emitted as `AgentEvent::Artifact` events so callers can handle them
     /// independently from the text response (save to disk, render in UI, etc.).
     pub artifacts: Vec<Artifact>,
-    /// Extra messages to inject into the conversation history after this turn.
+    /// System-level context to inject after this tool's result.
     ///
     /// Use sparingly. Typical use: a tool that fetches documentation injects
-    /// a system message with the doc content so the LLM sees it in context
-    /// without the user having to ask again.
-    pub extra_messages: Vec<Message>,
+    /// the doc content so the LLM sees it on the next turn without the user
+    /// having to ask again.
+    ///
+    /// Injections are formatted as `<system-reminder>` blocks — they are
+    /// explicitly system-level, not forgeable User or Assistant turns.
+    pub injections: Vec<ContextInjection>,
 }
 
 impl ToolOutput {
@@ -244,9 +255,9 @@ impl ToolOutput {
         self
     }
 
-    /// Attach extra messages to inject into the conversation.
-    pub fn with_extra_messages(mut self, messages: impl IntoIterator<Item = Message>) -> Self {
-        self.extra_messages = messages.into_iter().collect();
+    /// Attach system-level context injections.
+    pub fn with_injections(mut self, items: impl IntoIterator<Item = ContextInjection>) -> Self {
+        self.injections = items.into_iter().collect();
         self
     }
 
@@ -361,6 +372,31 @@ impl Artifact {
             mime_type: None,
             content:   ArtifactContent::Reference { uri: uri.into() },
         }
+    }
+}
+
+// ── Context Injection ─────────────────────────────────────────────────────────
+
+/// System-level context a tool wants the LLM to see on the next turn.
+///
+/// Injected as a `<system-reminder>` block — clearly a framework message,
+/// not a forged User or Assistant turn. This is the only injection surface
+/// tools have: they cannot write arbitrary roles into the conversation history.
+///
+/// ```rust,ignore
+/// ToolOutput::success("Done.")
+///     .with_injections([ContextInjection::new("The file was written to /tmp/out.json")])
+/// ```
+#[derive(Debug, Clone)]
+pub struct ContextInjection {
+    /// The text to inject. Plain prose — the engine wraps it in
+    /// `<system-reminder>` tags before appending to the conversation.
+    pub text: String,
+}
+
+impl ContextInjection {
+    pub fn new(text: impl Into<String>) -> Self {
+        Self { text: text.into() }
     }
 }
 

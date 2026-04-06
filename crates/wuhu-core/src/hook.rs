@@ -75,17 +75,41 @@ pub enum HookEvent<'a> {
 /// What a hook decides to do with an event.
 #[derive(Debug, Clone)]
 pub enum HookDecision {
-    /// Let the action proceed.
+    /// Let the action proceed unchanged.
     Allow,
 
+    /// Let the action proceed, but replace the tool's input JSON.
+    ///
+    /// Only honoured for `PreToolUse`. In other event contexts this is
+    /// treated as `Allow` — the engine never mutates outputs retroactively.
+    ///
+    /// Use for input sanitisation, argument normalisation, or injecting
+    /// caller-side context before the tool runs:
+    ///
+    /// ```rust,ignore
+    /// fn evaluate(&self, event: &HookEvent<'_>) -> HookDecision {
+    ///     if let HookEvent::PreToolUse { name: "bash", input } = event {
+    ///         let mut safe = input.clone();
+    ///         safe["command"] = sanitize(input["command"].as_str().unwrap_or(""));
+    ///         return HookDecision::mutate(safe);
+    ///     }
+    ///     HookDecision::Allow
+    /// }
+    /// ```
+    Mutate { input: serde_json::Value },
+
     /// Prevent the action. The reason is injected into the conversation
-    /// as a system-level error so the LLM can see it and self-correct.
+    /// as a system-level notice so the LLM can see it and self-correct.
     Block { reason: String },
 }
 
 impl HookDecision {
     pub fn allow() -> Self {
         Self::Allow
+    }
+
+    pub fn mutate(input: serde_json::Value) -> Self {
+        Self::Mutate { input }
     }
 
     pub fn block(reason: impl Into<String>) -> Self {

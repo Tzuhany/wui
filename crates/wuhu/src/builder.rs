@@ -37,8 +37,9 @@ pub struct AgentConfig {
     pub initial_extensions: HashMap<String, serde_json::Value>,
     pub spawn:              Option<SpawnFn>,
     pub query_chain:        Option<QueryChain>,
-    pub retry:              RetryPolicy,
-    pub tool_timeout:       Option<std::time::Duration>,
+    pub retry:                      RetryPolicy,
+    pub tool_timeout:               Option<std::time::Duration>,
+    pub ignore_diminishing_returns: bool,
 }
 
 /// Fluent builder for `Agent`.
@@ -65,8 +66,9 @@ impl AgentBuilder {
                 initial_extensions: HashMap::new(),
                 spawn:              None,
                 query_chain:        None,
-                retry:              RetryPolicy::default(),
-                tool_timeout:       None,
+                retry:                      RetryPolicy::default(),
+                tool_timeout:               None,
+                ignore_diminishing_returns: false,
             },
         }
     }
@@ -210,6 +212,17 @@ impl AgentBuilder {
     /// `"tool timed out"` error result and the LLM is informed.
     pub fn tool_timeout(mut self, duration: std::time::Duration) -> Self {
         self.config.tool_timeout = Some(duration);
+        self
+    }
+
+    /// Disable the diminishing-returns auto-stop heuristic.
+    ///
+    /// By default, the engine stops a run after several consecutive turns with
+    /// negligible output (< 500 tokens), on the assumption that the agent is
+    /// stuck. Call this when long tasks are expected to produce many short
+    /// intermediate steps before a large final result (research, file scans).
+    pub fn ignore_diminishing_returns(mut self) -> Self {
+        self.config.ignore_diminishing_returns = true;
         self
     }
 

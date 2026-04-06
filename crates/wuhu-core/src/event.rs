@@ -204,6 +204,10 @@ pub enum CompressMethod {
 /// Received inside `AgentEvent::Control`. The handle is cheaply cloneable;
 /// only the first response is delivered — subsequent calls are silent no-ops.
 ///
+/// **Must be responded to.** Dropping a handle without calling any method
+/// auto-denies the request — the engine treats a dropped sender as a denial
+/// so the agent loop can always make progress rather than hanging forever.
+///
 /// ```rust,ignore
 /// AgentEvent::Control(handle) => {
 ///     println!("Agent wants to: {}", handle.request.description());
@@ -213,6 +217,7 @@ pub enum CompressMethod {
 ///     handle.deny_always("never"); // for all future calls to this tool
 /// }
 /// ```
+#[must_use = "ControlHandle must be responded to; dropping it auto-denies the request"]
 #[derive(Clone)]
 pub struct ControlHandle {
     /// The details of what the agent is requesting.
@@ -378,6 +383,12 @@ pub enum RunStopReason {
     MaxIterations,
     /// Context pressure could not be relieved even with full compression.
     ContextOverflow,
+    /// Output tokens per turn fell below the useful threshold for too many
+    /// consecutive turns. The agent is no longer making progress.
+    DiminishingReturns,
+    /// Output was truncated at `max_tokens` even after escalation and
+    /// continuation injection.
+    MaxTokensExhausted,
 }
 
 /// A terminal error emitted as the last event in the stream.

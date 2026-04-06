@@ -47,6 +47,7 @@ use tokio_util::sync::CancellationToken;
 
 use wuhu_core::event::AgentEvent;
 use wuhu_core::message::Message;
+use wuhu_core::query_chain::QueryChain;
 use wuhu_core::tool::{SpawnFn, Tool, ToolCtx, ToolOutput};
 
 use crate::registry::ToolRegistry;
@@ -87,6 +88,7 @@ pub struct ToolExecutor {
     registry:        Arc<ToolRegistry>,
     cancel:          CancellationToken,
     spawn:           Option<SpawnFn>,
+    chain:           Option<QueryChain>,
     /// Channel to the caller's event stream — used for `ToolProgress` events.
     tx:              mpsc::Sender<AgentEvent>,
     /// Global tool timeout, applied when a tool doesn't declare its own.
@@ -100,6 +102,7 @@ impl ToolExecutor {
         registry:        Arc<ToolRegistry>,
         cancel:          CancellationToken,
         spawn:           Option<SpawnFn>,
+        chain:           Option<QueryChain>,
         tx:              mpsc::Sender<AgentEvent>,
         default_timeout: Option<Duration>,
     ) -> Self {
@@ -107,6 +110,7 @@ impl ToolExecutor {
             registry,
             cancel,
             spawn,
+            chain,
             tx,
             default_timeout,
             pending:    JoinSet::new(),
@@ -188,7 +192,7 @@ impl ToolExecutor {
             let timeout = tool.impl_.timeout().or(self.default_timeout);
             let ctx     = make_ctx(
                 self.cancel.clone(), tool.messages, self.spawn.clone(),
-                self.tx.clone(), tool.id.clone(), tool.name.clone(),
+                self.chain.clone(), self.tx.clone(), tool.id.clone(), tool.name.clone(),
             );
             let out = run_tool_safely(tool.impl_, tool.input, &ctx, timeout).await;
             let ms  = start.elapsed().as_millis() as u64;
@@ -208,11 +212,12 @@ impl ToolExecutor {
     ) {
         let cancel  = self.cancel.clone();
         let spawn   = self.spawn.clone();
+        let chain   = self.chain.clone();
         let tx      = self.tx.clone();
         let timeout = impl_.timeout().or(self.default_timeout);
         self.pending.spawn(async move {
             let start = Instant::now();
-            let ctx   = make_ctx(cancel, messages, spawn, tx, id.clone(), name.clone());
+            let ctx   = make_ctx(cancel, messages, spawn, chain, tx, id.clone(), name.clone());
             let out   = run_tool_safely(impl_, input, &ctx, timeout).await;
             let ms    = start.elapsed().as_millis() as u64;
             (id, name, out, ms)
@@ -250,6 +255,7 @@ fn make_ctx(
     cancel:    CancellationToken,
     messages:  Arc<[Message]>,
     spawn:     Option<SpawnFn>,
+    chain:     Option<QueryChain>,
     tx:        mpsc::Sender<AgentEvent>,
     tool_id:   String,
     tool_name: String,
@@ -272,6 +278,7 @@ fn make_ctx(
             });
         }),
         spawn,
+        chain,
     }
 }
 
