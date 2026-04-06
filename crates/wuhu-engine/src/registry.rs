@@ -27,16 +27,22 @@ impl ToolRegistry {
         self.tools.get(name).cloned()
     }
 
-    /// Produce `ToolDef`s for all non-deferred tools.
+    /// Produce `ToolDef`s for all non-deferred tools, sorted by name.
+    ///
+    /// Sorted so the LLM always sees the same tool order regardless of
+    /// registration order or HashMap iteration order. Non-deterministic
+    /// ordering can subtly affect which tool the LLM prefers to call.
     ///
     /// Deferred tools appear in the prompt by name/description only.
     /// Their full schema is fetched on demand via `ToolSearch`.
     pub fn tool_defs(&self) -> Vec<ToolDef> {
-        self.tools
+        let mut defs: Vec<ToolDef> = self.tools
             .values()
             .filter(|t| !t.defer_loading())
             .map(|t| ToolDef::from_tool(t.as_ref()))
-            .collect()
+            .collect();
+        defs.sort_by(|a, b| a.name.cmp(&b.name));
+        defs
     }
 
     /// Produce a `ToolDef` for a specific tool by name.

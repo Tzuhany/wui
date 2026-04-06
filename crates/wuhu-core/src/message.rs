@@ -36,13 +36,7 @@ impl Message {
         }
     }
 
-    /// True if this message has no content blocks (or only empty text blocks).
-    pub fn is_empty(&self) -> bool {
-        self.content.iter().all(|b| match b {
-            ContentBlock::Text { text } => text.is_empty(),
-            _ => false,
-        })
-    }
+
 }
 
 /// Who produced this message.

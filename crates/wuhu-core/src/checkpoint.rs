@@ -100,18 +100,23 @@ pub enum CheckpointError {
 
 // ── Built-in: In-Memory ───────────────────────────────────────────────────────
 
-/// A `Checkpoint` backed by a `tokio::sync::RwLock<HashMap>`.
+/// A `Checkpoint` backed by a shared `Arc<RwLock<HashMap>>`.
 ///
 /// Useful for testing and single-process deployments where persistence
 /// across restarts is not required. Drop-in replacement for any persistent
 /// backend during development.
+///
+/// `Clone` is cheap — all clones share the same underlying store. Pass the
+/// same `InMemory` to multiple agents and they will all read from and write
+/// to the same session map.
+#[derive(Clone)]
 pub struct InMemory {
-    store: tokio::sync::RwLock<std::collections::HashMap<String, SessionSnapshot>>,
+    store: std::sync::Arc<tokio::sync::RwLock<std::collections::HashMap<String, SessionSnapshot>>>,
 }
 
 impl InMemory {
     pub fn new() -> Self {
-        Self { store: tokio::sync::RwLock::new(std::collections::HashMap::new()) }
+        Self { store: std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())) }
     }
 }
 

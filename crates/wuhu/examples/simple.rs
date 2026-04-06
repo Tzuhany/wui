@@ -9,8 +9,12 @@ use wuhu_providers::Anthropic;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let key   = std::env::var("ANTHROPIC_API_KEY")?;
-    let agent = Agent::builder(Anthropic::new(key))
+    let key      = std::env::var("ANTHROPIC_API_KEY")?;
+    let provider = match std::env::var("ANTHROPIC_BASE_URL") {
+        Ok(url) => Anthropic::with_base_url(key, url),
+        Err(_)  => Anthropic::new(key),
+    };
+    let agent = Agent::builder(provider)
         .system("You are a concise assistant. Answer in one sentence.")
         .model("claude-haiku-4-5-20251001")
         .build();

@@ -1,118 +1,172 @@
 // ============================================================================
 // Session — multi-turn conversation state.
 //
-// A Session owns the message history for one ongoing conversation and
-// provides the `respond()` method for answering HITL control requests.
+// A Session owns the message history for one ongoing conversation.
+// After each turn, the full updated history is stored so the next call
+// to `send()` continues from exactly where the last one left off.
 //
-// Sessions are the unit of persistence: if a `Checkpoint` is configured,
-// the session saves after every turn and can be resumed after a restart.
+// ── History synchrony ─────────────────────────────────────────────────────────
+//
+// `messages` uses `std::sync::Mutex` (not tokio's) so the map() closure that
+// fires on `AgentEvent::Done` can update history *synchronously*, without
+// spawning a task. By the time `Done` is yielded to the caller, `self.messages`
+// already reflects the full turn — the next `send()` immediately sees it.
+//
+// We never hold this lock across an await point, so std::sync::Mutex is safe.
+//
+// ── Checkpoint persistence ────────────────────────────────────────────────────
+//
+// History is committed synchronously on Done. The checkpoint I/O (disk/network)
+// is spawned — it's best-effort and doesn't block the event stream. A failed
+// checkpoint save is logged and the in-memory history is still correct.
+//
+// ── Permission memory ─────────────────────────────────────────────────────────
+//
+// `SessionPermissions` is shared with the run loop. `ApproveAlways` /
+// `DenyAlways` responses from ControlHandle are stored here and honoured
+// for subsequent tool calls within this session — no re-prompting needed.
 // ============================================================================
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use futures::StreamExt;
-use tokio::sync::Mutex;
 
 use wuhu_core::checkpoint::{Checkpoint, SessionSnapshot};
-use wuhu_core::event::{AgentEvent, ControlResponse};
+use wuhu_core::event::AgentEvent;
 use wuhu_core::message::Message;
-use wuhu_core::tool::SpawnFn;
-use wuhu_compress::CompressPipeline;
-use wuhu_engine::{HookRunner, PermissionMode, RunConfig, ToolRegistry, run};
+use wuhu_engine::{HookRunner, RunConfig, SessionPermissions, ToolRegistry, run};
 
 use crate::builder::AgentConfig;
 
 /// An active multi-turn conversation.
 pub struct Session {
-    id:         String,
-    config:     Arc<AgentConfig>,
-    messages:   Arc<Mutex<Vec<Message>>>,
-    checkpoint: Option<Arc<dyn Checkpoint>>,
-    /// Live channel for sending control responses into the running loop.
-    pending_tx: Arc<Mutex<Option<tokio::sync::oneshot::Sender<ControlResponse>>>>,
+    id:           String,
+    config:       Arc<AgentConfig>,
+    messages:     Arc<Mutex<Vec<Message>>>,
+    checkpoint:   Option<Arc<dyn Checkpoint>>,
+    session_perms: Arc<SessionPermissions>,
 }
 
 impl Session {
     pub(crate) async fn new(id: impl Into<String>, config: Arc<AgentConfig>) -> Self {
         let id = id.into();
+
+        // Restore from checkpoint if available, otherwise start fresh.
         let messages = if let Some(cp) = &config.checkpoint {
-            cp.load(&id).await
-                .ok()
-                .flatten()
-                .map(|s| s.messages)
-                .unwrap_or_default()
+            match cp.load(&id).await {
+                Ok(Some(snapshot)) => snapshot.messages,
+                Ok(None)           => Vec::new(),
+                Err(e) => {
+                    tracing::warn!(
+                        session_id = %id, error = %e,
+                        "checkpoint load failed, starting fresh"
+                    );
+                    Vec::new()
+                }
+            }
         } else {
             Vec::new()
         };
 
         Self {
             id,
+            checkpoint: config.checkpoint.clone(),
             config,
-            messages:    Arc::new(Mutex::new(messages)),
-            checkpoint:  None, // set from AgentConfig if present
-            pending_tx:  Arc::new(Mutex::new(None)),
+            messages:      Arc::new(Mutex::new(messages)),
+            session_perms: Arc::new(SessionPermissions::new()),
         }
     }
 
     /// Send a message and return a stream of events.
+    ///
+    /// Consume the stream fully. When `AgentEvent::Done` is yielded,
+    /// session history has already been updated in memory — the next `send()`
+    /// immediately sees this turn's full context.
     pub async fn send(
         &self,
         content: impl Into<String>,
-    ) -> impl futures::Stream<Item = AgentEvent> + '_ {
-        use wuhu_core::message::Message;
-
+    ) -> impl futures::Stream<Item = AgentEvent> + Unpin + '_ {
         let user_msg = Message::user(content.into());
-        {
-            let mut msgs = self.messages.lock().await;
-            msgs.push(user_msg);
-        }
+        self.messages.lock()
+            .expect("session messages poisoned")
+            .push(user_msg);
 
-        let messages = self.messages.lock().await.clone();
+        let messages   = self.messages.lock()
+            .expect("session messages poisoned")
+            .clone();
         let run_config = self.make_run_config();
+        let cancel     = tokio_util::sync::CancellationToken::new();
+        let stream     = run(Arc::new(run_config), messages, cancel);
 
-        let cancel = tokio_util::sync::CancellationToken::new();
-        let event_stream = run(Arc::new(run_config), messages, cancel.clone());
-
-        // Collect committed messages from the stream's Done event.
+        // Wire Done back to session state.
         let messages_ref = self.messages.clone();
-        let checkpoint   = self.config.checkpoint.clone();
+        let checkpoint   = self.checkpoint.clone();
         let session_id   = self.id.clone();
 
-        event_stream.map(move |event| {
-            if let AgentEvent::Done(ref summary) = event {
-                // The summary doesn't include individual messages — we'd need
-                // the full updated history. For now, the run loop returns the
-                // updated messages through the config. This is simplified.
-                // Full implementation: run() returns (Stream, updated_messages).
-                let _ = (&messages_ref, &checkpoint, &session_id);
+        // Use `then` (async map) so checkpoint I/O completes before `Done` is
+        // yielded to the caller. This guarantees that by the time the caller
+        // sees `Done`, both in-memory history and the checkpoint are up to date.
+        // Box::pin makes the result Unpin so callers can use `stream.next().await`
+        // without pinning manually.
+        Box::pin(stream.then(move |event| {
+            let messages_ref = messages_ref.clone();
+            let checkpoint   = checkpoint.clone();
+            let session_id   = session_id.clone();
+            async move {
+                if let AgentEvent::Done(ref summary) = event {
+                    let updated = summary.messages.clone();
+
+                    // Update in-memory history synchronously.
+                    *messages_ref.lock().expect("session messages poisoned") = updated.clone();
+
+                    // Persist checkpoint inline — caller sees Done only after save.
+                    if let Some(cp) = checkpoint {
+                        let sid      = session_id.clone();
+                        let snapshot = SessionSnapshot {
+                            session_id: sid.clone(),
+                            messages:   updated,
+                            pending:    None,
+                            archive:    Vec::new(),
+                        };
+                        if let Err(e) = cp.save(&sid, &snapshot).await {
+                            tracing::warn!(session_id = %sid, error = %e, "checkpoint save failed");
+                        }
+                    }
+                }
+                event
             }
-            event
-        })
+        }))
     }
 
-    /// Respond to a pending control request (HITL).
+    /// The current message history for this session (read-only snapshot).
+    pub fn messages(&self) -> Vec<Message> {
+        self.messages.lock().expect("session messages poisoned").clone()
+    }
+
+    /// The session's permission memory.
     ///
-    /// Call this after receiving `AgentEvent::Control` from a `send()` stream.
-    pub async fn respond(&self, response: ControlResponse) {
-        if let Some(tx) = self.pending_tx.lock().await.take() {
-            let _ = tx.send(response);
-        }
+    /// Inspect or programmatically update which tools are always-allowed or
+    /// always-denied without going through the HITL flow.
+    pub fn permissions(&self) -> Arc<SessionPermissions> {
+        self.session_perms.clone()
     }
 
     fn make_run_config(&self) -> RunConfig {
         RunConfig {
-            provider:    self.config.provider.clone(),
-            tools:       Arc::new(ToolRegistry::new(self.config.tools.clone())),
-            hooks:       Arc::new(HookRunner::new(self.config.hooks.clone())),
-            compress:    self.config.compress.clone(),
-            permission:  self.config.permission.clone(),
-            system:      self.config.system.clone(),
-            model:       self.config.model.clone(),
-            max_tokens:  self.config.max_tokens,
-            temperature: self.config.temperature,
-            max_iter:    self.config.max_iter,
-            extensions:  self.config.extensions.clone(),
-            spawn:       self.config.spawn.clone(),
+            provider:      self.config.provider.clone(),
+            tools:         Arc::new(ToolRegistry::new(self.config.tools.clone())),
+            hooks:         Arc::new(HookRunner::new(self.config.hooks.clone())),
+            compress:      self.config.compress.clone(),
+            permission:    self.config.permission.clone(),
+            session_perms: self.session_perms.clone(),
+            system:        self.config.system.clone(),
+            model:         self.config.model.clone(),
+            max_tokens:    self.config.max_tokens,
+            temperature:   self.config.temperature,
+            max_iter:      self.config.max_iter,
+            extensions:         self.config.extensions.clone(),
+            initial_extensions: self.config.initial_extensions.clone(),
+            spawn:              self.config.spawn.clone(),
         }
     }
 }

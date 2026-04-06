@@ -7,16 +7,29 @@
 // State lives in ToolCtx, not in the tool. A tool is pure logic: given an
 // input and a context, produce an output. That is all.
 //
-// The is_concurrent_for(input) method is the key design decision that sets
-// this trait apart from simpler frameworks: concurrency is a per-invocation
-// decision, not a per-tool-type decision. A shell tool, for example, can
-// allow read-only commands to run in parallel while serialising writes.
+// ── is_concurrent_for(input) ──────────────────────────────────────────────────
+//
+// Concurrency is a per-invocation decision, not a per-tool-type decision.
+// A shell tool, for example, can allow read-only commands to run in parallel
+// while serialising writes. The input is inspected at submission time; the
+// executor routes accordingly.
+//
+// ── ToolOutput and FailureKind ────────────────────────────────────────────────
+//
+// When a tool fails, the kind of failure matters. A schema validation error
+// suggests the LLM should retry with corrected arguments. A permission denial
+// means it should stop and explain. An execution error might be retried after
+// fixing the underlying condition.
+//
+// FailureKind gives the harness — and the LLM — structured information to
+// act on, rather than a generic `is_error: bool`.
 // ============================================================================
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use futures::future::BoxFuture;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::message::Message;
@@ -53,23 +66,33 @@ pub trait Tool: Send + Sync + 'static {
         false
     }
 
-    /// A short hint for the ToolSearch tool (3-10 words).
+    /// A short hint for the ToolSearch tool (3–10 words).
     ///
-    /// Only relevant when `defer_loading()` is true.
+    /// Only relevant when `defer_loading()` returns `true`.
     fn search_hint(&self) -> Option<&str> {
         None
     }
 
+    /// Whether this tool has no observable side effects.
+    ///
+    /// Defaults to `false` (assume the tool mutates state). Override to
+    /// return `true` for pure read operations: web search, file read, etc.
+    ///
+    /// Used by `PermissionMode::Readonly`: only tools returning `true` are
+    /// permitted; all others are blocked without prompting the user.
+    fn is_readonly(&self) -> bool {
+        false
+    }
+
     /// Whether this specific invocation can run concurrently with others.
     ///
-    /// The default is `true`. Override to inspect `input` when the safety
+    /// Defaults to `true`. Override to inspect `input` when the safety
     /// decision depends on arguments — e.g. a shell tool that runs read-only
     /// commands concurrently but serialises writes:
     ///
-    /// ```rust
+    /// ```rust,ignore
     /// fn is_concurrent_for(&self, input: &Value) -> bool {
-    ///     let cmd = input["command"].as_str().unwrap_or("");
-    ///     is_readonly(cmd)
+    ///     is_readonly_command(input["command"].as_str().unwrap_or(""))
     /// }
     /// ```
     ///
@@ -83,8 +106,8 @@ pub trait Tool: Send + Sync + 'static {
     /// Execute the tool.
     ///
     /// Called only after input has been validated against `input_schema()`.
-    /// `ctx` provides cancellation, the current message history, and
-    /// progress reporting.
+    /// `ctx` provides the conversation history, a cancellation token, and
+    /// a progress reporter.
     async fn call(&self, input: Value, ctx: &ToolCtx) -> ToolOutput;
 }
 
@@ -96,17 +119,18 @@ pub struct ToolCtx {
     pub cancel: tokio_util::sync::CancellationToken,
 
     /// The conversation history at the time of this invocation (read-only).
-    /// Useful for tools that need context awareness (e.g. sub-agents).
-    pub messages: Vec<Message>,
+    ///
+    /// `Arc<[Message]>` rather than `Vec<Message>`: the history is shared
+    /// across all concurrent tool invocations without copying. Clone the Arc
+    /// to pass it around cheaply; call `.to_vec()` only if you need mutation.
+    pub messages: Arc<[Message]>,
 
-    /// Report incremental progress to the stream. Each call emits a log
-    /// line; the framework forwards these to the caller as trace events.
+    /// Report incremental progress to the stream.
+    ///
+    /// Each call emits a log line; the framework forwards it as a trace event.
     pub on_progress: Box<dyn Fn(String) + Send + Sync>,
 
-    /// The sub-agent spawn capability, if configured.
-    ///
-    /// Present when the framework was built with a sub-agent provider.
-    /// `None` for tools that don't need to spawn agents.
+    /// Sub-agent spawn capability, if configured.
     pub spawn: Option<SpawnFn>,
 }
 
@@ -115,42 +139,111 @@ impl ToolCtx {
         (self.on_progress)(msg.into());
     }
 
-    /// Spawn a sub-agent. Returns `None` if sub-agent capability was not
-    /// configured on the enclosing `Agent`.
-    pub fn spawn_agent(&self, prompt: impl Into<String>) -> Option<BoxFuture<'static, anyhow::Result<String>>> {
+    /// Spawn a sub-agent. Returns `None` if the capability was not configured.
+    pub fn spawn_agent(
+        &self,
+        prompt: impl Into<String>,
+    ) -> Option<BoxFuture<'static, anyhow::Result<String>>> {
         self.spawn.as_ref().map(|f| f(prompt.into()))
     }
 }
 
 /// The closure type used to spawn sub-agents.
 ///
-/// Captured by the engine after `LoopConfig` is constructed and injected
-/// into `ToolCtx` at execution time. The `Tool` trait itself never imports
-/// engine types — it depends only on `wuhu-core`.
-pub type SpawnFn = Arc<dyn Fn(String) -> BoxFuture<'static, anyhow::Result<String>> + Send + Sync>;
+/// Captured by the engine after `RunConfig` is constructed and injected
+/// into `ToolCtx` at execution time. The `Tool` trait never imports engine
+/// types — it depends only on `wuhu-core`.
+pub type SpawnFn =
+    Arc<dyn Fn(String) -> BoxFuture<'static, anyhow::Result<String>> + Send + Sync>;
 
 // ── Tool Output ───────────────────────────────────────────────────────────────
 
 /// The result of a tool invocation.
+///
+/// When the tool succeeds, `failure` is `None`.
+/// When it fails, `failure` carries the reason — not just a boolean — so the
+/// harness and the LLM can respond appropriately to each failure kind.
 #[derive(Debug, Clone)]
 pub struct ToolOutput {
-    /// The content returned to the LLM.
-    pub content:  String,
-    /// Whether the tool failed. The LLM sees this and can decide how to
-    /// handle the failure — retry, inform the user, or give up.
-    pub is_error: bool,
+    /// The content returned to the LLM (description, result, or error message).
+    pub content: String,
+    /// `None` on success. `Some(kind)` on failure.
+    pub failure: Option<FailureKind>,
 }
 
 impl ToolOutput {
+    // ── Public constructors ────────────────────────────────────────────────
+
+    /// Successful tool execution.
     pub fn success(content: impl Into<String>) -> Self {
-        Self { content: content.into(), is_error: false }
+        Self { content: content.into(), failure: None }
     }
 
+    /// Failed execution — the tool ran but produced an error.
+    ///
+    /// This is the constructor tool implementors use. More specific failures
+    /// (schema violations, permission denials) are created by the engine.
     pub fn error(content: impl Into<String>) -> Self {
-        Self { content: content.into(), is_error: true }
+        Self { content: content.into(), failure: Some(FailureKind::Execution) }
     }
+
+    // ── Engine-internal constructors ───────────────────────────────────────
+
+    /// The tool's input did not satisfy its JSON Schema.
+    pub fn invalid_input(content: impl Into<String>) -> Self {
+        Self { content: content.into(), failure: Some(FailureKind::InvalidInput) }
+    }
+
+    /// The tool was not found in the registry.
+    pub fn not_found(content: impl Into<String>) -> Self {
+        Self { content: content.into(), failure: Some(FailureKind::NotFound) }
+    }
+
+    /// The tool was blocked by a hook before execution.
+    pub fn hook_blocked(content: impl Into<String>) -> Self {
+        Self { content: content.into(), failure: Some(FailureKind::HookBlocked) }
+    }
+
+    /// The tool was denied by the permission system.
+    pub fn permission_denied(content: impl Into<String>) -> Self {
+        Self { content: content.into(), failure: Some(FailureKind::PermissionDenied) }
+    }
+
+    // ── Accessors ─────────────────────────────────────────────────────────
 
     pub fn is_ok(&self) -> bool {
-        !self.is_error
+        self.failure.is_none()
     }
+
+    pub fn is_error(&self) -> bool {
+        self.failure.is_some()
+    }
+}
+
+// ── Failure Kind ─────────────────────────────────────────────────────────────
+
+/// Why a tool invocation failed.
+///
+/// The harness and the LLM use this to decide how to recover:
+///
+/// | Kind              | Typical recovery                                     |
+/// |-------------------|------------------------------------------------------|
+/// | `Execution`       | Surface the error; LLM decides whether to retry     |
+/// | `InvalidInput`    | Inject schema hints; LLM retries with correct args  |
+/// | `NotFound`        | Inform the LLM; do not retry                         |
+/// | `HookBlocked`     | Inject reason; LLM may seek an alternative approach |
+/// | `PermissionDenied`| Inject reason; LLM must not retry this tool         |
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FailureKind {
+    /// The tool executed but produced an error result.
+    Execution,
+    /// The tool's input failed JSON Schema validation.
+    InvalidInput,
+    /// The tool name was not found in the registry.
+    NotFound,
+    /// A hook blocked the tool call before execution.
+    HookBlocked,
+    /// The permission system denied the tool call.
+    PermissionDenied,
 }

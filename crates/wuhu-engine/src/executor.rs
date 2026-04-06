@@ -28,12 +28,19 @@
 //   LLM streaming: ──token──ToolA start──token──ToolB start──token──done──
 //   ToolA:                                                          ├──────┤
 //   ToolB:                                                                 ├──┤
+//
+// ── Arc<[Message]> history ────────────────────────────────────────────────────
+//
+// Tool invocations receive the conversation history via `Arc<[Message]>`.
+// Every tool in a concurrent batch shares the same Arc — no copying, one
+// allocation. The history is read-only for tools; they cannot modify it.
 // ============================================================================
 
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Instant;
 
+use futures::FutureExt as _;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
@@ -46,11 +53,12 @@ use crate::registry::ToolRegistry;
 
 /// A tool call received from the LLM, ready for validation and execution.
 pub struct PendingTool {
-    pub id:       String,
-    pub name:     String,
-    pub input:    serde_json::Value,
+    pub id:    String,
+    pub name:  String,
+    pub input: serde_json::Value,
     /// Snapshot of the conversation at submission time.
-    pub messages: Vec<Message>,
+    /// `Arc` so the snapshot is shared across concurrent tools without copying.
+    pub messages: Arc<[Message]>,
 }
 
 /// A tool call that has finished executing.
@@ -63,11 +71,11 @@ pub struct CompletedTool {
 
 /// A validated tool waiting in the sequential queue.
 struct QueuedTool {
-    id:      String,
-    name:    String,
-    input:   serde_json::Value,
-    messages: Vec<Message>,
-    impl_:   Arc<dyn Tool>,
+    id:       String,
+    name:     String,
+    input:    serde_json::Value,
+    messages: Arc<[Message]>,
+    impl_:    Arc<dyn Tool>,
 }
 
 // ── Executor ──────────────────────────────────────────────────────────────────
@@ -98,8 +106,8 @@ impl ToolExecutor {
 
     /// Submit a tool for execution.
     ///
-    /// Called immediately when `ToolUseEnd` is received — the LLM may
-    /// still be streaming. Steps:
+    /// Called immediately when `ToolUseEnd` is received — the LLM may still
+    /// be streaming. Steps:
     ///   1. Look up the tool in the registry.
     ///   2. Validate input against the tool's JSON Schema.
     ///   3. Check `is_concurrent_for(input)`.
@@ -108,15 +116,15 @@ impl ToolExecutor {
         let PendingTool { id, name, input, messages } = pending;
 
         let Some(impl_) = self.registry.get(&name) else {
-            let out = ToolOutput::error(format!("unknown tool: {name}"));
+            let out = ToolOutput::not_found(format!("unknown tool: {name}"));
             self.pending.spawn(async move { (id, name, out, 0u64) });
             return;
         };
 
         if let Err(errors) = validate_input(&input, &impl_.input_schema()) {
-            let msg = format!("invalid input for '{}': {}", name, errors.join("; "));
+            let msg = format!("invalid input for '{name}': {}", errors.join("; "));
             tracing::warn!(tool = %name, %msg, "input validation failed");
-            let out = ToolOutput::error(msg);
+            let out = ToolOutput::invalid_input(msg);
             self.pending.spawn(async move { (id, name, out, 0u64) });
             return;
         }
@@ -137,7 +145,9 @@ impl ToolExecutor {
         let mut results = Vec::new();
         while let Some(res) = self.pending.try_join_next() {
             match res {
-                Ok((id, name, output, ms)) => results.push(CompletedTool { id, name, output, ms }),
+                Ok((id, name, output, ms)) => {
+                    results.push(CompletedTool { id, name, output, ms });
+                }
                 Err(e) => tracing::error!(error = %e, "tool task panicked"),
             }
         }
@@ -152,34 +162,29 @@ impl ToolExecutor {
     pub async fn collect_remaining(mut self) -> Vec<CompletedTool> {
         let mut results = Vec::new();
 
-        // Drain concurrent tasks.
+        // Drain concurrent tasks first.
         while let Some(res) = self.pending.join_next().await {
             match res {
-                Ok((id, name, output, ms)) => results.push(CompletedTool { id, name, output, ms }),
+                Ok((id, name, output, ms)) => {
+                    results.push(CompletedTool { id, name, output, ms });
+                }
                 Err(e) => tracing::error!(error = %e, "tool task panicked"),
             }
         }
 
-        // Run sequential tools in order.
+        // Run sequential tools in submission order.
         while let Some(tool) = self.sequential.pop_front() {
-            let cancel = self.cancel.clone();
-            let spawn  = self.spawn.clone();
-            let ms = {
-                let start = Instant::now();
-                let ctx = make_ctx(cancel, tool.messages, spawn);
-                let out = tool.impl_.call(tool.input, &ctx).await;
-                let ms  = start.elapsed().as_millis() as u64;
-                results.push(CompletedTool { id: tool.id, name: tool.name, output: out, ms });
-                ms
-            };
-            let _ = ms;
+            let start = Instant::now();
+            let ctx   = make_ctx(self.cancel.clone(), tool.messages, self.spawn.clone());
+            let out = std::panic::AssertUnwindSafe(tool.impl_.call(tool.input, &ctx))
+                .catch_unwind()
+                .await
+                .unwrap_or_else(|_| ToolOutput::error("tool panicked unexpectedly"));
+            let ms    = start.elapsed().as_millis() as u64;
+            results.push(CompletedTool { id: tool.id, name: tool.name, output: out, ms });
         }
 
         results
-    }
-
-    pub fn has_pending(&self) -> bool {
-        !self.pending.is_empty() || !self.sequential.is_empty()
     }
 
     fn spawn_concurrent(
@@ -187,7 +192,7 @@ impl ToolExecutor {
         id:       String,
         name:     String,
         input:    serde_json::Value,
-        messages: Vec<Message>,
+        messages: Arc<[Message]>,
         impl_:    Arc<dyn Tool>,
     ) {
         let cancel = self.cancel.clone();
@@ -195,7 +200,13 @@ impl ToolExecutor {
         self.pending.spawn(async move {
             let start = Instant::now();
             let ctx   = make_ctx(cancel, messages, spawn);
-            let out   = impl_.call(input, &ctx).await;
+            // Wrap in catch_unwind so a panicking tool produces an error result
+            // rather than silently leaving a missing ToolResult in the history
+            // (which would cause a 400 on the next API call).
+            let out = std::panic::AssertUnwindSafe(impl_.call(input, &ctx))
+                .catch_unwind()
+                .await
+                .unwrap_or_else(|_| ToolOutput::error("tool panicked unexpectedly"));
             let ms    = start.elapsed().as_millis() as u64;
             (id, name, out, ms)
         });
@@ -206,7 +217,7 @@ impl ToolExecutor {
 
 fn make_ctx(
     cancel:   CancellationToken,
-    messages: Vec<Message>,
+    messages: Arc<[Message]>,
     spawn:    Option<SpawnFn>,
 ) -> ToolCtx {
     ToolCtx {

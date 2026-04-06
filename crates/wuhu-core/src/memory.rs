@@ -4,12 +4,23 @@
 // Memory is distinct from the conversation history. History is what happened
 // in this session; memory is what the agent knows across all sessions.
 //
-// The framework defines the trait and the injection contract. The recall
-// strategy (vector search, BM25, recency, hybrid) and the storage backend
-// are application concerns — the framework does not prescribe them.
+// The framework defines the trait. The recall strategy (vector search, BM25,
+// recency, hybrid) and storage backend are application concerns — the framework
+// does not prescribe them.
 //
-// The engine calls recall() before each turn and injects the results into
-// the system prompt. The agent can call write() to persist new knowledge.
+// Integration contract:
+//   The framework does NOT auto-inject memory. You decide when and how memory
+//   enters the agent's context. The two idiomatic patterns are:
+//
+//   1. Inject at session start — call `memory.recall(query)` before creating
+//      the session and prepend the results to the system prompt.
+//
+//   2. Inject via tools — implement a MemoryRecall tool that calls
+//      `memory.recall()` and returns the results as a tool output. The LLM
+//      calls the tool when it needs to remember something.
+//
+// Pattern 2 is recommended: it lets the LLM decide when memory matters,
+// rather than injecting noise every turn.
 // ============================================================================
 
 use async_trait::async_trait;
@@ -33,9 +44,8 @@ pub trait Memory: Send + Sync + 'static {
 
     /// Persist a new memory entry.
     ///
-    /// Called by the agent (via the MemoryWrite tool) when it decides
-    /// something is worth remembering. The framework does not call this
-    /// automatically — the LLM decides what to remember.
+    /// Call this from a MemoryWrite tool when the agent decides something
+    /// is worth remembering. Returns the id of the created entry.
     async fn write(&self, entry: NewMemory) -> Result<String, MemoryError>;
 
     /// Search for entries matching a query (semantic or keyword).

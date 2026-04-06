@@ -27,13 +27,13 @@ pub mod tool;
 pub mod prelude {
     pub use crate::checkpoint::{Checkpoint, CheckpointError, InMemory, SessionSnapshot};
     pub use crate::event::{
-        AgentEvent, AgentError, CompressMethod, ControlDecision, ControlKind,
-        ControlRequest, ControlResponse, RunStopReason, RunSummary,
+        AgentEvent, AgentError, CompressMethod, ControlDecision, ControlHandle,
+        ControlKind, ControlRequest, ControlResponse, RunStopReason, RunSummary,
         StopReason, StreamEvent, TokenUsage,
     };
     pub use crate::hook::{DenyList, Hook, HookDecision, HookEvent};
     pub use crate::memory::{Memory, MemoryEntry, MemoryError, NewMemory};
     pub use crate::message::{ContentBlock, Message, Role};
     pub use crate::provider::{ChatRequest, Provider, ProviderError, ToolDef};
-    pub use crate::tool::{SpawnFn, Tool, ToolCtx, ToolOutput};
+    pub use crate::tool::{FailureKind, SpawnFn, Tool, ToolCtx, ToolOutput};
 }

@@ -11,9 +11,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use wuhu_core::checkpoint::Checkpoint;
-use wuhu_core::event::ControlResponse;
 use wuhu_core::hook::Hook;
-use wuhu_core::memory::Memory;
 use wuhu_core::provider::Provider;
 use wuhu_core::tool::{SpawnFn, Tool};
 use wuhu_compress::CompressPipeline;
@@ -27,7 +25,6 @@ pub struct AgentConfig {
     pub tools:       Vec<Arc<dyn Tool>>,
     pub hooks:       Vec<Arc<dyn Hook>>,
     pub checkpoint:  Option<Arc<dyn Checkpoint>>,
-    pub memory:      Option<Arc<dyn Memory>>,
     pub compress:    CompressPipeline,
     pub permission:  PermissionMode,
     pub system:      String,
@@ -35,9 +32,9 @@ pub struct AgentConfig {
     pub max_tokens:  u32,
     pub temperature: Option<f32>,
     pub max_iter:    u32,
-    pub extensions:  HashMap<String, serde_json::Value>,
-    pub spawn:       Option<SpawnFn>,
-    pub on_control:  Option<Arc<dyn Fn(ControlResponse) + Send + Sync>>,
+    pub extensions:         HashMap<String, serde_json::Value>,
+    pub initial_extensions: HashMap<String, serde_json::Value>,
+    pub spawn:              Option<SpawnFn>,
 }
 
 /// Fluent builder for `Agent`.
@@ -53,7 +50,6 @@ impl AgentBuilder {
                 tools:       Vec::new(),
                 hooks:       Vec::new(),
                 checkpoint:  None,
-                memory:      None,
                 compress:    CompressPipeline::default(),
                 permission:  PermissionMode::Ask,
                 system:      String::new(),
@@ -61,9 +57,9 @@ impl AgentBuilder {
                 max_tokens:  8192,
                 temperature: None,
                 max_iter:    20,
-                extensions:  HashMap::new(),
-                spawn:       None,
-                on_control:  None,
+                extensions:         HashMap::new(),
+                initial_extensions: HashMap::new(),
+                spawn:              None,
             },
         }
     }
@@ -74,7 +70,7 @@ impl AgentBuilder {
         self
     }
 
-    /// Add a pre-built Arc tool (useful for sharing tools across agents).
+    /// Add a pre-built `Arc<dyn Tool>` (useful for sharing tools across agents).
     pub fn tool_arc(mut self, tool: Arc<dyn Tool>) -> Self {
         self.config.tools.push(tool);
         self
@@ -92,9 +88,23 @@ impl AgentBuilder {
         self
     }
 
-    /// Attach a memory backend for cross-session knowledge.
-    pub fn memory(mut self, mem: impl Memory) -> Self {
-        self.config.memory = Some(Arc::new(mem));
+    /// Attach a sub-agent spawn capability.
+    ///
+    /// Tools can call `ctx.spawn_agent(prompt)` to delegate work to this
+    /// sub-agent. Use `another_agent.as_spawn_fn()` to create the value:
+    ///
+    /// ```rust,ignore
+    /// let researcher = Agent::builder(provider.clone())
+    ///     .system("You are a research assistant.")
+    ///     .tool(WebSearch)
+    ///     .build();
+    ///
+    /// let orchestrator = Agent::builder(provider)
+    ///     .spawn(researcher.as_spawn_fn())
+    ///     .build();
+    /// ```
+    pub fn spawn(mut self, spawn_fn: SpawnFn) -> Self {
+        self.config.spawn = Some(spawn_fn);
         self
     }
 
@@ -134,7 +144,7 @@ impl AgentBuilder {
         self
     }
 
-    /// Configure the compression pipeline.
+    /// Configure the context compression pipeline.
     pub fn compress(mut self, compress: CompressPipeline) -> Self {
         self.config.compress = compress;
         self
@@ -142,8 +152,8 @@ impl AgentBuilder {
 
     /// Add a provider-specific extension to every request.
     ///
-    /// Example (Anthropic extended thinking):
-    /// ```rust
+    /// Example — Anthropic extended thinking:
+    /// ```rust,ignore
     /// .extension("thinking", json!({"type": "enabled", "budget_tokens": 8000}))
     /// ```
     pub fn extension(mut self, key: impl Into<String>, value: impl Into<serde_json::Value>) -> Self {
@@ -151,6 +161,23 @@ impl AgentBuilder {
         self
     }
 
+    /// Add a provider-specific extension applied **only on the first LLM call**.
+    ///
+    /// Use for parameters that should steer the opening response but must not
+    /// persist into continuation turns. The canonical example is `tool_choice`:
+    /// forcing the first turn to call a tool while allowing subsequent turns to
+    /// respond freely. Without this, `tool_choice=any` would apply to every
+    /// iteration and loop until `max_iter`.
+    ///
+    /// ```rust,ignore
+    /// .initial_extension("tool_choice", json!({"type": "any"}))
+    /// ```
+    pub fn initial_extension(mut self, key: impl Into<String>, value: impl Into<serde_json::Value>) -> Self {
+        self.config.initial_extensions.insert(key.into(), value.into());
+        self
+    }
+
+    /// Finalise the builder and return a ready-to-run `Agent`.
     pub fn build(self) -> Agent {
         Agent { config: Arc::new(self.config) }
     }

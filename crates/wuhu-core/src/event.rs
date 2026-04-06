@@ -10,11 +10,29 @@
 //
 // The separation matters: it lets the engine present a clean, stable API to
 // users while remaining free to evolve how it interprets raw provider output.
+//
+// ── ControlHandle — capability, not just notification ─────────────────────────
+//
+// Most frameworks send a ControlRequest (data) and require the caller to track
+// a separate response channel. ControlHandle bundles both: the request data
+// AND the capability to respond. The caller receives one object and calls
+// handle.approve() or handle.deny("reason") — no side-channel bookkeeping.
+//
+// ── ApproveAlways / DenyAlways — permission memory ───────────────────────────
+//
+// A session remembers "always allow / always deny" decisions across turns.
+// Once a tool is always-approved, subsequent calls skip the permission prompt.
+// This eliminates the friction of re-approving the same tool call repeatedly
+// without sacrificing safety: the user makes the decision once, explicitly.
 // ============================================================================
+
+use std::fmt;
+use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 
-use crate::message::ContentBlock;
+use crate::message::Message;
+use crate::tool::FailureKind;
 
 // ── Internal: LLM → Engine ───────────────────────────────────────────────────
 
@@ -57,15 +75,21 @@ pub enum StopReason {
 /// Token consumption for a single LLM call.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TokenUsage {
-    pub input_tokens:        u32,
-    pub output_tokens:       u32,
-    pub cache_read_tokens:   u32,
-    pub cache_write_tokens:  u32,
+    pub input_tokens:       u32,
+    pub output_tokens:      u32,
+    pub cache_read_tokens:  u32,
+    pub cache_write_tokens: u32,
 }
 
 impl TokenUsage {
+    /// Total non-cache tokens consumed.
     pub fn total(&self) -> u32 {
         self.input_tokens + self.output_tokens
+    }
+
+    /// All tokens consumed including cache activity.
+    pub fn total_with_cache(&self) -> u32 {
+        self.total() + self.cache_read_tokens + self.cache_write_tokens
     }
 }
 
@@ -75,6 +99,8 @@ impl TokenUsage {
 ///
 /// The enum is exhaustive — every possible agent milestone is represented.
 /// Match on it to build any kind of consumer: TUI, websocket, log file, test.
+///
+/// Only `Control` requires caller action. All other variants are informational.
 #[derive(Debug, Clone)]
 pub enum AgentEvent {
     // ── Streaming text ────────────────────────────────────────────────
@@ -97,16 +123,22 @@ pub enum AgentEvent {
         id:    String,
         name:  String,
         error: String,
+        /// Structured reason for the failure. Use this to tailor UI and
+        /// recovery logic — a `PermissionDenied` warrants different
+        /// treatment than an `Execution` error.
+        kind:  FailureKind,
         ms:    u64,
     },
 
     // ── HITL ──────────────────────────────────────────────────────────
     /// The agent has paused and is waiting for a human decision.
-    Control(ControlRequest),
+    ///
+    /// Call `handle.approve()`, `handle.approve_always()`,
+    /// `handle.deny("reason")`, or `handle.deny_always("reason")` to resume.
+    Control(ControlHandle),
 
     // ── Context management ────────────────────────────────────────────
-    /// Context compression was applied. Emitted so the caller can log it
-    /// or surface it in UI.
+    /// Context compression was applied.
     Compressed {
         method: CompressMethod,
         /// Approximate tokens freed.
@@ -130,11 +162,121 @@ pub enum CompressMethod {
     Summarize,
 }
 
+// ── ControlHandle ─────────────────────────────────────────────────────────────
+
+/// A pause point bundled with the capability to resume it.
+///
+/// Received inside `AgentEvent::Control`. The handle is cheaply cloneable;
+/// only the first response is delivered — subsequent calls are silent no-ops.
+///
+/// ```rust,ignore
+/// AgentEvent::Control(handle) => {
+///     println!("Agent wants to: {}", handle.request.description());
+///     handle.approve();            // once
+///     handle.approve_always();     // for all future calls to this tool
+///     handle.deny("not allowed");  // once
+///     handle.deny_always("never"); // for all future calls to this tool
+/// }
+/// ```
+#[derive(Clone)]
+pub struct ControlHandle {
+    /// The details of what the agent is requesting.
+    pub request: ControlRequest,
+    tx: Arc<Mutex<Option<tokio::sync::oneshot::Sender<ControlResponse>>>>,
+}
+
+impl ControlHandle {
+    /// Create a handle and its matching receiver (used by the engine).
+    pub fn new(
+        request: ControlRequest,
+    ) -> (Self, tokio::sync::oneshot::Receiver<ControlResponse>) {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let handle = Self {
+            request,
+            tx: Arc::new(Mutex::new(Some(tx))),
+        };
+        (handle, rx)
+    }
+
+    /// Approve this request once.
+    pub fn approve(&self) {
+        self.respond(ControlDecision::Approve { modification: None });
+    }
+
+    /// Approve with a modification note the LLM will see.
+    pub fn approve_with(&self, modification: impl Into<String>) {
+        self.respond(ControlDecision::Approve {
+            modification: Some(modification.into()),
+        });
+    }
+
+    /// Approve this tool for all future calls in this session.
+    ///
+    /// The session remembers this decision — subsequent calls to the same
+    /// tool will be allowed without prompting.
+    pub fn approve_always(&self) {
+        self.respond(ControlDecision::ApproveAlways);
+    }
+
+    /// Deny this request once. The LLM sees `reason` and will not retry.
+    pub fn deny(&self, reason: impl Into<String>) {
+        self.respond(ControlDecision::Deny { reason: reason.into() });
+    }
+
+    /// Deny this tool for all future calls in this session.
+    ///
+    /// The session remembers this decision — subsequent calls to the same
+    /// tool will be blocked without prompting.
+    pub fn deny_always(&self, reason: impl Into<String>) {
+        self.respond(ControlDecision::DenyAlways { reason: reason.into() });
+    }
+
+    fn respond(&self, decision: ControlDecision) {
+        let response = ControlResponse {
+            request_id: self.request.id.clone(),
+            decision,
+        };
+        if let Ok(mut guard) = self.tx.lock() {
+            if let Some(tx) = guard.take() {
+                let _ = tx.send(response);
+            }
+        }
+    }
+}
+
+impl fmt::Debug for ControlHandle {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ControlHandle")
+            .field("request", &self.request)
+            .finish_non_exhaustive()
+    }
+}
+
+// ── Control request / response ────────────────────────────────────────────────
+
 /// A pause point where the human must respond before the agent continues.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ControlRequest {
     pub id:   String,
     pub kind: ControlKind,
+}
+
+impl ControlRequest {
+    /// A short human-readable description of what is being requested.
+    pub fn description(&self) -> &str {
+        match &self.kind {
+            ControlKind::PermissionRequest { description, .. } => description,
+            ControlKind::PlanReview        { plan }            => plan,
+        }
+    }
+
+    /// The tool name, if this is a permission request.
+    pub fn tool_name(&self) -> Option<&str> {
+        match &self.kind {
+            ControlKind::PermissionRequest { tool_name, .. } => Some(tool_name),
+            _ => None,
+        }
+    }
 }
 
 /// The nature of the control request.
@@ -150,48 +292,43 @@ pub enum ControlKind {
 /// The human's response to a `ControlRequest`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ControlResponse {
-    pub request_id:   String,
-    pub decision:     ControlDecision,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum ControlDecision {
-    Approve { modification: Option<String> },
-    Deny    { reason: String },
+    pub request_id: String,
+    pub decision:   ControlDecision,
 }
 
 impl ControlResponse {
     pub fn approve(request_id: impl Into<String>) -> Self {
-        Self {
-            request_id: request_id.into(),
-            decision:   ControlDecision::Approve { modification: None },
-        }
+        Self { request_id: request_id.into(), decision: ControlDecision::Approve { modification: None } }
     }
-
-    pub fn approve_with(request_id: impl Into<String>, modification: impl Into<String>) -> Self {
-        Self {
-            request_id: request_id.into(),
-            decision:   ControlDecision::Approve { modification: Some(modification.into()) },
-        }
-    }
-
     pub fn deny(request_id: impl Into<String>, reason: impl Into<String>) -> Self {
-        Self {
-            request_id: request_id.into(),
-            decision:   ControlDecision::Deny { reason: reason.into() },
-        }
+        Self { request_id: request_id.into(), decision: ControlDecision::Deny { reason: reason.into() } }
     }
 }
+
+/// How the human responded to the control request.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ControlDecision {
+    /// Allow this specific invocation.
+    Approve { modification: Option<String> },
+    /// Allow this tool for all future invocations in this session.
+    ApproveAlways,
+    /// Deny this specific invocation.
+    Deny { reason: String },
+    /// Deny this tool for all future invocations in this session.
+    DenyAlways { reason: String },
+}
+
+// ── Run summary ───────────────────────────────────────────────────────────────
 
 /// Summary emitted when a run completes successfully.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunSummary {
-    pub stop_reason:  RunStopReason,
-    pub iterations:   u32,
-    pub usage:        TokenUsage,
-    /// All messages produced during this run (user + assistant).
-    pub messages:     Vec<ContentBlock>,
+    pub stop_reason: RunStopReason,
+    pub iterations:  u32,
+    pub usage:       TokenUsage,
+    /// The full conversation at the time the run ended (user + assistant turns).
+    pub messages:    Vec<Message>,
 }
 
 /// Why the run ended.

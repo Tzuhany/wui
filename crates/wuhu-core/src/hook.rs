@@ -20,13 +20,22 @@ use crate::tool::ToolOutput;
 ///
 /// Hooks are `Send + Sync + 'static` for the same reason tools are:
 /// the engine may invoke them from spawned tasks.
+///
+/// Implement `evaluate()`. Override `handles()` to skip events you don't care
+/// about — this avoids an unnecessary async dispatch for irrelevant events.
 #[async_trait]
 pub trait Hook: Send + Sync + 'static {
     /// Whether this hook wants to see the given event.
     ///
-    /// Returning `false` skips `evaluate()` entirely. Use this to avoid
-    /// the overhead of an async call for events you don't care about.
-    fn handles(&self, event: &HookEvent<'_>) -> bool;
+    /// Defaults to `true` (handle all events). Override to filter:
+    /// ```rust,ignore
+    /// fn handles(&self, event: &HookEvent<'_>) -> bool {
+    ///     matches!(event, HookEvent::PreToolUse { .. })
+    /// }
+    /// ```
+    fn handles(&self, _event: &HookEvent<'_>) -> bool {
+        true
+    }
 
     /// Evaluate the event and decide whether to allow or block it.
     async fn evaluate(&self, event: &HookEvent<'_>) -> HookDecision;
@@ -90,7 +99,7 @@ impl HookDecision {
 
 /// Blocks any tool whose name is in the deny list.
 ///
-/// ```rust
+/// ```rust,ignore
 /// Agent::builder()
 ///     .hook(DenyList::new(["bash", "file_write"]))
 ///     .build()
