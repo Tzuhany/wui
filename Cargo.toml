@@ -9,7 +9,7 @@ members = [
 ]
 
 [workspace.package]
-version      = "0.1.0"
+version      = "0.1.1"
 edition      = "2021"
 license      = "MIT OR Apache-2.0"
 repository   = "https://github.com/Tzuhany/wuhu"
@@ -47,7 +47,7 @@ eventsource-stream = { version = "0.2" }
 uuid         = { version = "1", features = ["v4"] }
 
 # ── Workspace crates ──────────────────────────────────────────
-wuhu-core      = { path = "crates/wuhu-core",      version = "0.1.0" }
-wuhu-engine    = { path = "crates/wuhu-engine",    version = "0.1.0" }
-wuhu-compress  = { path = "crates/wuhu-compress",  version = "0.1.0" }
-wuhu-providers = { path = "crates/wuhu-providers", version = "0.1.0" }
+wuhu-core      = { path = "crates/wuhu-core",      version = "0.1.1" }
+wuhu-engine    = { path = "crates/wuhu-engine",    version = "0.1.1" }
+wuhu-compress  = { path = "crates/wuhu-compress",  version = "0.1.1" }
+wuhu-providers = { path = "crates/wuhu-providers", version = "0.1.1" }
