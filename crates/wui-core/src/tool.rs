@@ -514,7 +514,7 @@ impl ContextInjection {
         Self { text: text.into() }
     }
 
-    /// Alias for [`new`] — conveys intent when injecting system-level context.
+    /// Alias for [`Self::new`] — conveys intent when injecting system-level context.
     pub fn system(text: impl Into<String>) -> Self {
         Self::new(text)
     }

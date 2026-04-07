@@ -33,7 +33,7 @@ use wui_core::tool::{ContextInjection, Tool, ToolCtx, ToolOutput};
 /// callable tool. Invoking the tool injects the skill's Markdown content as a
 /// `<system-reminder>` into the agent's context.
 ///
-/// The directory is scanned lazily on first [`search()`] call.
+/// The directory is scanned lazily on first `search()` call.
 ///
 /// # Example
 ///

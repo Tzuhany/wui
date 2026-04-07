@@ -29,8 +29,8 @@ use crate::Agent;
 
 /// A pending structured agent run.
 ///
-/// Create via [`Agent::run_structured`]. Use [`extract`], [`extract_all`], or
-/// [`extract_as`] to drive the run and capture the result.
+/// Create via [`Agent::run_structured`]. Use [`Self::extract`], [`Self::extract_all`], or
+/// [`Self::extract_as`] to drive the run and capture the result.
 pub struct StructuredRun<'a> {
     pub(crate) agent: &'a Agent,
     pub(crate) prompt: String,

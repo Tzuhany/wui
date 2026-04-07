@@ -298,7 +298,7 @@ impl AgentBuilder {
         self
     }
 
-    /// Add a [`ToolCatalog`] — a lazily-loaded, searchable tool source.
+    /// Add a `ToolCatalog` — a lazily-loaded, searchable tool source.
     ///
     /// Catalog tools are NOT listed in the initial prompt. The LLM discovers
     /// them via `tool_search`. Catalogs connect lazily on first search.

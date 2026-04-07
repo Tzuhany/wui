@@ -101,7 +101,7 @@ impl McpCatalog {
         self
     }
 
-    /// Override the search strategy (default: [`TokenOverlapStrategy`]).
+    /// Override the search strategy (default: `TokenOverlapStrategy`).
     pub fn with_searcher(mut self, s: impl SearchStrategy + 'static) -> Self {
         self.searcher = Arc::new(s);
         self
