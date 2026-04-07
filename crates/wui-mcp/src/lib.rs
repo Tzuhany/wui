@@ -142,7 +142,7 @@ impl McpClient {
         Ok(Self { service })
     }
 
-    ///     Discover all tools exposed by the MCP server and return them as wui
+    /// Discover all tools exposed by the MCP server and return them as wui
     /// [`Tool`] objects.
     ///
     /// The underlying connection is reference-counted across the returned
