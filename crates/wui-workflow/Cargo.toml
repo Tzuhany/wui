@@ -1,0 +1,27 @@
+[package]
+name        = "wui-workflow"
+publish.workspace = true
+description = "Deterministic workflow primitives for Wui: pipelines, branches, and parallel steps."
+version.workspace     = true
+edition.workspace     = true
+license.workspace     = true
+repository.workspace  = true
+keywords.workspace    = true
+categories.workspace  = true
+rust-version.workspace = true
+
+[dependencies]
+wui        = { workspace = true }
+wui-core   = { workspace = true }
+async-trait = { workspace = true }
+futures     = { workspace = true }
+tokio       = { workspace = true }
+tokio-util  = { workspace = true }
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+thiserror   = { workspace = true }
+tracing     = { workspace = true }
+uuid        = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

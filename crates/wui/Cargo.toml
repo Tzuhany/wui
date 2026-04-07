@@ -1,0 +1,44 @@
+[package]
+name        = "wui"
+publish.workspace = true
+description = "A Rust framework for building LLM agents. Streaming, concurrent, graceful."
+version.workspace      = true
+edition.workspace      = true
+license.workspace      = true
+repository.workspace   = true
+keywords.workspace     = true
+categories.workspace   = true
+rust-version.workspace = true
+
+[features]
+default   = []
+anthropic = ["dep:reqwest", "dep:eventsource-stream"]
+openai    = ["dep:reqwest", "dep:eventsource-stream"]
+full      = ["anthropic", "openai"]
+
+[dependencies]
+wui-core    = { workspace = true }
+
+anyhow       = { workspace = true }
+async-trait  = { workspace = true }
+futures      = { workspace = true }
+serde        = { workspace = true }
+serde_json   = { workspace = true }
+thiserror    = { workspace = true }
+tokio        = { workspace = true }
+tokio-stream = { workspace = true }
+tokio-util   = { workspace = true }
+tracing      = { workspace = true }
+uuid         = { workspace = true }
+rand         = { workspace = true }
+jsonschema   = "0.28"
+schemars     = { version = "0.8", features = ["derive"] }
+
+reqwest            = { workspace = true, optional = true }
+eventsource-stream = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio        = { workspace = true }
+wui-eval    = { workspace = true }
+wui-memory  = { workspace = true }
+

@@ -1,0 +1,27 @@
+[package]
+name        = "wui-spawn"
+publish.workspace = true
+description = "Background agent spawning for wui — run agents as background jobs, query status, await or cancel."
+version.workspace      = true
+edition.workspace      = true
+license.workspace      = true
+repository.workspace   = true
+keywords.workspace     = true
+categories.workspace   = true
+rust-version.workspace = true
+
+[dependencies]
+wui-core    = { workspace = true }
+wui         = { workspace = true }
+anyhow       = { workspace = true }
+async-trait  = { workspace = true }
+futures      = { workspace = true }
+serde        = { workspace = true }
+serde_json   = { workspace = true }
+thiserror    = { workspace = true }
+tokio        = { workspace = true }
+tokio-util   = { workspace = true }
+uuid         = { workspace = true }
+
+[dev-dependencies]
+wui-eval = { workspace = true }

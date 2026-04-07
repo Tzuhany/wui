@@ -1,0 +1,13 @@
+[workspace]
+shared-version = true
+tag-name       = "v{{version}}"
+pre-release-commit-message = "chore: release v{{version}}"
+publish        = true
+
+[[package]]
+name    = "wui-spawn"
+publish = true
+
+[[package]]
+name    = "wui-skills"
+publish = true

@@ -1,0 +1,25 @@
+[package]
+name        = "wui-skills"
+publish.workspace = true
+description = "File-based skill discovery for wui — load SKILL.md files as agent tools."
+version.workspace      = true
+edition.workspace      = true
+license.workspace      = true
+repository.workspace   = true
+keywords.workspace     = true
+categories.workspace   = true
+rust-version.workspace = true
+
+[dependencies]
+wui-core   = { workspace = true }
+wui        = { workspace = true }
+anyhow      = { workspace = true }
+async-trait = { workspace = true }
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+tokio       = { workspace = true }
+tracing     = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
+indoc    = "2"
