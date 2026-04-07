@@ -50,7 +50,7 @@ impl Tool for SecretCode {
     }
 
     async fn call(&self, _input: Value, _ctx: &ToolCtx) -> ToolOutput {
-        ToolOutput::success("WUHU-ALPHA-9274")
+        ToolOutput::success("WUI-ALPHA-9274")
     }
 }
 
@@ -104,7 +104,7 @@ async fn test_success(provider: Anthropic) {
                 name, output, ms, ..
             } => {
                 assert_eq!(name, "get_secret_code");
-                assert_eq!(output, "WUHU-ALPHA-9274", "unexpected output: {output}");
+                assert_eq!(output, "WUI-ALPHA-9274", "unexpected output: {output}");
                 assert!(ms < 5000, "tool took too long: {ms}ms");
                 tool_done = true;
                 println!("    ← tool done: {name} ({ms}ms) output={output}");
@@ -120,7 +120,7 @@ async fn test_success(provider: Anthropic) {
     assert!(tool_done, "ToolDone never fired");
     assert!(!text.is_empty(), "no final text");
     assert!(
-        text.contains("WUHU-ALPHA-9274"),
+        text.contains("WUI-ALPHA-9274"),
         "response doesn't mention the code: {text}"
     );
     println!("    final text: {text}");
