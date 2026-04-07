@@ -28,9 +28,7 @@ use async_trait::async_trait;
 use futures::{Stream, StreamExt};
 use serde_json::Value;
 use wui::Agent;
-use wui_core::event::{
-    AgentEvent, RunStopReason, RunSummary, StopReason, StreamEvent, TokenUsage,
-};
+use wui_core::event::{AgentEvent, RunStopReason, RunSummary, StopReason, StreamEvent, TokenUsage};
 use wui_core::provider::{ChatRequest, Provider, ProviderError};
 
 // ── MockProvider ──────────────────────────────────────────────────────────────

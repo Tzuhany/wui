@@ -149,7 +149,11 @@ impl SearchStrategy for TokenOverlapStrategy {
                 let mut tokens = tokenize(name);
                 tokens.extend(tokenize(desc));
                 let score = jaccard(&query_tokens, &tokens);
-                if score > 0.0 { Some((i, score)) } else { None }
+                if score > 0.0 {
+                    Some((i, score))
+                } else {
+                    None
+                }
             })
             .collect();
 

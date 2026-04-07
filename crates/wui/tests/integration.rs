@@ -16,8 +16,8 @@ use serde_json::{json, Value};
 use futures::StreamExt as _;
 
 use wui::{
-    Agent, AgentEvent, ExecutorHints, InMemoryCheckpointStore, PermissionMode, RunStopReason,
-    Tool, ToolCtx, ToolMeta, ToolOutput,
+    Agent, AgentEvent, ExecutorHints, InMemoryCheckpointStore, PermissionMode, RunStopReason, Tool,
+    ToolCtx, ToolMeta, ToolOutput,
 };
 use wui_eval::{AgentHarness, MockProvider};
 

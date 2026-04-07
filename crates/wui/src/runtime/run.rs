@@ -483,7 +483,11 @@ async fn run_loop(
                 )
                 .await;
             match result {
-                Ok(CompressResult { method: Some(method), freed, messages: new_msgs }) => {
+                Ok(CompressResult {
+                    method: Some(method),
+                    freed,
+                    messages: new_msgs,
+                }) => {
                     tracing::debug!(method = ?method, freed_tokens = freed, "context compressed");
                     messages = new_msgs;
                     tx.send(AgentEvent::Compressed { method, freed }).await.ok();
