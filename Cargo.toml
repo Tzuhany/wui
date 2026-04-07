@@ -1,22 +1,28 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/wuhu-core",
-    "crates/wuhu-engine",
-    "crates/wuhu-compress",
-    "crates/wuhu-providers",
-    "crates/wuhu",
+    "crates/wui-core",
+    "crates/wui",
+    "crates/wui-eval",
+    "crates/wui-mcp",
+    "crates/wui-memory",
+    "crates/wui-observe",
+    "crates/wui-workflow",
+    "crates/wui-spawn",
+    "crates/wui-skills",
+    "examples/*",
 ]
 
 [workspace.package]
 version      = "0.1.5"
 edition      = "2021"
 license      = "MIT OR Apache-2.0"
-repository   = "https://github.com/Tzuhany/wuhu"
-homepage     = "https://github.com/Tzuhany/wuhu"
+repository   = "https://github.com/Tzuhany/wui"
+homepage     = "https://github.com/Tzuhany/wui"
 keywords     = ["agent", "llm", "ai", "streaming", "async"]
 categories   = ["asynchronous", "api-bindings"]
 rust-version = "1.75"
+publish      = false
 
 [workspace.dependencies]
 # ── Async runtime ─────────────────────────────────────────────
@@ -40,7 +46,7 @@ async-trait  = { version = "0.1" }
 tracing      = { version = "0.1" }
 
 # ── HTTP (providers) ──────────────────────────────────────────
-reqwest      = { version = "0.12", features = ["json", "stream", "rustls-tls"], default-features = false }
+reqwest            = { version = "0.12", features = ["json", "stream", "rustls-tls"], default-features = false }
 eventsource-stream = { version = "0.2" }
 
 # ── Utils ─────────────────────────────────────────────────────
@@ -48,7 +54,12 @@ uuid         = { version = "1", features = ["v4"] }
 rand         = { version = "0.8" }
 
 # ── Workspace crates ──────────────────────────────────────────
-wuhu-core      = { path = "crates/wuhu-core",      version = "0.1.5" }
-wuhu-engine    = { path = "crates/wuhu-engine",    version = "0.1.5" }
-wuhu-compress  = { path = "crates/wuhu-compress",  version = "0.1.5" }
-wuhu-providers = { path = "crates/wuhu-providers", version = "0.1.5" }
+wui-core     = { path = "crates/wui-core",     version = "0.1.5" }
+wui-eval     = { path = "crates/wui-eval",     version = "0.1.5" }
+wui-memory   = { path = "crates/wui-memory",   version = "0.1.5" }
+wui-mcp      = { path = "crates/wui-mcp",      version = "0.1.5" }
+wui-observe  = { path = "crates/wui-observe",  version = "0.1.5" }
+wui-workflow = { path = "crates/wui-workflow", version = "0.1.5" }
+wui-spawn    = { path = "crates/wui-spawn",    version = "0.1.5" }
+wui-skills   = { path = "crates/wui-skills",   version = "0.1.5" }
+wui          = { path = "crates/wui",          version = "0.1.5" }
