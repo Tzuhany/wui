@@ -4,6 +4,7 @@ members = [
     "crates/wui-core",
     "crates/wui",
     "crates/wui-eval",
+    "crates/wui-macros",
     "crates/wui-mcp",
     "crates/wui-memory",
     "crates/wui-observe",
@@ -55,6 +56,7 @@ rand         = { version = "0.8" }
 
 # ── Workspace crates ──────────────────────────────────────────
 wui-core     = { path = "crates/wui-core",     version = "0.1.5" }
+wui-macros   = { path = "crates/wui-macros",   version = "0.1.5" }
 wui-eval     = { path = "crates/wui-eval",     version = "0.1.5" }
 wui-memory   = { path = "crates/wui-memory",   version = "0.1.5" }
 wui-mcp      = { path = "crates/wui-mcp",      version = "0.1.5" }

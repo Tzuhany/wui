@@ -18,7 +18,7 @@ use std::sync::Arc;
 use wui_core::provider::ToolDef;
 use wui_core::tool::Tool;
 
-pub struct ToolRegistry {
+pub(crate) struct ToolRegistry {
     tools: HashMap<String, Arc<dyn Tool>>,
     deferred_names: HashSet<String>,
 }

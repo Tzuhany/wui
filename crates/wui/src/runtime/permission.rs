@@ -128,11 +128,13 @@ impl PermissionRules {
 fn matches_rule(rule: &str, tool_name: &str, permission_key: Option<&str>) -> bool {
     if let Some(open) = rule.find('(') {
         let rule_tool = &rule[..open];
-        let rule_key = rule[open + 1..].trim_end_matches(')');
-        if rule_tool != tool_name {
+        // A well-formed key rule looks like "tool_name(key_prefix)".
+        // strip_suffix removes exactly one closing paren; malformed rules (missing
+        // closing paren) are skipped rather than matched incorrectly.
+        let Some(rule_key) = rule[open + 1..].strip_suffix(')') else {
             return false;
-        }
-        permission_key.is_some_and(|k| k.starts_with(rule_key))
+        };
+        rule_tool == tool_name && permission_key.is_some_and(|k| k.starts_with(rule_key))
     } else {
         rule == tool_name
     }

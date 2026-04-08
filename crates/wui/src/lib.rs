@@ -65,7 +65,7 @@ pub use runtime::{
 
 // ── Compress ──────────────────────────────────────────────────────────────────
 
-pub use compress::{CompactionStrategy, CompressPipeline, CompressResult, SummarizingCompressor};
+pub use compress::{CompressPipeline, CompressResult, CompressStrategy, SummarizingCompressor};
 
 // ── Catalog ───────────────────────────────────────────────────────────────────
 

@@ -302,15 +302,31 @@ pub fn all_memory_tools(store: Arc<InMemoryStore>) -> Vec<Arc<dyn Tool>> {
 
 // ── Tools ─────────────────────────────────────────────────────────────────────
 
-struct RecallTool {
-    backend: Arc<dyn RecallBackend>,
+/// Generates the boilerplate struct + constructor for a single-backend memory tool.
+///
+/// Usage: `memory_tool!(StructName, BackendTrait);`
+///
+/// This expands to a `struct StructName { backend: Arc<dyn BackendTrait> }` with
+/// a `pub(crate) fn new(b: Arc<dyn BackendTrait>) -> Self` constructor.
+/// Implement the `Tool` trait body (name, description, input_schema, call) manually.
+macro_rules! memory_tool {
+    ($name:ident, $backend:ident) => {
+        struct $name {
+            backend: Arc<dyn $backend>,
+        }
+
+        impl $name {
+            #[allow(dead_code)]
+            pub(crate) fn new(b: Arc<dyn $backend>) -> Self {
+                Self { backend: b }
+            }
+        }
+    };
 }
-struct RememberTool {
-    backend: Arc<dyn RememberBackend>,
-}
-struct ForgetTool {
-    backend: Arc<dyn ForgetBackend>,
-}
+
+memory_tool!(RecallTool, RecallBackend);
+memory_tool!(RememberTool, RememberBackend);
+memory_tool!(ForgetTool, ForgetBackend);
 
 #[async_trait]
 impl Tool for RecallTool {

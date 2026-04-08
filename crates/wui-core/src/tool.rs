@@ -224,6 +224,11 @@ impl ToolCtx {
 pub struct ToolOutput {
     /// The content returned to the LLM (description, result, or error message).
     pub content: String,
+    /// `true` when the executor truncated this output because it exceeded the
+    /// configured `max_output_chars` limit. Callers can inspect this flag to
+    /// decide whether to retry with a smaller scope or retrieve remaining output
+    /// via a follow-up tool call.
+    pub truncated: bool,
     /// `None` on success. `Some(kind)` on failure.
     pub failure: Option<FailureKind>,
     /// Artifacts produced by this tool: files, images, structured data.

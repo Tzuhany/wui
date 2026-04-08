@@ -75,7 +75,7 @@ type ProviderStream = std::pin::Pin<
     Box<dyn futures::Stream<Item = Result<wui_core::event::StreamEvent, ProviderError>> + Send>,
 >;
 
-use crate::compress::{CompactionStrategy, CompressResult};
+use crate::compress::{CompressResult, CompressStrategy};
 
 use super::checkpoint::{CheckpointStore, RunCheckpoint};
 use super::executor::{CompletedTool, PendingTool, ToolExecutor};
@@ -160,10 +160,16 @@ impl RetryPolicy {
 
 // ── Diminishing-returns constants ─────────────────────────────────────────────
 
-/// Minimum useful output tokens per turn. Below this = "not making progress."
+/// Minimum output tokens in a single assistant turn to be considered "productive".
+/// Turns below this threshold count toward the [`MAX_LOW_OUTPUT_TURNS`] streak.
 const MIN_USEFUL_OUTPUT_TOKENS: u32 = 500;
 
-/// Consecutive low-output turns before the engine auto-stops.
+/// Consecutive low-output turns before the run auto-stops with
+/// [`RunStopReason::DiminishingReturns`].
+///
+/// If the LLM produces fewer than [`MIN_USEFUL_OUTPUT_TOKENS`] output tokens
+/// for this many turns in a row the run terminates to avoid burning budget on
+/// a stalled agent. The streak counter resets on any productive tool-use turn.
 const MAX_LOW_OUTPUT_TURNS: u32 = 3;
 
 // ── Max-tokens escalation constants ──────────────────────────────────────────
@@ -242,28 +248,28 @@ impl Drop for RunStream {
 
 /// Static configuration for one run. `Arc`-wrapped so it is cheap to share
 /// across the spawned task and helper services.
-pub struct RunConfig {
-    pub provider: Arc<dyn Provider>,
-    pub tools: Arc<ToolRegistry>,
-    pub hooks: Arc<HookRunner>,
-    pub compress: Arc<dyn CompactionStrategy>,
-    pub permission: PermissionMode,
+pub(crate) struct RunConfig {
+    pub(crate) provider: Arc<dyn Provider>,
+    pub(crate) tools: Arc<ToolRegistry>,
+    pub(crate) hooks: Arc<HookRunner>,
+    pub(crate) compress: Arc<dyn CompressStrategy>,
+    pub(crate) permission: PermissionMode,
     /// Static allow/deny rules evaluated before the permission mode.
     /// Deny rules are hard constraints; allow rules bypass user prompting.
-    pub rules: PermissionRules,
-    pub session_perms: Arc<SessionPermissions>,
-    pub system: String,
-    pub model: Option<String>,
-    pub max_tokens: u32,
-    pub temperature: Option<f32>,
-    pub max_iter: u32,
+    pub(crate) rules: PermissionRules,
+    pub(crate) session_perms: Arc<SessionPermissions>,
+    pub(crate) system: String,
+    pub(crate) model: Option<String>,
+    pub(crate) max_tokens: u32,
+    pub(crate) temperature: Option<f32>,
+    pub(crate) max_iter: u32,
 
     /// Back-off policy for transient provider errors.
-    pub retry: RetryPolicy,
+    pub(crate) retry: RetryPolicy,
 
     /// Default execution timeout applied to every tool that doesn't declare
     /// its own `Tool::timeout()`. `None` means tools may run indefinitely.
-    pub tool_timeout: Option<Duration>,
+    pub(crate) tool_timeout: Option<Duration>,
 
     /// Disable the diminishing-returns auto-stop heuristic.
     ///
@@ -272,7 +278,7 @@ pub struct RunConfig {
     /// `MIN_USEFUL_OUTPUT_TOKENS` output tokens. Set this to `true` for
     /// long-running tasks where many short intermediate steps are expected
     /// before a large final result (e.g. research tasks, file-heavy writes).
-    pub ignore_diminishing_returns: bool,
+    pub(crate) ignore_diminishing_returns: bool,
 
     /// Hard ceiling on cumulative tokens (input + output) for this run.
     ///
@@ -281,16 +287,16 @@ pub struct RunConfig {
     /// for cost control: you know exactly how many tokens you'll spend.
     ///
     /// `None` means no budget limit (default).
-    pub token_budget: Option<u64>,
+    pub(crate) token_budget: Option<u64>,
 
     /// Extended thinking budget (tokens) forwarded to the provider on every
     /// LLM call. `None` = no thinking (provider default).
-    pub thinking_budget: Option<u32>,
+    pub(crate) thinking_budget: Option<u32>,
 
     /// Checkpoint store for save/resume. `None` disables checkpointing.
-    pub checkpoint_store: Option<Arc<dyn CheckpointStore>>,
+    pub(crate) checkpoint_store: Option<Arc<dyn CheckpointStore>>,
     /// The run ID used to save/load checkpoints.
-    pub checkpoint_run_id: Option<String>,
+    pub(crate) checkpoint_run_id: Option<String>,
 }
 
 // ── Public entry point ────────────────────────────────────────────────────────
@@ -303,7 +309,7 @@ pub struct RunConfig {
 /// Dropping the returned `RunStream` cancels the run immediately — safe
 /// to drop at any point without leaking the background task. Call
 /// `stream.cancel()` or `stream.cancel_token()` for explicit control.
-pub fn run(config: Arc<RunConfig>, messages: Vec<Message>) -> RunStream {
+pub(crate) fn run(config: Arc<RunConfig>, messages: Vec<Message>) -> RunStream {
     let cancel = CancellationToken::new();
     let (tx, rx) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
     tokio::spawn(run_task(config, messages, cancel.clone(), tx));
