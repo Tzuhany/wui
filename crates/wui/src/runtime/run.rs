@@ -56,6 +56,30 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
+// ── Framework-internal ToolOutput constructors ────────────────────────────────
+//
+// HookBlocked and PermissionDenied are failure kinds produced exclusively by
+// the framework's hook and permission systems — never by tool implementations.
+// Keeping the constructors here (rather than on the public `ToolOutput` API in
+// wui-core) makes that boundary explicit: tool authors cannot accidentally call
+// them, and they don't appear in the public documentation.
+
+fn output_hook_blocked(reason: impl Into<String>) -> wui_core::tool::ToolOutput {
+    wui_core::tool::ToolOutput {
+        content: reason.into(),
+        failure: Some(wui_core::tool::FailureKind::HookBlocked),
+        ..Default::default()
+    }
+}
+
+fn output_permission_denied(reason: impl Into<String>) -> wui_core::tool::ToolOutput {
+    wui_core::tool::ToolOutput {
+        content: reason.into(),
+        failure: Some(wui_core::tool::FailureKind::PermissionDenied),
+        ..Default::default()
+    }
+}
+
 // ── EmissionGuard ─────────────────────────────────────────────────────────────
 
 /// Guards against double-emission of tool events.
@@ -1362,11 +1386,7 @@ async fn authorize_tool(
     let input = match config.hooks.pre_tool_use(&name, &input).await {
         HookDecision::Block { reason } => {
             return (
-                Err(instant_failure(
-                    id,
-                    name,
-                    wui_core::tool::ToolOutput::hook_blocked(reason),
-                )),
+                Err(instant_failure(id, name, output_hook_blocked(reason))),
                 vec![],
             )
         }
@@ -1406,11 +1426,7 @@ async fn authorize_tool(
         PermissionVerdict::Allowed => return (Ok(input), vec![]),
         PermissionVerdict::Denied { reason } => {
             return (
-                Err(instant_failure(
-                    id,
-                    name,
-                    wui_core::tool::ToolOutput::permission_denied(reason),
-                )),
+                Err(instant_failure(id, name, output_permission_denied(reason))),
                 vec![],
             )
         }
@@ -1445,11 +1461,7 @@ async fn authorize_tool(
     match permission::check(&config.permission, &ctrl_req, tool_is_readonly, &input) {
         PermissionOutcome::Allowed => (Ok(input), vec![]),
         PermissionOutcome::Denied { reason } => (
-            Err(instant_failure(
-                id,
-                name,
-                wui_core::tool::ToolOutput::permission_denied(reason),
-            )),
+            Err(instant_failure(id, name, output_permission_denied(reason))),
             vec![],
         ),
         PermissionOutcome::NeedsApproval => {
@@ -1489,19 +1501,13 @@ async fn await_approval(
     let injection = Message::system(permission::response_to_system_message(&response));
 
     let result = match response.decision {
-        ControlDecision::Deny { reason } => Err(instant_failure(
-            id,
-            name,
-            wui_core::tool::ToolOutput::permission_denied(reason),
-        )),
+        ControlDecision::Deny { reason } => {
+            Err(instant_failure(id, name, output_permission_denied(reason)))
+        }
 
         ControlDecision::DenyAlways { reason } => {
             config.session_perms.set_always_deny(name.clone()).await;
-            Err(instant_failure(
-                id,
-                name,
-                wui_core::tool::ToolOutput::permission_denied(reason),
-            ))
+            Err(instant_failure(id, name, output_permission_denied(reason)))
         }
 
         ControlDecision::ApproveAlways => {

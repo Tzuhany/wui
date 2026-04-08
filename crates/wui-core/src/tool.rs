@@ -319,26 +319,6 @@ impl ToolOutput {
         }
     }
 
-    /// The tool was blocked by a hook before execution.
-    pub fn hook_blocked(content: impl Into<String>) -> Self {
-        Self {
-            content: content.into(),
-            failure: Some(FailureKind::HookBlocked),
-            expose_tools: vec![],
-            ..Default::default()
-        }
-    }
-
-    /// The tool was denied by the permission system.
-    pub fn permission_denied(content: impl Into<String>) -> Self {
-        Self {
-            content: content.into(),
-            failure: Some(FailureKind::PermissionDenied),
-            expose_tools: vec![],
-            ..Default::default()
-        }
-    }
-
     // ── Builders ──────────────────────────────────────────────────────────
 
     /// Attach artifacts to a successful result.
