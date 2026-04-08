@@ -52,11 +52,52 @@
 // prompt entirely, matching the recorded decision automatically.
 // ============================================================================
 
+mod compression;
+mod history;
+mod parsing;
+mod provider;
+mod stream;
+mod tool_batch;
+
+// Re-export public / pub(crate) items at the `run` module boundary so that
+// existing import paths (`super::run::run`, `super::run::RunConfig`, etc.)
+// continue to resolve unchanged.
+pub use provider::RetryPolicy;
+pub(crate) use stream::run;
+pub use stream::RunStream;
+
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use super::auth::{self, AuthOutcome};
+use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
+
+use wui_core::event::{AgentError, AgentEvent, RunStopReason, RunSummary, StopReason, TokenUsage};
+use wui_core::hook::HookDecision;
+use wui_core::message::{ContentBlock, Message};
+use wui_core::provider::ChatRequest;
+use wui_core::types::ToolCallId;
+
+use crate::compress::CompressStrategy;
+
+// ── Sibling runtime modules used by submodules ──────────────────────────────
+// Re-export at `super::` level so submodules can write `super::auth` etc.
+use super::auth;
+use super::checkpoint::{self, CheckpointStore};
+use super::executor::{CompletedTool, PendingTool, ToolExecutor};
+use super::hooks::HookRunner;
+use super::permission::{PermissionMode, PermissionRules, SessionPermissions};
+use super::registry::{self, ToolRegistry};
+
+// ── Submodule imports used in this file ─────────────────────────────────────
+use compression::{emergency_compress, maybe_compress};
+use history::{
+    augment_system, last_assistant_text, replace_last_assistant_text, system_reminder_msg,
+};
+use parsing::parse_stream;
+use provider::{call_with_retry, is_prompt_too_long};
+use tool_batch::{authorize_and_dispatch, run_post_hooks, EmissionGuard};
 
 // ── handle_stop! ──────────────────────────────────────────────────────────────
 //
@@ -111,104 +152,6 @@ macro_rules! handle_stop {
     }};
 }
 
-use futures::StreamExt;
-use tokio::sync::mpsc;
-use tokio_stream::wrappers::ReceiverStream;
-use tokio_util::sync::CancellationToken;
-use tracing::Instrument as _;
-
-use wui_core::event::{AgentError, AgentEvent, RunStopReason, RunSummary, StopReason, TokenUsage};
-use wui_core::hook::HookDecision;
-use wui_core::message::{ContentBlock, Message, Role};
-use wui_core::provider::{ChatRequest, Provider, ProviderError};
-use wui_core::types::ToolCallId;
-
-/// Convenience alias for the pinned stream returned by `Provider::stream`.
-type ProviderStream = std::pin::Pin<
-    Box<dyn futures::Stream<Item = Result<wui_core::event::StreamEvent, ProviderError>> + Send>,
->;
-
-use crate::compress::{CompressResult, CompressStrategy};
-
-use super::checkpoint::{CheckpointStore, RunCheckpoint};
-use super::executor::{CompletedTool, PendingTool, ToolExecutor};
-use super::hooks::HookRunner;
-use super::permission::{PermissionMode, PermissionRules, SessionPermissions};
-use super::registry::ToolRegistry;
-
-/// Maximum number of events buffered between the loop and the caller.
-///
-/// If the caller stops consuming, the loop pauses here. Tune this for your
-/// use case — larger values trade memory for smoother streaming under jitter.
-const EVENT_CHANNEL_CAPACITY: usize = 256;
-
-// ── Retry Policy ──────────────────────────────────────────────────────────────
-
-/// Exponential back-off for transient provider errors.
-///
-/// Applied when the provider returns `is_retryable: true` — network hiccups,
-/// rate-limit 429s, intermittent 5xx. Non-retryable errors bypass this entirely.
-///
-/// The default (`RetryPolicy::default()`) retries up to 3 times with 500 ms
-/// initial delay doubling on each attempt, capped at 10 s, with jitter enabled.
-#[derive(Debug, Clone)]
-pub struct RetryPolicy {
-    /// Maximum number of retry attempts. `0` disables retrying.
-    pub max_attempts: u32,
-    /// Wait before the first retry (milliseconds).
-    pub initial_delay_ms: u64,
-    /// Multiplier applied to the delay after each failure (exponential back-off).
-    /// `2.0` doubles the delay each time: 500 ms → 1 s → 2 s → …, capped at `max_delay_ms`.
-    pub multiplier: f64,
-    /// Hard cap on the delay between retries (milliseconds).
-    pub max_delay_ms: u64,
-    /// Add equal jitter to each back-off delay.
-    ///
-    /// Uses the equal-jitter formula: `delay = exp/2 + rand(0, exp/2)`.
-    /// This guarantees at least half the computed delay (no starvation) while
-    /// spreading load across the full range (no thundering herd). The jitter
-    /// range grows with the exponential delay, so later retries are spread
-    /// proportionally further apart than earlier ones.
-    /// Enabled by default.
-    pub jitter: bool,
-}
-
-impl Default for RetryPolicy {
-    fn default() -> Self {
-        Self {
-            max_attempts: 3,
-            initial_delay_ms: 500,
-            multiplier: 2.0,
-            max_delay_ms: 10_000,
-            jitter: true,
-        }
-    }
-}
-
-impl RetryPolicy {
-    /// Compute the back-off delay for a given attempt (1-indexed).
-    ///
-    /// Uses `retry_after_ms` from the provider when available (e.g. a 429
-    /// `Retry-After` header). Falls back to exponential back-off + optional jitter.
-    fn delay_ms(&self, attempt: u32, retry_after_ms: Option<u64>) -> u64 {
-        if let Some(ms) = retry_after_ms {
-            return ms;
-        }
-        let exp = (self.initial_delay_ms as f64 * self.multiplier.powi((attempt - 1) as i32))
-            .min(self.max_delay_ms as f64) as u64;
-        if self.jitter {
-            use rand::Rng;
-            // Equal jitter: half the delay is guaranteed (prevents starvation),
-            // the other half is random (prevents thundering herd). Both halves
-            // scale with `exp`, so spread grows proportionally across retries.
-            let half = exp / 2;
-            half + rand::thread_rng().gen_range(0..=half)
-        } else {
-            exp
-        }
-    }
-}
-
 // ── Diminishing-returns constants ─────────────────────────────────────────────
 
 /// Minimum output tokens in a single assistant turn to be considered "productive".
@@ -231,77 +174,12 @@ const MAX_TOKEN_ESCALATIONS: u32 = 2;
 /// Multiplier applied on the first escalation (e.g. 16 384 → 65 536).
 const TOKEN_ESCALATION_FACTOR: u32 = 4;
 
-// ── Run Stream ────────────────────────────────────────────────────────────────
-
-/// The event stream for a running agent.
-///
-/// Implements `Stream<Item = AgentEvent>`. Dropping the stream cancels the
-/// underlying run immediately — no orphaned tasks, no wasted tokens.
-///
-/// ```rust,ignore
-/// let mut stream = agent.stream("Hello").await;
-///
-/// // Cancel explicitly:
-/// stream.cancel();
-///
-/// // Share the cancel signal with another task:
-/// let token = stream.cancel_token();
-/// tokio::spawn(async move { /* call token.cancel() when needed */ });
-/// ```
-#[must_use = "RunStream does nothing unless polled; use .next().await or collect the events"]
-pub struct RunStream {
-    inner: ReceiverStream<AgentEvent>,
-    cancel: CancellationToken,
-}
-
-impl std::fmt::Debug for RunStream {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RunStream")
-            .field("cancelled", &self.cancel.is_cancelled())
-            .finish_non_exhaustive()
-    }
-}
-
-impl RunStream {
-    /// Cancel the run immediately.
-    pub fn cancel(&self) {
-        self.cancel.cancel();
-    }
-
-    /// Clone the `CancellationToken` for this run.
-    ///
-    /// Use when you need to cancel the run from a separate task or store
-    /// the handle for later (e.g., a cancel button in a UI).
-    pub fn cancel_token(&self) -> CancellationToken {
-        self.cancel.clone()
-    }
-}
-
-impl futures::Stream for RunStream {
-    type Item = AgentEvent;
-    fn poll_next(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Option<Self::Item>> {
-        std::pin::Pin::new(&mut self.inner).poll_next(cx)
-    }
-}
-
-impl Drop for RunStream {
-    fn drop(&mut self) {
-        // Cancel the spawned task when the stream is abandoned.
-        // Without this, the run loop continues burning tokens even though
-        // nobody is consuming its output.
-        self.cancel.cancel();
-    }
-}
-
 // ── Run Config ────────────────────────────────────────────────────────────────
 
 /// Static configuration for one run. `Arc`-wrapped so it is cheap to share
 /// across the spawned task and helper services.
 pub(crate) struct RunConfig {
-    pub(crate) provider: Arc<dyn Provider>,
+    pub(crate) provider: Arc<dyn wui_core::provider::Provider>,
     pub(crate) tools: Arc<ToolRegistry>,
     pub(crate) hooks: Arc<HookRunner>,
     pub(crate) compress: Arc<dyn CompressStrategy>,
@@ -317,7 +195,7 @@ pub(crate) struct RunConfig {
     pub(crate) max_iter: u32,
 
     /// Back-off policy for transient provider errors.
-    pub(crate) retry: RetryPolicy,
+    pub(crate) retry: provider::RetryPolicy,
 
     /// Default execution timeout applied to every tool that doesn't declare
     /// its own `Tool::timeout()`. `None` means tools may run indefinitely.
@@ -354,55 +232,7 @@ pub(crate) struct RunConfig {
     pub(crate) result_store: Option<Arc<dyn super::executor::ResultStore>>,
 }
 
-// ── Public entry point ────────────────────────────────────────────────────────
-
-/// Run the agent loop and return an event stream.
-///
-/// Spawns an internal task. The stream yields events until `AgentEvent::Done`
-/// or `AgentEvent::Error` is received.
-///
-/// Dropping the returned `RunStream` cancels the run immediately — safe
-/// to drop at any point without leaking the background task. Call
-/// `stream.cancel()` or `stream.cancel_token()` for explicit control.
-pub(crate) fn run(config: Arc<RunConfig>, messages: Vec<Message>) -> RunStream {
-    let cancel = CancellationToken::new();
-    let (tx, rx) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
-    tokio::spawn(run_task(config, messages, cancel.clone(), tx));
-    RunStream {
-        inner: ReceiverStream::new(rx),
-        cancel,
-    }
-}
-
-// ── Internal task ─────────────────────────────────────────────────────────────
-
-async fn run_task(
-    config: Arc<RunConfig>,
-    messages: Vec<Message>,
-    cancel: CancellationToken,
-    tx: mpsc::Sender<AgentEvent>,
-) {
-    let span = tracing::info_span!(
-        "agent.run",
-        model      = %config.model.as_deref().unwrap_or("(provider-default)"),
-        max_iter   = config.max_iter,
-        tools      = config.tools.len(),
-    );
-    let result = run_loop(config.clone(), messages, cancel, &tx)
-        .instrument(span)
-        .await;
-    match result {
-        Ok(summary) => {
-            config.hooks.notify_turn_end(&summary).await;
-            let _ = tx.send(AgentEvent::Done(summary)).await;
-        }
-        Err(e) => {
-            let _ = tx.send(AgentEvent::Error(e)).await;
-        }
-    }
-}
-
-// ── Main loop ─────────────────────────────────────────────────────────────────
+// ── RunState ────────────────────────────────────────────────────────────────
 
 /// Mutable state carried across iterations of the run loop.
 struct RunState {
@@ -499,373 +329,6 @@ impl IterationCtx {
             pending_auths: Vec::new(),
             emission_guard: EmissionGuard::new(),
             auth_injections: Vec::new(),
-        }
-    }
-}
-
-/// Parse all stream events, accumulating tool calls, text, and thinking into
-/// the iteration context. Returns `Ok(true)` when `MessageEnd` was received,
-/// `Ok(false)` when the stream ended without it, `Err` on fatal errors.
-async fn parse_stream(
-    stream: &mut (impl futures::Stream<Item = Result<wui_core::event::StreamEvent, ProviderError>>
-              + Unpin),
-    ctx: &mut IterationCtx,
-    active_registry: &ToolRegistry,
-    tx: &mpsc::Sender<AgentEvent>,
-) -> Result<bool, AgentError> {
-    use wui_core::event::StreamEvent::*;
-
-    while let Some(event) = stream.next().await {
-        let event = match event {
-            Ok(e) => e,
-            Err(e) => {
-                if e.is_retryable() {
-                    continue;
-                }
-                return Err(AgentError::fatal(e.to_string()));
-            }
-        };
-
-        match event {
-            TextDelta { text } => {
-                ctx.text_buf.push_str(&text);
-                tx.send(AgentEvent::TextDelta(text)).await.ok();
-            }
-
-            ThinkingDelta { text } => {
-                ctx.thinking_buf.push_str(&text);
-                tx.send(AgentEvent::ThinkingDelta(text)).await.ok();
-            }
-
-            ToolUseStart { id, name } => {
-                ctx.pending_inputs.insert(id, (name, String::new()));
-            }
-
-            ToolInputDelta { id, chunk } => {
-                if let Some((_, json)) = ctx.pending_inputs.get_mut(&id) {
-                    json.push_str(&chunk);
-                }
-            }
-
-            ToolUseEnd { id } => {
-                let Some((name, json)) = ctx.pending_inputs.remove(&id) else {
-                    continue;
-                };
-
-                // Record submission order before any early-exit path so the
-                // provider always sees a matching ToolResult regardless of
-                // what happens next.
-                ctx.submission_order.push(id.clone());
-
-                let input: serde_json::Value = match serde_json::from_str(&json) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        tracing::warn!(tool = %name, error = %e, "malformed tool input JSON from provider");
-                        ctx.assistant_blocks.push(ContentBlock::ToolUse {
-                            id: id.clone(),
-                            name: name.clone(),
-                            input: serde_json::Value::Null,
-                            summary: None,
-                        });
-                        let denied = CompletedTool::immediate(
-                            id.clone(),
-                            name,
-                            wui_core::tool::ToolOutput::invalid_input(format!(
-                                "malformed tool input JSON: {e}"
-                            )),
-                        );
-                        ctx.emission_guard.first_time(&denied.id);
-                        emit_tool_event(&denied, tx).await;
-                        ctx.completed_map.insert(denied.id.clone(), denied);
-                        continue;
-                    }
-                };
-
-                let tool_summary = active_registry
-                    .get(&name)
-                    .and_then(|t| t.executor_hints(&input).summary);
-                ctx.assistant_blocks.push(ContentBlock::ToolUse {
-                    id: id.clone(),
-                    name: name.clone(),
-                    input: input.clone(),
-                    summary: tool_summary,
-                });
-
-                // Queue for authorization after MessageEnd.
-                ctx.pending_auths.push((id, name, input));
-            }
-
-            MessageEnd {
-                usage: u,
-                stop_reason: sr,
-            } => {
-                ctx.usage = u;
-                ctx.stop_reason = sr;
-                return Ok(true);
-            }
-
-            Error { message, retryable } => {
-                return Err(AgentError {
-                    message,
-                    retryable,
-                    detail: None,
-                    permission_denied: false,
-                });
-            }
-        }
-    }
-    Ok(false)
-}
-
-/// Authorize all collected tools concurrently and dispatch approved ones to
-/// the executor. Denied tools are recorded immediately with their events.
-async fn authorize_and_dispatch(
-    ctx: &mut IterationCtx,
-    config: &Arc<RunConfig>,
-    active_registry: &Arc<ToolRegistry>,
-    executor: &mut ToolExecutor,
-    messages: &[Message],
-    tx: &mpsc::Sender<AgentEvent>,
-) {
-    let mut auth_tasks: tokio::task::JoinSet<AuthOutcome> = tokio::task::JoinSet::new();
-
-    for (id, name, input) in std::mem::take(&mut ctx.pending_auths) {
-        let config_c = Arc::clone(config);
-        let registry_c = Arc::clone(active_registry);
-        let tx_c = tx.clone();
-        auth_tasks.spawn(async move {
-            let (result, injections) = auth::authorize_tool(
-                &config_c,
-                &registry_c,
-                id.clone(),
-                name.clone(),
-                input,
-                &tx_c,
-            )
-            .await;
-            match result {
-                Ok(effective_input) => AuthOutcome::Allowed {
-                    id,
-                    name,
-                    input: effective_input,
-                    injections,
-                },
-                Err(denied) => AuthOutcome::Denied {
-                    tool: denied,
-                    injections,
-                },
-            }
-        });
-    }
-
-    while let Some(outcome) = auth_tasks.join_next().await {
-        let outcome = match outcome {
-            Ok(o) => o,
-            Err(e) => {
-                tracing::error!(error = %e, "auth task panicked — skipping tool");
-                continue;
-            }
-        };
-        match outcome {
-            AuthOutcome::Allowed {
-                id,
-                name,
-                input,
-                injections,
-            } => {
-                ctx.auth_injections.extend(injections);
-                let history_snap = Arc::from(messages);
-                tracing::debug!(tool = %name, "tool dispatched");
-                tx.send(AgentEvent::ToolStart {
-                    id: id.clone(),
-                    name: name.clone(),
-                    input: input.clone(),
-                })
-                .await
-                .ok();
-                executor.submit(PendingTool {
-                    id,
-                    name,
-                    input,
-                    messages: history_snap,
-                });
-            }
-            AuthOutcome::Denied { tool, injections } => {
-                ctx.auth_injections.extend(injections);
-                ctx.emission_guard.first_time(&tool.id);
-                emit_tool_event(&tool, tx).await;
-                ctx.completed_map.insert(tool.id.clone(), tool);
-            }
-        }
-    }
-}
-
-/// Collect remaining executor results and run post-tool hooks.
-/// Emits tool events in submission order, after hook mutations are applied.
-async fn run_post_hooks(
-    ctx: &mut IterationCtx,
-    executor: ToolExecutor,
-    config: &RunConfig,
-    messages: &mut Vec<Message>,
-    tx: &mpsc::Sender<AgentEvent>,
-) {
-    for done in executor.collect_remaining().await {
-        ctx.completed_map.insert(done.id.clone(), done);
-    }
-
-    for id in &ctx.submission_order {
-        let Some(done) = ctx.completed_map.get(id) else {
-            continue;
-        };
-        let tool_name = done.name.clone();
-        let is_error = done.output.is_error();
-
-        let decision = if is_error {
-            let input = ctx.assistant_blocks.iter().find_map(|b| {
-                if let ContentBlock::ToolUse { id: bid, input, .. } = b {
-                    (bid == id).then_some(input)
-                } else {
-                    None
-                }
-            });
-            let input = input.unwrap_or(&serde_json::Value::Null);
-            config
-                .hooks
-                .post_tool_failure(&tool_name, input, &done.output)
-                .await
-        } else {
-            config.hooks.post_tool_use(&tool_name, &done.output).await
-        };
-
-        match decision {
-            HookDecision::Block { reason } => {
-                tracing::debug!(tool = %tool_name, %reason, "post-tool hook blocked output");
-                messages.push(system_reminder_msg(&format!(
-                    "The output of tool '{tool_name}' was blocked by policy: {reason}. \
-                     Do not use this output.",
-                )));
-            }
-            HookDecision::MutateOutput { content } => {
-                tracing::debug!(tool = %tool_name, "post-tool hook mutated output");
-                if let Some(done_mut) = ctx.completed_map.get_mut(id) {
-                    done_mut.output.content = content;
-                }
-            }
-            _ => {}
-        }
-
-        if ctx.emission_guard.first_time(id) {
-            if let Some(done) = ctx.completed_map.get(id) {
-                emit_tool_event(done, tx).await;
-            }
-        }
-    }
-}
-
-/// Build the assistant message and tool results, append them to history,
-/// update usage/iterations, and save a checkpoint if applicable.
-async fn assemble_history(
-    ctx: IterationCtx,
-    s: &mut RunState,
-    config: &RunConfig,
-    tx: &mpsc::Sender<AgentEvent>,
-) {
-    // Apply auth injections.
-    s.messages.extend(ctx.auth_injections);
-
-    // Build assistant message: thinking, text, then tool calls.
-    let mut blocks = ctx.assistant_blocks;
-    if !ctx.text_buf.is_empty() {
-        blocks.insert(0, ContentBlock::Text { text: ctx.text_buf });
-    }
-    if !ctx.thinking_buf.is_empty() {
-        blocks.insert(
-            0,
-            ContentBlock::Thinking {
-                text: ctx.thinking_buf,
-            },
-        );
-    }
-    if !blocks.is_empty() {
-        s.messages.push(Message::assistant(blocks));
-    }
-
-    // Append tool results in submission order.
-    if !ctx.submission_order.is_empty() {
-        let mut completed_map = ctx.completed_map;
-        let done_tools: Vec<CompletedTool> = ctx
-            .submission_order
-            .iter()
-            .filter_map(|id| completed_map.remove(id))
-            .collect();
-
-        for done in &done_tools {
-            for tool in &done.output.expose_tools {
-                s.dynamic_tools
-                    .insert(tool.name().to_string(), Arc::clone(tool));
-            }
-        }
-
-        for done in &done_tools {
-            for artifact in &done.output.artifacts {
-                tx.send(AgentEvent::Artifact {
-                    tool_id: done.id.clone(),
-                    tool_name: done.name.clone(),
-                    artifact: artifact.clone(),
-                })
-                .await
-                .ok();
-            }
-        }
-
-        let result_blocks: Vec<ContentBlock> = done_tools
-            .iter()
-            .map(|done| ContentBlock::ToolResult {
-                tool_use_id: done.id.clone(),
-                content: done.output.content.clone(),
-                is_error: done.output.is_error(),
-            })
-            .collect();
-
-        if !result_blocks.is_empty() {
-            s.messages.push(Message::with_id(
-                uuid::Uuid::new_v4().to_string(),
-                Role::User,
-                result_blocks,
-            ));
-        }
-
-        for done in &done_tools {
-            for injection in &done.output.injections {
-                s.messages.push(system_reminder_msg(&injection.text));
-            }
-        }
-    }
-
-    tracing::debug!(
-        stop_reason    = ?ctx.stop_reason,
-        input_tokens   = ctx.usage.input_tokens,
-        output_tokens  = ctx.usage.output_tokens,
-        cache_read     = ctx.usage.cache_read_tokens,
-        cache_write    = ctx.usage.cache_write_tokens,
-        "llm call complete"
-    );
-
-    s.total_usage += ctx.usage;
-    s.iterations += 1;
-
-    // Checkpoint save (only after tool-use iterations).
-    if !ctx.submission_order.is_empty() {
-        if let (Some(store), Some(run_id)) = (&config.checkpoint_store, &config.checkpoint_run_id) {
-            let cp = RunCheckpoint {
-                run_id: run_id.clone(),
-                messages: s.messages.clone(),
-                iteration: s.iterations,
-                total_usage: s.total_usage.clone(),
-            };
-            if let Err(e) = store.save(run_id, &cp).await {
-                tracing::warn!(run_id, error = %e, "checkpoint save failed");
-            }
         }
     }
 }
@@ -983,7 +446,7 @@ async fn run_loop(
         let stop_reason = ctx.stop_reason.clone();
         let usage = ctx.usage.clone();
         run_post_hooks(&mut ctx, executor, &config, &mut s.messages, tx).await;
-        assemble_history(ctx, &mut s, &config, tx).await;
+        history::assemble_history(ctx, &mut s, &config, tx).await;
 
         // ── Stop evaluation (handle_stop! needs continue/return) ─────────
 
@@ -1063,280 +526,6 @@ async fn run_loop(
 
         s.stop_hook_active = false;
     }
-}
-
-// ── Compression helpers ──────────────────────────────────────────────────────
-
-/// Run context compression if pressure exceeds the threshold.
-///
-/// Fires the PreCompact hook first (may inject preservation context),
-/// then runs the compression pipeline. Mutates `messages` in place.
-async fn maybe_compress(
-    config: &RunConfig,
-    messages: &mut Vec<Message>,
-    tx: &mpsc::Sender<AgentEvent>,
-) {
-    if config.compress.pressure(messages) >= config.compress.threshold() {
-        if let HookDecision::Block { reason } = config.hooks.pre_compact(messages).await {
-            tracing::debug!("pre_compact hook injecting preservation context");
-            messages.push(system_reminder_msg(&reason));
-        }
-    }
-
-    if config.compress.pressure(messages) < config.compress.threshold() {
-        return;
-    }
-
-    let pressure_before = config.compress.pressure(messages);
-    let result = config
-        .compress
-        .compress(
-            messages.clone(),
-            config.provider.clone(),
-            config.model.as_deref(),
-        )
-        .await;
-    match result {
-        Ok(CompressResult {
-            method: Some(method),
-            freed,
-            messages: new_msgs,
-        }) => {
-            let pressure_after = config.compress.pressure(&new_msgs);
-            tracing::debug!(?method, freed, %pressure_before, %pressure_after, "context compressed");
-            *messages = new_msgs;
-            if method == wui_core::event::CompressMethod::L3Failed {
-                tx.send(AgentEvent::CompressFallback { freed }).await.ok();
-            }
-            tx.send(AgentEvent::Compressed {
-                method,
-                freed,
-                pressure_before,
-                pressure_after,
-            })
-            .await
-            .ok();
-        }
-        Ok(_) => {}
-        Err(e) => {
-            tracing::warn!(error = %e, "compression failed, continuing without");
-        }
-    }
-}
-
-/// Attempt emergency compression after a prompt-too-long rejection.
-///
-/// Returns `true` if compression succeeded and the caller should retry.
-async fn emergency_compress(
-    config: &RunConfig,
-    messages: &mut Vec<Message>,
-    tx: &mpsc::Sender<AgentEvent>,
-) -> bool {
-    tracing::warn!("provider rejected prompt as too long — attempting emergency compression");
-    let pressure_before = config.compress.pressure(messages);
-    let result = config
-        .compress
-        .compress(
-            messages.clone(),
-            config.provider.clone(),
-            config.model.as_deref(),
-        )
-        .await;
-    match result {
-        Ok(CompressResult {
-            method: Some(method),
-            freed,
-            messages: new_msgs,
-        }) => {
-            let pressure_after = config.compress.pressure(&new_msgs);
-            tracing::info!(?method, freed, %pressure_before, %pressure_after, "emergency compression succeeded");
-            *messages = new_msgs;
-            tx.send(AgentEvent::Compressed {
-                method,
-                freed,
-                pressure_before,
-                pressure_after,
-            })
-            .await
-            .ok();
-            true
-        }
-        _ => {
-            tracing::error!("emergency compression failed or had no effect");
-            false
-        }
-    }
-}
-
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
-/// Call the provider, retrying transient errors with exponential back-off.
-async fn call_with_retry(
-    config: &RunConfig,
-    req: &ChatRequest,
-    tx: &mpsc::Sender<AgentEvent>,
-) -> Result<ProviderStream, AgentError> {
-    let mut attempt = 0u32;
-    loop {
-        match config.provider.stream(req.clone()).await {
-            Ok(stream) => return Ok(stream),
-
-            Err(e) if e.is_retryable() && attempt < config.retry.max_attempts => {
-                attempt += 1;
-
-                // Use the provider's Retry-After hint for rate-limit errors;
-                // fall back to the policy's formula for everything else.
-                let retry_after_ms = if let ProviderError::RateLimit { retry_after_ms } = &e {
-                    Some(*retry_after_ms)
-                } else {
-                    None
-                };
-                let delay_ms = config.retry.delay_ms(attempt, retry_after_ms);
-
-                tracing::warn!(
-                    attempt, max = config.retry.max_attempts,
-                    error = %e, delay_ms, "provider error — retrying"
-                );
-                tx.send(AgentEvent::Retrying {
-                    attempt,
-                    delay_ms,
-                    reason: e.to_string(),
-                })
-                .await
-                .ok();
-                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-            }
-
-            Err(e) => return Err(AgentError::fatal(e.to_string())),
-        }
-    }
-}
-
-/// Emit the appropriate AgentEvent for a completed tool.
-///
-/// Called in two distinct contexts:
-/// - **Instant failures** (malformed input, denied tools): emitted immediately,
-///   before hooks run, because these outcomes cannot be mutated.
-/// - **Successful / failed executor tools**: emitted *after* post-tool hooks,
-///   in submission order, so that `MutateOutput` decisions are reflected in
-///   the event the caller receives.
-async fn emit_tool_event(done: &CompletedTool, tx: &mpsc::Sender<AgentEvent>) {
-    let event = if let Some(kind) = &done.output.failure {
-        tracing::debug!(tool = %done.name, kind = ?kind, ms = done.ms, "tool failed");
-        AgentEvent::ToolError {
-            id: done.id.clone(),
-            name: done.name.clone(),
-            error: done.output.content.clone(),
-            kind: kind.clone(),
-            ms: done.ms,
-        }
-    } else {
-        tracing::debug!(tool = %done.name, ms = done.ms, "tool succeeded");
-        AgentEvent::ToolDone {
-            id: done.id.clone(),
-            name: done.name.clone(),
-            output: done.output.content.clone(),
-            ms: done.ms,
-            attempts: done.attempts,
-            structured: done.output.structured.clone(),
-        }
-    };
-    tx.send(event).await.ok();
-}
-
-// ── Run-loop helpers ─────────────────────────────────────────────────────────
-
-/// Guards against double-emission of tool events.
-struct EmissionGuard {
-    emitted: std::collections::HashSet<String>,
-}
-
-impl EmissionGuard {
-    fn new() -> Self {
-        Self {
-            emitted: std::collections::HashSet::new(),
-        }
-    }
-
-    /// Returns `true` if this is the first time — caller should emit.
-    fn first_time(&mut self, id: &str) -> bool {
-        self.emitted.insert(id.to_owned())
-    }
-}
-
-/// Build a system-reminder `Message` from plain text.
-fn system_reminder_msg(text: &str) -> Message {
-    Message {
-        id: uuid::Uuid::new_v4().to_string(),
-        role: Role::System,
-        content: vec![ContentBlock::Text {
-            text: wui_core::fmt::system_reminder(text),
-        }],
-    }
-}
-
-/// Extract the text content of the most recent assistant message.
-fn last_assistant_text(messages: &[Message]) -> &str {
-    messages
-        .iter()
-        .rev()
-        .find_map(|m| {
-            if m.role != Role::Assistant {
-                return None;
-            }
-            m.content.iter().find_map(|b| match b {
-                ContentBlock::Text { text } => Some(text.as_str()),
-                _ => None,
-            })
-        })
-        .unwrap_or("")
-}
-
-/// Replace the text content of the most recent assistant message.
-fn replace_last_assistant_text(messages: &mut [Message], new_text: String) {
-    for msg in messages.iter_mut().rev() {
-        if msg.role != Role::Assistant {
-            continue;
-        }
-        for block in msg.content.iter_mut() {
-            if let ContentBlock::Text { text } = block {
-                *text = new_text;
-                return;
-            }
-        }
-    }
-}
-
-/// Append a deferred-tools listing to the system prompt when needed.
-fn augment_system(base: &str, registry: &ToolRegistry) -> String {
-    let deferred = registry.deferred_entries();
-    if deferred.is_empty() {
-        return base.to_string();
-    }
-
-    let listing = deferred
-        .iter()
-        .map(|e| format!("- **{}**: {}", e.name, e.description))
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    let section = format!(
-        "## Additional tools\n\
-        These tools are available but require loading. \
-        Call `ToolSearch` with the tool name or a keyword before using them:\n\n\
-        {listing}"
-    );
-
-    format!("{base}\n\n{}", wui_core::fmt::system_reminder(&section))
-}
-
-/// Detect whether an `AgentError` indicates a prompt-too-long rejection.
-fn is_prompt_too_long(e: &AgentError) -> bool {
-    let msg = e.message.to_lowercase();
-    msg.contains("prompt is too long")
-        || msg.contains("too long")
-        || msg.contains("maximum context length")
-        || msg.contains("context_length_exceeded")
 }
 
 #[cfg(test)]

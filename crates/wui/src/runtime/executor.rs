@@ -194,11 +194,16 @@ impl ToolExecutor {
     /// Called after all tools have been authorized and submitted. Every
     /// submitted tool is accounted for before returning.
     pub async fn collect_remaining(mut self) -> Vec<CompletedTool> {
-        let mut results = Vec::new();
+        let mut results = self.drain_concurrent().await;
+        results.extend(self.run_sequential().await);
+        results
+    }
 
-        // Drain concurrent tasks. When a tool fails with an Execution error,
-        // cancel sibling concurrent tasks to avoid wasted work (e.g., if
-        // `bash "npm test"` fails, don't also run `bash "npm build"`).
+    /// Drain the JoinSet of concurrent tasks, handling panics and triggering
+    /// sibling cancellation when a tool fails with a retryable error (e.g., if
+    /// `bash "npm test"` fails, don't also run `bash "npm build"`).
+    async fn drain_concurrent(&mut self) -> Vec<CompletedTool> {
+        let mut results = Vec::new();
         while let Some(res) = self.pending.join_next().await {
             match res {
                 Ok((id, name, output, ms, attempts)) => {
@@ -217,8 +222,12 @@ impl ToolExecutor {
                 Err(e) => tracing::error!(error = %e, "tool task panicked"),
             }
         }
+        results
+    }
 
-        // Run sequential tools in submission order.
+    /// Run sequential tools in submission order, one at a time.
+    async fn run_sequential(&mut self) -> Vec<CompletedTool> {
+        let mut results = Vec::new();
         while let Some(tool) = self.sequential.pop_front() {
             let start = Instant::now();
             let hints = tool.impl_.executor_hints(&tool.input);
@@ -247,7 +256,6 @@ impl ToolExecutor {
                 attempts,
             });
         }
-
         results
     }
 
