@@ -90,7 +90,7 @@ New to wui? Start with `wui`. The extension crates are companion libraries — u
 | `wui` | Runtime executor + builder facade | stable |
 | `wui-mcp` | Bridge MCP ecosystem tools into Wui catalogs | beta |
 | `wui-memory` | Reference memory capabilities (string + vector) | beta |
-| `wui-spawn` | Background sub-agent delegation on top of Wui runs | beta |
+| `wui-spawn` | In-process background sub-agent delegation (no persistence) | beta |
 | `wui-observe` | Structured timeline + OpenTelemetry spans | beta |
 | `wui-skills` | File-based discoverable skill catalogs with manifest | beta |
 | `wui-eval` | Testing infrastructure: MockProvider + AgentHarness | beta |
