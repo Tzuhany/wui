@@ -201,59 +201,50 @@ fn expand_tool_input(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream
 
 /// Extract the text of all `///` doc comments on a field, concatenated.
 fn extract_doc_comment(field: &Field) -> Option<String> {
-    let mut lines = Vec::new();
-    for attr in &field.attrs {
-        if attr.path().is_ident("doc") {
-            if let Meta::NameValue(nv) = &attr.meta {
-                if let syn::Expr::Lit(expr_lit) = &nv.value {
-                    if let Lit::Str(s) = &expr_lit.lit {
-                        let text = s.value();
-                        lines.push(text.trim().to_string());
-                    }
-                }
-            }
-        }
-    }
-    if lines.is_empty() {
-        None
-    } else {
-        Some(lines.join(" "))
-    }
+    let lines: Vec<String> = field
+        .attrs
+        .iter()
+        .filter(|a| a.path().is_ident("doc"))
+        .filter_map(|a| match &a.meta {
+            Meta::NameValue(nv) => Some(&nv.value),
+            _ => None,
+        })
+        .filter_map(|expr| match expr {
+            syn::Expr::Lit(expr_lit) => match &expr_lit.lit {
+                Lit::Str(s) => Some(s.value().trim().to_string()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+
+    (!lines.is_empty()).then(|| lines.join(" "))
 }
 
 /// If `ty` is `Option<T>`, returns `(true, T)`. Otherwise returns `(false, ty)`.
 fn extract_option_inner(ty: &Type) -> (bool, &Type) {
-    if let Type::Path(tp) = ty {
-        if let Some(seg) = tp.path.segments.last() {
-            if seg.ident == "Option" {
-                if let syn::PathArguments::AngleBracketed(ab) = &seg.arguments {
-                    if let Some(syn::GenericArgument::Type(inner)) = ab.args.first() {
-                        return (true, inner);
-                    }
-                }
-            }
-        }
+    let Type::Path(tp) = ty else { return (false, ty) };
+    let seg = tp.path.segments.last().filter(|s| s.ident == "Option");
+    let Some(seg) = seg else { return (false, ty) };
+    let syn::PathArguments::AngleBracketed(ab) = &seg.arguments else { return (false, ty) };
+    match ab.args.first() {
+        Some(syn::GenericArgument::Type(inner)) => (true, inner),
+        _ => (false, ty),
     }
-    (false, ty)
 }
 
 /// Map a Rust type to a JSON Schema type string.
 fn rust_type_to_json_type(ty: &Type) -> &'static str {
-    if let Type::Path(tp) = ty {
-        if let Some(seg) = tp.path.segments.last() {
-            let ident = seg.ident.to_string();
-            return match ident.as_str() {
-                "String" | "str" => "string",
-                "bool" => "boolean",
-                "u8" | "u16" | "u32" | "u64" | "u128" | "usize" | "i8" | "i16" | "i32" | "i64"
-                | "i128" | "isize" => "integer",
-                "f32" | "f64" => "number",
-                "Vec" => "array",
-                "HashMap" | "BTreeMap" | "IndexMap" => "object",
-                "Value" => "object", // serde_json::Value
-                _ => "string",
-            };
-        }
+    let Type::Path(tp) = ty else { return "string" };
+    let Some(seg) = tp.path.segments.last() else { return "string" };
+    match seg.ident.to_string().as_str() {
+        "String" | "str" => "string",
+        "bool" => "boolean",
+        "u8" | "u16" | "u32" | "u64" | "u128" | "usize" | "i8" | "i16" | "i32" | "i64"
+        | "i128" | "isize" => "integer",
+        "f32" | "f64" => "number",
+        "Vec" => "array",
+        "HashMap" | "BTreeMap" | "IndexMap" | "Value" => "object",
+        _ => "string",
     }
-    "string"
 }

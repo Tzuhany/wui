@@ -29,6 +29,83 @@ use wui_core::event::CompressMethod;
 use wui_core::message::{ContentBlock, Message, Role};
 use wui_core::provider::Provider;
 
+// ── TokenEstimator ───────────────────────────────────────────────────────────
+
+/// Estimates the token count of a text string.
+///
+/// The default implementation ([`CharRatioEstimator`]) divides `text.len()` by
+/// a configurable characters-per-token ratio. Replace it with a provider-specific
+/// tokenizer (tiktoken, Anthropic tokenizer, etc.) for accurate counts —
+/// especially important for CJK text or code where the `len()/4` heuristic
+/// can be off by 2-4x.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// struct TiktokenEstimator { /* ... */ }
+///
+/// impl TokenEstimator for TiktokenEstimator {
+///     fn estimate(&self, text: &str) -> usize {
+///         self.bpe.encode_ordinary(text).len()
+///     }
+/// }
+///
+/// let pipeline = CompressPipeline::default()
+///     .token_estimator(TiktokenEstimator::new());
+/// ```
+pub trait TokenEstimator: Send + Sync + 'static {
+    /// Return the estimated number of tokens in `text`.
+    fn estimate(&self, text: &str) -> usize;
+}
+
+/// Default token estimator: `text.len() / chars_per_token`.
+///
+/// Accurate for English ASCII prose at the default of 4. For code or CJK
+/// text, use `chars_per_token = 2` or supply a real tokenizer.
+#[derive(Debug, Clone)]
+pub struct CharRatioEstimator {
+    pub chars_per_token: usize,
+}
+
+impl Default for CharRatioEstimator {
+    fn default() -> Self {
+        Self { chars_per_token: 4 }
+    }
+}
+
+impl TokenEstimator for CharRatioEstimator {
+    fn estimate(&self, text: &str) -> usize {
+        text.len() / self.chars_per_token.max(1)
+    }
+}
+
+// ── ContextBreakdown ─────────────────────────────────────────────────────────
+
+/// Token usage breakdown by category.
+///
+/// Produced by [`CompressPipeline::breakdown`]. Exposes where tokens are
+/// being spent so callers (dashboards, CLI tools, tests) can diagnose
+/// context pressure without guessing.
+#[derive(Debug, Clone, Default)]
+pub struct ContextBreakdown {
+    /// Tokens consumed by user text messages.
+    pub user_text_tokens: usize,
+    /// Tokens consumed by assistant text + thinking blocks.
+    pub assistant_tokens: usize,
+    /// Tokens consumed by tool use blocks (tool name + input JSON).
+    pub tool_use_tokens: usize,
+    /// Tokens consumed by tool result blocks.
+    pub tool_result_tokens: usize,
+    /// Tokens consumed by system/compressed/collapsed blocks.
+    pub system_tokens: usize,
+    /// Total tokens across all categories.
+    pub total: usize,
+    /// Context window size in tokens.
+    pub window: usize,
+    /// Current pressure (total / window).
+    pub pressure: f64,
+}
+
 // ── CompressStrategy ──────────────────────────────────────────────────────────
 
 /// Pluggable context compression strategy.
@@ -82,7 +159,6 @@ pub struct CompressResult {
 ///
 /// All fields are public — adjust any threshold without a builder API.
 /// `CompressPipeline::default()` is a good starting point for most agents.
-#[derive(Debug, Clone)]
 pub struct CompressPipeline {
     /// Total context window size in tokens.
     pub window_tokens: usize,
@@ -99,12 +175,11 @@ pub struct CompressPipeline {
     /// with a notice injected so the LLM knows the output was cut.
     pub budget_per_result: usize,
 
-    /// Estimated characters per token (`chars / N ≈ tokens`).
+    /// Token estimator used for all token-count calculations.
     ///
-    /// `4` is a reasonable default for English prose (accurate for ASCII).
-    /// For code or CJK text this estimate may be off by 2-4x — use `2` if
-    /// your agent works heavily with structured data or non-Latin scripts.
-    pub chars_per_token_estimate: usize,
+    /// Default: [`CharRatioEstimator`] with `chars_per_token = 4`.
+    /// Replace with a provider-specific tokenizer for accurate counts.
+    pub token_estimator: Arc<dyn TokenEstimator>,
 
     /// Fraction of messages to keep during L2 collapse.
     ///
@@ -136,6 +211,18 @@ pub struct CompressPipeline {
     /// Set to `false` to skip L3 entirely and rely only on L1 + L2.
     /// Defaults to `true`.
     pub allow_l3: bool,
+
+    /// Aggregate token budget for all tool results in the conversation.
+    ///
+    /// When the total tokens across all `ToolResult` blocks exceeds this
+    /// budget, the oldest results are replaced with `"[result trimmed]"`
+    /// placeholders until the total fits. This prevents accumulation of
+    /// stale tool results from consuming disproportionate context in long
+    /// sessions.
+    ///
+    /// `None` disables aggregate budgeting (default). L1 per-result trim
+    /// still applies independently.
+    pub result_token_budget: Option<usize>,
 }
 
 impl Default for CompressPipeline {
@@ -144,19 +231,68 @@ impl Default for CompressPipeline {
             window_tokens: 200_000,
             compact_threshold: 0.80,
             budget_per_result: 10_000,
-            chars_per_token_estimate: 4,
+            token_estimator: Arc::new(CharRatioEstimator::default()),
             collapse_keep_fraction: 0.5,
             collapse_keep_min: 4,
             compact_focus: None,
             allow_l3: true,
+            result_token_budget: None,
         }
     }
 }
 
 impl CompressPipeline {
-    /// Estimate token count from character count.
+    /// Replace the token estimator with a custom implementation.
+    pub fn with_token_estimator(mut self, estimator: impl TokenEstimator) -> Self {
+        self.token_estimator = Arc::new(estimator);
+        self
+    }
+
+    /// Produce a token breakdown of the current message history.
+    ///
+    /// Useful for debugging context pressure — shows exactly where tokens
+    /// are being spent (user text, assistant output, tool calls, tool results,
+    /// system/compression markers).
+    pub fn breakdown(&self, messages: &[Message]) -> ContextBreakdown {
+        let mut b = ContextBreakdown {
+            window: self.window_tokens,
+            ..Default::default()
+        };
+        for msg in messages {
+            for block in &msg.content {
+                let tokens = self.estimate_tokens(&block_text(block));
+                match block {
+                    ContentBlock::Text { .. } => match msg.role {
+                        Role::User => b.user_text_tokens += tokens,
+                        Role::Assistant => b.assistant_tokens += tokens,
+                        Role::System => b.system_tokens += tokens,
+                    },
+                    ContentBlock::Thinking { .. } => b.assistant_tokens += tokens,
+                    ContentBlock::ToolUse { .. } => b.tool_use_tokens += tokens,
+                    ContentBlock::ToolResult { .. } => b.tool_result_tokens += tokens,
+                    ContentBlock::Collapsed { .. } | ContentBlock::CompactBoundary { .. } => {
+                        b.system_tokens += tokens
+                    }
+                    ContentBlock::Image { .. } | ContentBlock::Document { .. } => {
+                        b.user_text_tokens += tokens
+                    }
+                }
+            }
+        }
+        b.total = b.user_text_tokens
+            + b.assistant_tokens
+            + b.tool_use_tokens
+            + b.tool_result_tokens
+            + b.system_tokens;
+        b.pressure = b.total as f64 / self.window_tokens.max(1) as f64;
+        b
+    }
+}
+
+impl CompressPipeline {
+    /// Estimate token count using the configured token estimator.
     fn estimate_tokens(&self, text: &str) -> usize {
-        text.len() / self.chars_per_token_estimate.max(1)
+        self.token_estimator.estimate(text)
     }
 
     fn total_tokens(&self, messages: &[Message]) -> usize {
@@ -212,13 +348,32 @@ impl CompressPipeline {
             return Some((trimmed, CompressMethod::BudgetTrim, freed));
         }
 
-        let working = if l1_reduced {
-            trimmed
+        // Aggregate budget trim: replace the oldest tool results with
+        // placeholders when total tool-result tokens exceed the budget.
+        let after_aggregate = if let Some(budget) = self.result_token_budget {
+            let candidate = if l1_reduced { &trimmed } else { messages };
+            let agg_trimmed = self.aggregate_result_trim(candidate, budget);
+            if agg_trimmed.len() != candidate.len()
+                || self.total_tokens(&agg_trimmed) < self.total_tokens(candidate)
+            {
+                Some(agg_trimmed)
+            } else {
+                None
+            }
         } else {
-            messages.to_vec()
+            None
         };
 
+        let working = after_aggregate.unwrap_or_else(|| {
+            if l1_reduced { trimmed } else { messages.to_vec() }
+        });
+
         if !self.should_compress(&working) {
+            let after = self.total_tokens(&working);
+            if after < before {
+                let freed = before.saturating_sub(after);
+                return Some((working, CompressMethod::BudgetTrim, freed));
+            }
             return None; // No pressure.
         }
 
@@ -254,44 +409,136 @@ impl CompressPipeline {
         messages
             .iter()
             .map(|msg| {
+                let content = msg.content.iter().map(|b| self.trim_block(b)).collect();
+                Message::with_id(msg.id.clone(), msg.role.clone(), content)
+            })
+            .collect()
+    }
+
+    /// Truncate a single ToolResult block if it exceeds the token budget.
+    /// Non-ToolResult blocks are returned as-is.
+    fn trim_block(&self, block: &ContentBlock) -> ContentBlock {
+        let ContentBlock::ToolResult { tool_use_id, content, is_error } = block else {
+            return block.clone();
+        };
+        let tokens = self.estimate_tokens(content);
+        if tokens <= self.budget_per_result {
+            return block.clone();
+        }
+        let truncated = self.truncate_to_budget(content, tokens);
+        ContentBlock::ToolResult {
+            tool_use_id: tool_use_id.clone(),
+            content: format!(
+                "[Result truncated: {tokens} tokens → {} token limit]\n\n{truncated}",
+                self.budget_per_result,
+            ),
+            is_error: *is_error,
+        }
+    }
+
+    /// Truncate `content` so that `estimate_tokens(result) <= budget_per_result`.
+    ///
+    /// Uses the ratio `(budget / current_tokens * len)` as an initial estimate,
+    /// then verifies with the estimator. If the estimate overshoots (possible
+    /// with non-linear tokenizers), it halves the overshoot iteratively.
+    fn truncate_to_budget<'a>(&self, content: &'a str, tokens: usize) -> &'a str {
+        // Initial estimate: proportional shrink.
+        let mut limit = if tokens > 0 {
+            content.len() * self.budget_per_result / tokens
+        } else {
+            return content;
+        };
+        limit = limit.min(content.len());
+
+        // Find a valid UTF-8 boundary.
+        limit = (0..=limit)
+            .rev()
+            .find(|&i| content.is_char_boundary(i))
+            .unwrap_or(0);
+
+        // Verify the estimate satisfies the budget. If not, shrink iteratively.
+        // At most 3 rounds — each halves the overshoot, converging quickly.
+        for _ in 0..3 {
+            if self.estimate_tokens(&content[..limit]) <= self.budget_per_result {
+                break;
+            }
+            // Shrink by the overshoot ratio.
+            let actual = self.estimate_tokens(&content[..limit]);
+            let shrink = if actual > 0 {
+                limit * self.budget_per_result / actual
+            } else {
+                break;
+            };
+            limit = (0..=shrink.min(limit.saturating_sub(1)))
+                .rev()
+                .find(|&i| content.is_char_boundary(i))
+                .unwrap_or(0);
+        }
+
+        &content[..limit]
+    }
+
+    // ── Aggregate Result Trim ──────────────────────────────────────────────────
+    //
+    // Enforces a session-level token budget across all tool results.
+    // Scans messages in REVERSE order (most recent first) summing tool-result
+    // tokens. Once the running total exceeds `budget`, older results are
+    // replaced with a short placeholder. This preserves the most recent
+    // (and likely most relevant) results while shedding stale ones.
+
+    fn aggregate_result_trim(&self, messages: &[Message], budget: usize) -> Vec<Message> {
+        // First pass (reverse): decide which tool-result blocks to keep.
+        // Walk newest-first so recent results win the budget.
+        let mut remaining = budget;
+        let mut keep: Vec<Vec<bool>> = messages
+            .iter()
+            .map(|m| vec![true; m.content.len()])
+            .collect();
+
+        for mi in (0..messages.len()).rev() {
+            for bi in (0..messages[mi].content.len()).rev() {
+                let ContentBlock::ToolResult { content, .. } = &messages[mi].content[bi] else {
+                    continue;
+                };
+                let tokens = self.estimate_tokens(content);
+                if tokens <= remaining {
+                    remaining = remaining.saturating_sub(tokens);
+                } else {
+                    keep[mi][bi] = false;
+                }
+            }
+        }
+
+        // Second pass: rebuild, replacing over-budget results with placeholders.
+        messages
+            .iter()
+            .enumerate()
+            .map(|(mi, msg)| {
                 let content = msg
                     .content
                     .iter()
-                    .map(|block| {
-                        if let ContentBlock::ToolResult {
-                            tool_use_id,
-                            content,
-                            is_error,
-                        } = block
-                        {
-                            let tokens = self.estimate_tokens(content);
-                            if tokens > self.budget_per_result {
-                                let limit = self.budget_per_result * self.chars_per_token_estimate;
-                                // Find the nearest valid UTF-8 boundary at or before `limit`
-                                // so slicing never panics on multi-byte characters.
-                                let safe_limit = (0..=limit.min(content.len()))
-                                    .rev()
-                                    .find(|&i| content.is_char_boundary(i))
-                                    .unwrap_or(0);
-                                let notice = format!(
-                                    "[Result truncated: {} tokens → {} token limit]\n\n{}",
-                                    tokens,
-                                    self.budget_per_result,
-                                    &content[..safe_limit],
-                                );
-                                return ContentBlock::ToolResult {
-                                    tool_use_id: tool_use_id.clone(),
-                                    content: notice,
-                                    is_error: *is_error,
-                                };
-                            }
-                        }
-                        block.clone()
-                    })
+                    .enumerate()
+                    .map(|(bi, block)| Self::maybe_stub_result(block, keep[mi][bi]))
                     .collect();
                 Message::with_id(msg.id.clone(), msg.role.clone(), content)
             })
             .collect()
+    }
+
+    /// If `keep` is false and the block is a ToolResult, replace it with a
+    /// stub placeholder. Otherwise return the block unchanged.
+    fn maybe_stub_result(block: &ContentBlock, keep: bool) -> ContentBlock {
+        if keep {
+            return block.clone();
+        }
+        let ContentBlock::ToolResult { tool_use_id, is_error, .. } = block else {
+            return block.clone();
+        };
+        ContentBlock::ToolResult {
+            tool_use_id: tool_use_id.clone(),
+            content: "[result trimmed: aggregate budget exceeded]".to_string(),
+            is_error: *is_error,
+        }
     }
 
     // ── L2: Collapse ──────────────────────────────────────────────────────────
@@ -505,7 +752,6 @@ impl CompressStrategy for CompressPipeline {
 ///     .compress(SummarizingCompressor::default())
 ///     .build()
 /// ```
-#[derive(Debug, Clone)]
 pub struct SummarizingCompressor {
     /// Number of most-recent turns to preserve verbatim. Default: 6.
     pub recent_turns: usize,
@@ -517,10 +763,9 @@ pub struct SummarizingCompressor {
     /// Pressure fraction `[0.0, 1.0]` above which compression triggers.
     /// Default: 0.75.
     pub threshold: f32,
-    /// Estimated characters per token used to estimate pressure.
-    /// Default: 4 (accurate for ASCII/English prose; may be off by 2-4x for
-    /// code or CJK text).
-    pub chars_per_token_estimate: usize,
+    /// Token estimator used for pressure calculations.
+    /// Default: [`CharRatioEstimator`] with `chars_per_token = 4`.
+    pub token_estimator: Arc<dyn TokenEstimator>,
     /// Assumed context window size in tokens.
     /// Default: 200 000.
     pub window_tokens: usize,
@@ -536,7 +781,7 @@ impl Default for SummarizingCompressor {
                               continue the task."
                 .to_string(),
             threshold: 0.75,
-            chars_per_token_estimate: 4,
+            token_estimator: Arc::new(CharRatioEstimator::default()),
             window_tokens: 200_000,
         }
     }
@@ -547,9 +792,8 @@ impl SummarizingCompressor {
         messages
             .iter()
             .flat_map(|m| m.content.iter())
-            .map(|b| block_text(b).len())
-            .sum::<usize>()
-            / self.chars_per_token_estimate.max(1)
+            .map(|b| self.token_estimator.estimate(&block_text(b)))
+            .sum()
     }
 
     fn current_pressure(&self, messages: &[wui_core::message::Message]) -> f32 {
@@ -703,8 +947,14 @@ fn block_text(block: &ContentBlock) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::CompressPipeline;
+    use std::sync::Arc;
+
+    use super::{CharRatioEstimator, CompressPipeline, TokenEstimator};
     use wui_core::message::{ContentBlock, Message, Role};
+
+    fn estimator(chars_per_token: usize) -> Arc<dyn TokenEstimator> {
+        Arc::new(CharRatioEstimator { chars_per_token })
+    }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -723,7 +973,7 @@ mod tests {
             id: uuid::Uuid::new_v4().to_string(),
             role: Role::User,
             content: vec![ContentBlock::ToolResult {
-                tool_use_id: "tu_test".to_string(),
+                tool_use_id: wui_core::types::ToolCallId::from("tu_test"),
                 content: content.to_string(),
                 is_error: false,
             }],
@@ -749,9 +999,9 @@ mod tests {
     }
 
     #[test]
-    fn estimate_tokens_custom_chars_per_token_estimate() {
+    fn estimate_tokens_custom_token_estimator() {
         let p = CompressPipeline {
-            chars_per_token_estimate: 2,
+            token_estimator: estimator(2),
             ..Default::default()
         };
         assert_eq!(p.estimate_tokens("abcd"), 2);
@@ -760,9 +1010,9 @@ mod tests {
 
     #[test]
     fn estimate_tokens_zero_guard() {
-        // chars_per_token_estimate = 0 must not panic (guarded by .max(1))
+        // chars_per_token = 0 must not panic (guarded by .max(1))
         let p = CompressPipeline {
-            chars_per_token_estimate: 0,
+            token_estimator: estimator(0),
             ..Default::default()
         };
         assert_eq!(p.estimate_tokens("abcd"), 4);
@@ -808,8 +1058,8 @@ mod tests {
     #[test]
     fn l1_trims_oversized_results() {
         let p = CompressPipeline {
-            budget_per_result: 10,       // 10 token limit
-            chars_per_token_estimate: 4, // → 40 char limit
+            budget_per_result: 10, // 10 token limit
+            token_estimator: estimator(4),
             ..Default::default()
         };
         let huge = "a".repeat(400); // 400 chars / 4 = 100 tokens > 10 limit
@@ -843,7 +1093,7 @@ mod tests {
     fn l1_preserves_is_error_flag() {
         let p = CompressPipeline {
             budget_per_result: 1,
-            chars_per_token_estimate: 1,
+            token_estimator: estimator(1),
             ..Default::default()
         };
         let mut msg = tool_result_msg(&"x".repeat(100));
@@ -979,12 +1229,13 @@ mod tests {
         let p = CompressPipeline {
             window_tokens: 1000,
             compact_threshold: 0.05, // very sensitive: any content triggers
-            budget_per_result: 10,   // 10 token limit per result
-            chars_per_token_estimate: 4,
+            budget_per_result: 10, // 10 token limit per result
+            token_estimator: estimator(4),
             collapse_keep_min: 2,
             collapse_keep_fraction: 0.5,
             compact_focus: None,
             allow_l3: true,
+            result_token_budget: None,
         };
 
         // One huge tool result: 400 chars / 4 = 100 tokens >> budget of 10.
@@ -1048,11 +1299,12 @@ mod tests {
             window_tokens: 200,
             compact_threshold: 0.5,
             budget_per_result: 10_000,
-            chars_per_token_estimate: 4,
+            token_estimator: estimator(4),
             collapse_keep_min: 1,
             collapse_keep_fraction: 0.2,
             compact_focus: None,
             allow_l3: true,
+            result_token_budget: None,
         };
 
         // 20 messages × 40 chars = 800 chars / 4 = 200 tokens.

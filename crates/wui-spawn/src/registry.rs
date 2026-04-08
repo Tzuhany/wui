@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use futures::StreamExt;
-use tokio::sync::Mutex;
+use tokio::sync::{broadcast, Mutex};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -18,6 +18,9 @@ pub struct AgentRegistry {
 struct Job {
     cancel: CancellationToken,
     handle: JoinHandle<Result<String, String>>,
+    /// Broadcast channel for event streaming. Callers can subscribe to
+    /// receive real-time events from the sub-agent via `task_events()`.
+    event_tx: broadcast::Sender<AgentEvent>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -39,6 +42,8 @@ impl AgentRegistry {
         let cancel = CancellationToken::new();
         let agent = agent.clone();
         let ct = cancel.clone();
+        let (event_tx, _) = broadcast::channel(256);
+        let tx = event_tx.clone();
 
         let handle = tokio::spawn(async move {
             let mut stream = agent.stream(prompt);
@@ -55,6 +60,10 @@ impl AgentRegistry {
                     }
                 };
 
+                // Broadcast events to any subscribers. Errors (no receivers)
+                // are silently ignored — events are best-effort.
+                let _ = tx.send(event.clone());
+
                 match event {
                     AgentEvent::TextDelta(t) => text.push_str(&t),
                     AgentEvent::Done(_) => break,
@@ -65,7 +74,10 @@ impl AgentRegistry {
             Ok(text)
         });
 
-        self.jobs.lock().await.insert(id, Job { cancel, handle });
+        self.jobs
+            .lock()
+            .await
+            .insert(id, Job { cancel, handle, event_tx });
         id
     }
 
@@ -95,6 +107,16 @@ impl AgentRegistry {
         } else {
             false
         }
+    }
+
+    /// Subscribe to real-time events from a running sub-agent.
+    ///
+    /// Returns `None` if the job is not found or already completed.
+    /// The receiver yields events as they are produced by the sub-agent.
+    /// Missed events (receiver too slow) are dropped.
+    pub async fn task_events(&self, id: Uuid) -> Option<broadcast::Receiver<AgentEvent>> {
+        let jobs = self.jobs.lock().await;
+        jobs.get(&id).map(|job| job.event_tx.subscribe())
     }
 
     pub async fn wait(&self, id: Uuid) -> JobStatus {

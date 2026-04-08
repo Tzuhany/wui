@@ -24,7 +24,7 @@ async fn main() -> anyhow::Result<()> {
 
     // ── Turn 1 ────────────────────────────────────────────────────────────────
     println!("User: My favourite colour is blue.");
-    let mut stream = session.send("My favourite colour is blue. Just acknowledge.");
+    let mut stream = session.send("My favourite colour is blue. Just acknowledge.").await;
 
     while let Some(event) = stream.next().await {
         match event {
@@ -38,7 +38,7 @@ async fn main() -> anyhow::Result<()> {
     // ── Turn 2 ────────────────────────────────────────────────────────────────
     // The session remembers the first turn automatically.
     println!("\nUser: What is my favourite colour?");
-    let mut stream = session.send("What is my favourite colour?");
+    let mut stream = session.send("What is my favourite colour?").await;
 
     while let Some(event) = stream.next().await {
         match event {

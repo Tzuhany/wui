@@ -34,7 +34,7 @@ async fn test_history(provider: Anthropic) {
 
     // Turn 1: introduce a fact.
     {
-        let mut stream = session.send("My secret code word is BANANA42. Acknowledge.");
+        let mut stream = session.send("My secret code word is BANANA42. Acknowledge.").await;
         let mut text = String::new();
         while let Some(event) = stream.next().await {
             match event {
@@ -50,7 +50,7 @@ async fn test_history(provider: Anthropic) {
 
     // Turn 2: recall the fact.
     {
-        let mut stream = session.send("What was my secret code word?");
+        let mut stream = session.send("What was my secret code word?").await;
         let mut text = String::new();
         while let Some(event) = stream.next().await {
             match event {
@@ -95,7 +95,7 @@ async fn test_session_store(provider: Anthropic) {
 
     {
         let session = agent_a.session("cp-test").await;
-        let mut stream = session.send("Remember: the magic number is 777.");
+        let mut stream = session.send("Remember: the magic number is 777.").await;
         while let Some(event) = stream.next().await {
             match event {
                 AgentEvent::Done(_) => break,
@@ -124,7 +124,7 @@ async fn test_session_store(provider: Anthropic) {
 
     {
         let session = agent_b.session("cp-test").await;
-        let mut stream = session.send("What was the magic number I told you about?");
+        let mut stream = session.send("What was the magic number I told you about?").await;
         let mut text = String::new();
         while let Some(event) = stream.next().await {
             match event {

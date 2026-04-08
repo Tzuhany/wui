@@ -43,6 +43,17 @@ use serde_json::Value;
 
 use crate::message::Message;
 
+// ── InterruptBehavior ─────────────────────────────────────────────────────────
+
+/// What should happen when the user submits a new message while this tool runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InterruptBehavior {
+    /// Stop the tool and discard its result.
+    Cancel,
+    /// Keep running; the new message waits until this tool completes.
+    Block,
+}
+
 // ── ToolMeta ──────────────────────────────────────────────────────────────────
 
 /// Per-invocation semantic metadata for a tool call.
@@ -175,9 +186,42 @@ pub trait Tool: Send + Sync + 'static {
     ///     }
     /// }
     /// ```
-    #[allow(unused_variables)]
-    fn executor_hints(&self, input: &Value) -> ExecutorHints {
+    fn executor_hints(&self, _input: &Value) -> ExecutorHints {
         ExecutorHints::default()
+    }
+
+    /// What happens when the user interrupts while this tool is running.
+    ///
+    /// - `Cancel` — abort the tool and discard its result.
+    /// - `Block` (default) — keep running; the interruption waits.
+    ///
+    /// Override for tools whose results are disposable on interruption
+    /// (searches, reads). Keep the default for tools with side effects
+    /// (file writes, API calls) that should finish cleanly.
+    fn interrupt_behavior(&self) -> InterruptBehavior {
+        InterruptBehavior::Block
+    }
+
+    /// Prepare a matcher for wildcard permission rules.
+    ///
+    /// Called once per tool invocation during the permission check. Returns a
+    /// closure that tests whether a permission rule pattern matches this
+    /// specific invocation. When `None` (default), the framework falls back
+    /// to prefix matching on [`ToolMeta::permission_key`].
+    ///
+    /// Use this for tools with complex input structures (like a shell tool)
+    /// where the permission pattern needs to match against parsed subcommands:
+    ///
+    /// ```rust,ignore
+    /// fn permission_matcher(&self, input: &Value) -> Option<Box<dyn Fn(&str) -> bool + Send>> {
+    ///     let cmd = input["command"].as_str()?.to_string();
+    ///     Some(Box::new(move |pattern| {
+    ///         cmd == pattern || cmd.starts_with(&format!("{pattern} "))
+    ///     }))
+    /// }
+    /// ```
+    fn permission_matcher(&self, _input: &Value) -> Option<Box<dyn Fn(&str) -> bool + Send + Sync>> {
+        None
     }
 
     /// Execute the tool.
@@ -364,6 +408,15 @@ impl ToolOutput {
     pub fn is_error(&self) -> bool {
         self.failure.is_some()
     }
+
+    /// Whether this output represents a retryable failure.
+    ///
+    /// Returns `true` only for `FailureKind::Execution`. All other failure
+    /// kinds (invalid input, not found, permission denied, hook blocked) are
+    /// deterministic — retrying would produce the same result.
+    pub fn is_retryable(&self) -> bool {
+        self.failure.as_ref().is_some_and(|k| k.is_retryable())
+    }
 }
 
 // ── Failure Kind ─────────────────────────────────────────────────────────────
@@ -392,6 +445,18 @@ pub enum FailureKind {
     HookBlocked,
     /// The permission system denied the tool call.
     PermissionDenied,
+}
+
+impl FailureKind {
+    /// Whether this failure kind is worth retrying.
+    ///
+    /// Only `Execution` errors are retryable — the tool ran but hit a
+    /// transient or recoverable problem. All other kinds are deterministic:
+    /// retrying with the same input, registry, hooks, and permissions will
+    /// produce the same outcome.
+    pub fn is_retryable(&self) -> bool {
+        matches!(self, Self::Execution)
+    }
 }
 
 // ── Artifact ──────────────────────────────────────────────────────────────────

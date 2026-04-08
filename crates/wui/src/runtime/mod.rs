@@ -16,7 +16,7 @@ pub(crate) use tool_search::ToolSearch;
 pub use checkpoint::{
     CheckpointStore, FileCheckpointStore, InMemoryCheckpointStore, RunCheckpoint,
 };
-pub use executor::ExecutorHints;
+pub use executor::{ExecutorHints, ResultStore};
 pub use permission::{PermissionMode, PermissionRules, PermissionVerdict, SessionPermissions};
 pub use run::{RetryPolicy, RunStream};
 pub use session_store::{InMemorySessionStore, SessionStore, SessionStoreError, StoredSession};

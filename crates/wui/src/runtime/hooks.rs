@@ -3,10 +3,11 @@
 
 use std::sync::Arc;
 
-use wui_core::event::RunStopReason;
+use wui_core::event::{RunStopReason, RunSummary};
 use wui_core::hook::{Hook, HookDecision, HookEvent};
 use wui_core::message::Message;
 use wui_core::tool::ToolOutput;
+use wui_core::types::SessionId;
 
 pub struct HookRunner {
     hooks: Vec<Arc<dyn Hook>>,
@@ -74,6 +75,29 @@ impl HookRunner {
             stop_hook_active,
         };
         self.run(&event).await
+    }
+
+    // ── Lifecycle notifications (fire-and-forget) ─────────────────────
+
+    pub async fn notify_session_start(&self, session_id: &SessionId) {
+        self.notify(&HookEvent::SessionStart { session_id }).await;
+    }
+
+    pub async fn notify_turn_start(&self, messages: &[Message]) {
+        self.notify(&HookEvent::TurnStart { messages }).await;
+    }
+
+    pub async fn notify_turn_end(&self, summary: &RunSummary) {
+        self.notify(&HookEvent::TurnEnd { summary }).await;
+    }
+
+    /// Fire a lifecycle notification — decision is ignored.
+    async fn notify(&self, event: &HookEvent<'_>) {
+        for hook in &self.hooks {
+            if hook.handles(event) {
+                let _ = hook.evaluate(event).await;
+            }
+        }
     }
 
     async fn run(&self, event: &HookEvent<'_>) -> HookDecision {

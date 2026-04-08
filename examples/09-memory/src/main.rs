@@ -48,7 +48,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Turn 1 — ask the agent to store a fact.
     println!("  [turn 1] asking agent to remember a fact ...");
-    let mut stream = session.send("Please remember this: the project codename is Phoenix.");
+    let mut stream = session.send("Please remember this: the project codename is Phoenix.").await;
     let mut remembered = false;
 
     while let Some(event) = stream.next().await {
@@ -66,7 +66,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Turn 2 — ask the agent to recall the fact.
     println!("  [turn 2] asking agent to recall the codename ...");
-    let mut stream = session.send("What is the project codename you were asked to remember?");
+    let mut stream = session.send("What is the project codename you were asked to remember?").await;
     let mut recalled = false;
     let mut response = String::new();
 

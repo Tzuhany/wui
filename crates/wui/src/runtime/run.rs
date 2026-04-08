@@ -170,6 +170,7 @@ use wui_core::event::{
 use wui_core::hook::HookDecision;
 use wui_core::message::{ContentBlock, Message, Role};
 use wui_core::provider::{ChatRequest, Provider, ProviderError};
+use wui_core::types::ToolCallId;
 
 /// Convenience alias for the pinned stream returned by `Provider::stream`.
 type ProviderStream = std::pin::Pin<
@@ -399,6 +400,9 @@ pub(crate) struct RunConfig {
     pub(crate) checkpoint_store: Option<Arc<dyn CheckpointStore>>,
     /// The run ID used to save/load checkpoints.
     pub(crate) checkpoint_run_id: Option<String>,
+
+    /// Optional store for persisting large tool results before truncation.
+    pub(crate) result_store: Option<Arc<dyn super::executor::ResultStore>>,
 }
 
 // ── Public entry point ────────────────────────────────────────────────────────
@@ -435,11 +439,12 @@ async fn run_task(
         max_iter   = config.max_iter,
         tools      = config.tools.len(),
     );
-    let result = run_loop(config, messages, cancel, &tx)
+    let result = run_loop(config.clone(), messages, cancel, &tx)
         .instrument(span)
         .await;
     match result {
         Ok(summary) => {
+            config.hooks.notify_turn_end(&summary).await;
             let _ = tx.send(AgentEvent::Done(summary)).await;
         }
         Err(e) => {
@@ -565,6 +570,9 @@ async fn run_loop(
             "iteration start"
         );
 
+        // Notify lifecycle hooks at the start of each iteration.
+        config.hooks.notify_turn_start(&messages).await;
+
         // ── Context compression ────────────────────────────────────────────────
         //
         // Only fire PreCompact when the context is actually approaching the
@@ -581,7 +589,10 @@ async fn run_loop(
             }
         }
 
-        {
+        // Only clone messages and call compress() when pressure is above
+        // threshold. This avoids a full Vec<Message> clone on every iteration
+        // when the context is small enough to skip compression entirely.
+        if config.compress.pressure(&messages) >= config.compress.threshold() {
             let result = config
                 .compress
                 .compress(
@@ -603,7 +614,7 @@ async fn run_loop(
                     }
                     tx.send(AgentEvent::Compressed { method, freed }).await.ok();
                 }
-                Ok(_) => {} // no compression needed
+                Ok(_) => {} // compression checked but not needed
                 Err(e) => {
                     tracing::warn!(error = %e, "compression failed, continuing without");
                 }
@@ -640,21 +651,53 @@ async fn run_loop(
         };
 
         // ── Call provider with retry ───────────────────────────────────────────
-        let stream = call_with_retry(&config, &req, tx).await?;
+        // If the provider rejects the request as too long (400), attempt an
+        // emergency compression and retry the iteration. This handles the case
+        // where token estimation undershot and the actual prompt exceeds the
+        // provider's context window. At most one emergency compression per
+        // iteration to avoid infinite loops.
+        let stream = match call_with_retry(&config, &req, tx).await {
+            Ok(s) => s,
+            Err(e) if is_prompt_too_long(&e) => {
+                tracing::warn!("provider rejected prompt as too long — attempting emergency compression");
+                let result = config
+                    .compress
+                    .compress(
+                        messages.clone(),
+                        config.provider.clone(),
+                        config.model.as_deref(),
+                    )
+                    .await;
+                match result {
+                    Ok(CompressResult { method: Some(method), freed, messages: new_msgs }) => {
+                        tracing::info!(?method, freed, "emergency compression succeeded — retrying");
+                        messages = new_msgs;
+                        tx.send(AgentEvent::Compressed { method, freed }).await.ok();
+                        continue; // restart iteration with compressed messages
+                    }
+                    _ => {
+                        tracing::error!("emergency compression failed or had no effect");
+                        return Err(e);
+                    }
+                }
+            }
+            Err(e) => return Err(e),
+        };
 
         let mut executor = ToolExecutor::new(
             active_registry.clone(),
             cancel.clone(),
             tx.clone(),
             config.tool_timeout,
+            config.result_store.clone(),
         );
 
         // Accumulate tool input JSON chunks keyed by tool_use_id.
-        let mut pending_inputs: HashMap<String, (String, String)> = HashMap::new();
+        let mut pending_inputs: HashMap<ToolCallId, (String, String)> = HashMap::new();
         let mut assistant_blocks: Vec<ContentBlock> = Vec::new();
         // Track submission order for ordered history reconstruction.
-        let mut submission_order: Vec<String> = Vec::new();
-        let mut completed_map: HashMap<String, CompletedTool> = HashMap::new();
+        let mut submission_order: Vec<ToolCallId> = Vec::new();
+        let mut completed_map: HashMap<ToolCallId, CompletedTool> = HashMap::new();
         let mut text_buf = String::new();
         let mut thinking_buf = String::new();
         let mut stop_reason = StopReason::EndTurn;
@@ -670,7 +713,7 @@ async fn run_loop(
         // Validated tool calls collected during streaming. Authorization and
         // execution happen after MessageEnd — once the LLM has finished speaking
         // — so HITL prompts are never shown mid-stream.
-        let mut pending_auths: Vec<(String, String, serde_json::Value)> = Vec::new();
+        let mut pending_auths: Vec<(ToolCallId, String, serde_json::Value)> = Vec::new();
         let mut auth_injections: Vec<Message> = Vec::new();
 
         use wui_core::event::StreamEvent::*;
@@ -855,7 +898,14 @@ async fn run_loop(
             }
 
             while let Some(outcome) = auth_tasks.join_next().await {
-                match outcome.expect("auth task panicked") {
+                let outcome = match outcome {
+                    Ok(o) => o,
+                    Err(e) => {
+                        tracing::error!(error = %e, "auth task panicked — skipping tool");
+                        continue;
+                    }
+                };
+                match outcome {
                     AuthOutcome::Allowed {
                         id,
                         name,
@@ -1315,7 +1365,7 @@ async fn emit_tool_event(done: &CompletedTool, tx: &mpsc::Sender<AgentEvent>) {
 }
 
 /// Create an immediately-completed failed tool (no execution, no timer).
-fn instant_failure(id: String, name: String, output: wui_core::tool::ToolOutput) -> CompletedTool {
+fn instant_failure(id: ToolCallId, name: String, output: wui_core::tool::ToolOutput) -> CompletedTool {
     CompletedTool {
         id,
         name,
@@ -1323,6 +1373,19 @@ fn instant_failure(id: String, name: String, output: wui_core::tool::ToolOutput)
         ms: 0,
         attempts: 1,
     }
+}
+
+/// Detect whether an `AgentError` indicates a prompt-too-long rejection.
+///
+/// Providers signal this differently — Anthropic returns a 400 with
+/// "prompt is too long", OpenAI returns "maximum context length exceeded".
+/// This check is intentionally broad to catch variations.
+fn is_prompt_too_long(e: &AgentError) -> bool {
+    let msg = e.message.to_lowercase();
+    msg.contains("prompt is too long")
+        || msg.contains("too long")
+        || msg.contains("maximum context length")
+        || msg.contains("context_length_exceeded")
 }
 
 /// Build a system-reminder `Message` from plain text.
@@ -1346,7 +1409,7 @@ fn system_reminder_msg(text: &str) -> Message {
 /// `messages` before the assistant turn is committed.
 enum AuthOutcome {
     Allowed {
-        id: String,
+        id: ToolCallId,
         name: String,
         input: serde_json::Value,
         injections: Vec<Message>,
@@ -1374,7 +1437,7 @@ enum AuthOutcome {
 async fn authorize_tool(
     config: &RunConfig,
     registry: &ToolRegistry,
-    id: String,
+    id: ToolCallId,
     name: String,
     input: serde_json::Value,
     tx: &mpsc::Sender<AgentEvent>,
@@ -1404,6 +1467,13 @@ async fn authorize_tool(
     let tool_is_readonly = tool_meta.readonly;
     let needs_interaction = tool_meta.requires_interaction;
 
+    // Prepare a tool-specific permission matcher for wildcard rules.
+    let perm_matcher = tool_impl
+        .as_deref()
+        .and_then(|t| t.permission_matcher(&input));
+    let matcher_ref: Option<&(dyn Fn(&str) -> bool + Send + Sync)> =
+        perm_matcher.as_ref().map(|b| b.as_ref() as _);
+
     // Steps 2–6: unified permission verdict (structural check → static rules →
     // session memory → mode-based decision). The PreToolUse hook (step 1) runs
     // above; HITL approval (step 7) runs below when NeedsApproval is returned.
@@ -1416,6 +1486,7 @@ async fn authorize_tool(
             perm_key_ref,
             tool_is_readonly,
             needs_interaction,
+            matcher_ref,
         )
         .await;
 
@@ -1475,7 +1546,7 @@ async fn authorize_tool(
 /// to be applied to conversation history after all tool auth tasks settle.
 async fn await_approval(
     config: &RunConfig,
-    id: String,
+    id: ToolCallId,
     name: String,
     input: serde_json::Value,
     ctrl_req: ControlRequest,
@@ -1711,6 +1782,7 @@ mod tests {
             thinking_budget: None,
             checkpoint_store: None,
             checkpoint_run_id: None,
+            result_store: None,
         })
     }
 

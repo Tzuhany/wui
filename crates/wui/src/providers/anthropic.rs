@@ -30,6 +30,7 @@ use serde_json::{json, Value};
 use wui_core::event::{StopReason, StreamEvent, TokenUsage};
 use wui_core::message::{ContentBlock, DocumentSource, ImageSource, Message, Role};
 use wui_core::provider::{ChatRequest, Provider, ProviderError, ToolDef};
+use wui_core::types::ToolCallId;
 
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 
@@ -215,6 +216,16 @@ struct SseParser {
     input_tokens: u32,
 }
 
+/// Extract a string from a JSON value, returning an empty string if absent.
+fn jstr(v: &Value) -> String {
+    v.as_str().unwrap_or("").to_string()
+}
+
+/// Extract a u32 from a JSON value, returning 0 if absent.
+fn ju32(v: &Value) -> u32 {
+    v.as_u64().unwrap_or(0) as u32
+}
+
 impl SseParser {
     fn parse(
         &mut self,
@@ -228,60 +239,38 @@ impl SseParser {
             // Input tokens arrive in message_start, not message_delta.
             // Capture them here; they are merged into MessageEnd below.
             "message_start" => {
-                self.input_tokens =
-                    v["message"]["usage"]["input_tokens"].as_u64().unwrap_or(0) as u32;
+                self.input_tokens = ju32(&v["message"]["usage"]["input_tokens"]);
                 Ok(None)
             }
 
             "content_block_start" => {
                 let index = v["index"].as_u64().unwrap_or(0);
                 let block_type = v["content_block"]["type"].as_str().unwrap_or("");
-                let id = v["content_block"]["id"].as_str().unwrap_or("").to_string();
-                let name = v["content_block"]["name"]
-                    .as_str()
-                    .unwrap_or("")
-                    .to_string();
+                let id = jstr(&v["content_block"]["id"]);
+                let name = jstr(&v["content_block"]["name"]);
 
                 if block_type == "tool_use" {
                     self.tool_index.insert(index, id.clone());
-                    return Ok(Some(StreamEvent::ToolUseStart { id, name }));
+                    return Ok(Some(StreamEvent::ToolUseStart { id: id.into(), name }));
                 }
                 Ok(None)
             }
 
             "content_block_delta" => {
                 let index = v["index"].as_u64().unwrap_or(0);
-                let delta_type = v["delta"]["type"].as_str().unwrap_or("");
-
-                match delta_type {
-                    "text_delta" => {
-                        let text = v["delta"]["text"].as_str().unwrap_or("").to_string();
-                        Ok(Some(StreamEvent::TextDelta { text }))
-                    }
-                    "thinking_delta" => {
-                        let text = v["delta"]["thinking"].as_str().unwrap_or("").to_string();
-                        Ok(Some(StreamEvent::ThinkingDelta { text }))
-                    }
+                match v["delta"]["type"].as_str().unwrap_or("") {
+                    "text_delta" => Ok(Some(StreamEvent::TextDelta { text: jstr(&v["delta"]["text"]) })),
+                    "thinking_delta" => Ok(Some(StreamEvent::ThinkingDelta { text: jstr(&v["delta"]["thinking"]) })),
                     "input_json_delta" => {
-                        // Resolve the tool_use_id by content-block index.
-                        let id = match self.tool_index.get(&index) {
-                            Some(id) => id.clone(),
-                            None => {
-                                // This should never happen — the provider sent
-                                // input_json_delta for an index we never saw a
-                                // content_block_start for.
-                                tracing::error!(
-                                    index,
-                                    "input_json_delta for unknown content-block index"
-                                );
-                                format!("unknown_tool_{index}")
-                            }
-                        };
-                        let chunk = v["delta"]["partial_json"]
-                            .as_str()
-                            .unwrap_or("")
-                            .to_string();
-                        Ok(Some(StreamEvent::ToolInputDelta { id, chunk }))
+                        let id: ToolCallId = self
+                            .tool_index
+                            .get(&index)
+                            .map(|id| ToolCallId::from(id.as_str()))
+                            .unwrap_or_else(|| {
+                                tracing::error!(index, "input_json_delta for unknown content-block index");
+                                format!("unknown_tool_{index}").into()
+                            });
+                        Ok(Some(StreamEvent::ToolInputDelta { id, chunk: jstr(&v["delta"]["partial_json"]) }))
                     }
                     _ => Ok(None),
                 }
@@ -292,7 +281,7 @@ impl SseParser {
                 // tool's full input has arrived and it can be dispatched.
                 let index = v["index"].as_u64().unwrap_or(u64::MAX);
                 if let Some(id) = self.tool_index.remove(&index) {
-                    return Ok(Some(StreamEvent::ToolUseEnd { id }));
+                    return Ok(Some(StreamEvent::ToolUseEnd { id: id.into() }));
                 }
                 Ok(None)
             }
@@ -305,12 +294,9 @@ impl SseParser {
                 };
                 let usage = TokenUsage {
                     input_tokens: self.input_tokens,
-                    output_tokens: v["usage"]["output_tokens"].as_u64().unwrap_or(0) as u32,
-                    cache_read_tokens: v["usage"]["cache_read_input_tokens"].as_u64().unwrap_or(0)
-                        as u32,
-                    cache_write_tokens: v["usage"]["cache_creation_input_tokens"]
-                        .as_u64()
-                        .unwrap_or(0) as u32,
+                    output_tokens: ju32(&v["usage"]["output_tokens"]),
+                    cache_read_tokens: ju32(&v["usage"]["cache_read_input_tokens"]),
+                    cache_write_tokens: ju32(&v["usage"]["cache_creation_input_tokens"]),
                 };
                 Ok(Some(StreamEvent::MessageEnd { usage, stop_reason }))
             }
@@ -631,5 +617,93 @@ mod tests {
         let stop = r#"{"index":1}"#;
         let result = parser.parse("content_block_stop", stop).unwrap();
         assert!(matches!(result, Some(StreamEvent::ToolUseEnd { id }) if id == "tu_abc"));
+    }
+
+    // ── Property tests ───────────────────────────────────────────────────────
+
+    mod fuzz {
+        use super::*;
+        use proptest::prelude::*;
+
+        /// SSE parser must never panic on arbitrary event types and data.
+        #[test]
+        fn parse_never_panics_on_arbitrary_input() {
+            proptest!(ProptestConfig::with_cases(1000), |(
+                event_type in ".*",
+                data in ".*",
+            )| {
+                let mut parser = SseParser::default();
+                // We only care that it doesn't panic — Ok or Err are both fine.
+                let _ = parser.parse(&event_type, &data);
+            });
+        }
+
+        /// SSE parser must never panic on known event types with arbitrary JSON.
+        #[test]
+        fn parse_never_panics_on_known_events_with_arbitrary_json() {
+            let event_types = [
+                "message_start",
+                "content_block_start",
+                "content_block_delta",
+                "content_block_stop",
+                "message_delta",
+            ];
+            proptest!(ProptestConfig::with_cases(2000), |(
+                event_idx in 0..event_types.len(),
+                json_str in prop::string::string_regex(
+                    r#"\{[a-z":{},0-9 ]*\}"#
+                ).unwrap(),
+            )| {
+                let mut parser = SseParser::default();
+                let _ = parser.parse(event_types[event_idx], &json_str);
+            });
+        }
+
+        /// Valid JSON with unexpected structure must not panic.
+        #[test]
+        fn parse_handles_valid_json_with_wrong_shape() {
+            proptest!(ProptestConfig::with_cases(500), |(
+                event_type in prop::sample::select(vec![
+                    "message_start",
+                    "content_block_start",
+                    "content_block_delta",
+                    "content_block_stop",
+                    "message_delta",
+                ]),
+            )| {
+                let mut parser = SseParser::default();
+                // Empty object
+                let _ = parser.parse(&event_type, "{}");
+                // Null
+                let _ = parser.parse(&event_type, "null");
+                // Array
+                let _ = parser.parse(&event_type, "[]");
+                // Deeply nested
+                let _ = parser.parse(&event_type, r#"{"a":{"b":{"c":{"d":1}}}}"#);
+                // Wrong types for expected fields
+                let _ = parser.parse(&event_type, r#"{"index":"not_a_number","delta":42}"#);
+            });
+        }
+
+        /// A sequence of well-formed events should produce a coherent stream.
+        #[test]
+        fn full_sequence_produces_valid_stream() {
+            let mut parser = SseParser::default();
+
+            // message_start
+            let data = r#"{"message":{"usage":{"input_tokens":100}}}"#;
+            let r = parser.parse("message_start", data).unwrap();
+            assert!(r.is_none());
+
+            // text content
+            let data = r#"{"index":0,"delta":{"type":"text_delta","text":"hello"}}"#;
+            let r = parser.parse("content_block_delta", data).unwrap();
+            assert!(matches!(r, Some(StreamEvent::TextDelta { text }) if text == "hello"));
+
+            // message_delta (end)
+            let data = r#"{"delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":50}}"#;
+            let r = parser.parse("message_delta", data).unwrap();
+            assert!(matches!(r, Some(StreamEvent::MessageEnd { usage, .. }) if usage.input_tokens == 100 && usage.output_tokens == 50));
+        }
     }
 }

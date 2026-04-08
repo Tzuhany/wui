@@ -10,7 +10,9 @@
 use std::sync::Arc;
 
 use crate::compress::{CompressPipeline, CompressStrategy};
-use crate::runtime::{CheckpointStore, PermissionMode, PermissionRules, RetryPolicy, SessionStore};
+use crate::runtime::{
+    CheckpointStore, PermissionMode, PermissionRules, ResultStore, RetryPolicy, SessionStore,
+};
 use wui_core::hook::Hook;
 use wui_core::provider::Provider;
 use wui_core::tool::Tool;
@@ -101,6 +103,8 @@ pub struct AgentConfig {
     /// Maximum number of results returned by `ToolSearch` from catalog searches.
     /// Default: 5.
     pub(crate) catalog_limit: usize,
+    /// Optional store for persisting large tool results before truncation.
+    pub(crate) result_store: Option<Arc<dyn ResultStore>>,
 }
 
 /// Fluent builder for `Agent`.
@@ -136,6 +140,7 @@ impl AgentBuilder {
                 checkpoint_store: None,
                 checkpoint_run_id: None,
                 catalog_limit: 5,
+                result_store: None,
             },
         }
     }
@@ -431,6 +436,16 @@ impl AgentBuilder {
     /// ```
     pub fn effort(mut self, effort: Effort) -> Self {
         self.config.thinking_budget = effort.thinking_budget_tokens();
+        self
+    }
+
+    /// Attach a store for persisting large tool results.
+    ///
+    /// When a tool result exceeds `max_output_chars`, the executor saves
+    /// the full content via this store and gives the LLM a preview + reference.
+    /// Without a store, large results are simply truncated.
+    pub fn result_store(mut self, store: impl ResultStore) -> Self {
+        self.config.result_store = Some(Arc::new(store));
         self
     }
 

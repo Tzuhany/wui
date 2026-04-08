@@ -126,6 +126,36 @@ struct SkillTool {
     skill_name: String,
     description: String,
     content: String,
+    /// Structured configuration parsed from frontmatter.
+    manifest: SkillManifest,
+}
+
+/// Structured skill configuration parsed from YAML-like frontmatter.
+///
+/// These fields let a skill declare its operational requirements —
+/// turning a skill from a passive text blob into an active capability unit.
+///
+/// # Frontmatter format
+///
+/// ```yaml
+/// ---
+/// name: git-commit
+/// description: Write conventional commit messages.
+/// allowed_tools: Bash, Read, Glob
+/// effort: high
+/// model: claude-sonnet-4-5-20250514
+/// ---
+/// ```
+#[derive(Debug, Clone, Default)]
+pub struct SkillManifest {
+    /// Tools that should be additionally allowed when this skill is active.
+    /// Useful for skills that need specific tools (e.g., a deploy skill that
+    /// needs Bash). Empty means no additional tool requirements.
+    pub allowed_tools: Vec<String>,
+    /// Override the agent's effort level when this skill is active.
+    pub effort: Option<String>,
+    /// Override the agent's model when this skill is active.
+    pub model: Option<String>,
 }
 
 #[async_trait]
@@ -142,8 +172,35 @@ impl Tool for SkillTool {
     }
 
     async fn call(&self, _input: Value, _ctx: &ToolCtx) -> ToolOutput {
-        ToolOutput::success(format!("Skill '{}' loaded into context.", self.skill_name))
-            .inject(ContextInjection::new(self.content.clone()))
+        // Build the injected context: skill content + manifest hints.
+        let mut injection = self.content.clone();
+        if !self.manifest.allowed_tools.is_empty() {
+            injection.push_str(&format!(
+                "\n\nThis skill works best with these tools: {}",
+                self.manifest.allowed_tools.join(", "),
+            ));
+        }
+
+        let mut output = ToolOutput::success(format!("Skill '{}' loaded into context.", self.skill_name))
+            .inject(ContextInjection::new(injection));
+
+        // Expose manifest as structured data for hooks, callers, or runtime
+        // integrations that want to programmatically react to skill activation
+        // (e.g., a hook that adjusts effort or switches model).
+        if !self.manifest.allowed_tools.is_empty()
+            || self.manifest.effort.is_some()
+            || self.manifest.model.is_some()
+        {
+            output = output.with_structured(serde_json::json!({
+                "skill_manifest": {
+                    "allowed_tools": self.manifest.allowed_tools,
+                    "effort": self.manifest.effort,
+                    "model": self.manifest.model,
+                }
+            }));
+        }
+
+        output
     }
 }
 
@@ -165,12 +222,19 @@ async fn parse_skill_file(path: &PathBuf) -> anyhow::Result<SkillTool> {
 
     let mut name = None;
     let mut desc = None;
+    let mut manifest = SkillManifest::default();
+
     for line in frontmatter.lines() {
-        if let Some(v) = line.strip_prefix("name: ") {
+        if let Some(v) = line.strip_prefix("name:") {
             name = Some(v.trim().to_string());
-        }
-        if let Some(v) = line.strip_prefix("description: ") {
+        } else if let Some(v) = line.strip_prefix("description:") {
             desc = Some(v.trim().to_string());
+        } else if let Some(v) = line.strip_prefix("allowed_tools:") {
+            manifest.allowed_tools = v.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+        } else if let Some(v) = line.strip_prefix("effort:") {
+            manifest.effort = Some(v.trim().to_string());
+        } else if let Some(v) = line.strip_prefix("model:") {
+            manifest.model = Some(v.trim().to_string());
         }
     }
 
@@ -178,6 +242,7 @@ async fn parse_skill_file(path: &PathBuf) -> anyhow::Result<SkillTool> {
         skill_name: name.ok_or_else(|| anyhow::anyhow!("missing name"))?,
         description: desc.ok_or_else(|| anyhow::anyhow!("missing description"))?,
         content: body,
+        manifest,
     })
 }
 

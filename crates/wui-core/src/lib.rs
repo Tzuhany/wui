@@ -17,6 +17,7 @@ pub mod hook;
 pub mod message;
 pub mod provider;
 pub mod tool;
+pub mod types;
 
 pub use wui_macros::ToolInput;
 
@@ -38,4 +39,5 @@ pub mod prelude {
         Artifact, ArtifactContent, ArtifactKind, ContextInjection, FailureKind, Tool, ToolCtx,
         ToolInput, ToolOutput,
     };
+    pub use crate::types::{CheckpointRunId, SessionId, ToolCallId};
 }

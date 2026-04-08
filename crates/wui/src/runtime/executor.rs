@@ -48,6 +48,7 @@ use tokio_util::sync::CancellationToken;
 use wui_core::event::AgentEvent;
 use wui_core::message::Message;
 use wui_core::tool::{Tool, ToolCtx, ToolOutput};
+use wui_core::types::ToolCallId;
 
 pub use wui_core::tool::ExecutorHints;
 
@@ -57,7 +58,7 @@ use super::registry::ToolRegistry;
 
 /// A tool call received from the LLM, ready for validation and execution.
 pub struct PendingTool {
-    pub id: String,
+    pub id: ToolCallId,
     pub name: String,
     pub input: serde_json::Value,
     /// Snapshot of the conversation at submission time.
@@ -67,7 +68,7 @@ pub struct PendingTool {
 
 /// A tool call that has finished executing.
 pub struct CompletedTool {
-    pub id: String,
+    pub id: ToolCallId,
     pub name: String,
     pub output: ToolOutput,
     pub ms: u64,
@@ -80,7 +81,7 @@ pub struct CompletedTool {
 
 /// A validated tool waiting in the sequential queue.
 struct QueuedTool {
-    id: String,
+    id: ToolCallId,
     name: String,
     input: serde_json::Value,
     messages: Arc<[Message]>,
@@ -93,11 +94,16 @@ struct QueuedTool {
 pub struct ToolExecutor {
     registry: Arc<ToolRegistry>,
     cancel: CancellationToken,
+    /// Child of `cancel` — fires when a concurrent tool errors to abort
+    /// sibling tasks without cancelling the entire run.
+    sibling_cancel: CancellationToken,
     /// Channel to the caller's event stream — used for `ToolProgress` events.
     tx: mpsc::Sender<AgentEvent>,
     /// Global tool timeout, applied when a tool doesn't declare its own.
     default_timeout: Option<Duration>,
-    pending: JoinSet<(String, String, ToolOutput, u64, u32)>,
+    /// Optional store for persisting large tool results before truncation.
+    result_store: Option<Arc<dyn ResultStore>>,
+    pending: JoinSet<(ToolCallId, String, ToolOutput, u64, u32)>,
     sequential: VecDeque<QueuedTool>,
 }
 
@@ -107,12 +113,16 @@ impl ToolExecutor {
         cancel: CancellationToken,
         tx: mpsc::Sender<AgentEvent>,
         default_timeout: Option<Duration>,
+        result_store: Option<Arc<dyn ResultStore>>,
     ) -> Self {
+        let sibling_cancel = cancel.child_token();
         Self {
             registry,
             cancel,
+            sibling_cancel,
             tx,
             default_timeout,
+            result_store,
             pending: JoinSet::new(),
             sequential: VecDeque::new(),
         }
@@ -170,10 +180,16 @@ impl ToolExecutor {
     pub async fn collect_remaining(mut self) -> Vec<CompletedTool> {
         let mut results = Vec::new();
 
-        // Drain concurrent tasks first.
+        // Drain concurrent tasks. When a tool fails with an Execution error,
+        // cancel sibling concurrent tasks to avoid wasted work (e.g., if
+        // `bash "npm test"` fails, don't also run `bash "npm build"`).
         while let Some(res) = self.pending.join_next().await {
             match res {
                 Ok((id, name, output, ms, attempts)) => {
+                    if output.is_retryable() {
+                        tracing::debug!(tool = %name, "concurrent tool failed — cancelling siblings");
+                        self.sibling_cancel.cancel();
+                    }
                     results.push(CompletedTool {
                         id,
                         name,
@@ -198,6 +214,7 @@ impl ToolExecutor {
                 tool.id.clone(),
                 tool.name.clone(),
             );
+            let store_ref = self.result_store.as_deref();
             let (out, attempts) = run_with_retries(
                 tool.impl_,
                 tool.input,
@@ -205,6 +222,8 @@ impl ToolExecutor {
                 timeout,
                 hints.max_output_chars,
                 hints.max_retries,
+                &tool.id,
+                store_ref,
             )
             .await;
             let ms = start.elapsed().as_millis() as u64;
@@ -222,16 +241,17 @@ impl ToolExecutor {
 
     fn spawn_concurrent(
         &mut self,
-        id: String,
+        id: ToolCallId,
         name: String,
         input: serde_json::Value,
         messages: Arc<[Message]>,
         impl_: Arc<dyn Tool>,
     ) {
-        let cancel = self.cancel.clone();
+        let cancel = self.sibling_cancel.clone();
         let tx = self.tx.clone();
         let hints = impl_.executor_hints(&input);
         let timeout = hints.timeout.or(self.default_timeout);
+        let result_store = self.result_store.clone();
         self.pending.spawn(async move {
             let start = Instant::now();
             let ctx = make_ctx(cancel, messages, tx, id.clone(), name.clone());
@@ -242,6 +262,8 @@ impl ToolExecutor {
                 timeout,
                 hints.max_output_chars,
                 hints.max_retries,
+                &id,
+                result_store.as_deref(),
             )
             .await;
             let ms = start.elapsed().as_millis() as u64;
@@ -266,6 +288,8 @@ async fn run_with_retries(
     timeout: Option<Duration>,
     max_chars: Option<usize>,
     max_retries: u32,
+    tool_id: &ToolCallId,
+    result_store: Option<&dyn ResultStore>,
 ) -> (ToolOutput, u32) {
     let mut attempt = 0u32;
     loop {
@@ -273,9 +297,12 @@ async fn run_with_retries(
         let out = apply_output_limit(
             run_tool_safely(Arc::clone(&impl_), input.clone(), ctx, timeout).await,
             max_chars,
-        );
+            tool_id,
+            result_store,
+        )
+        .await;
         let retries_left = max_retries.saturating_sub(attempt - 1);
-        if retries_left == 0 || !out.is_error() {
+        if retries_left == 0 || !out.is_retryable() {
             return (out, attempt);
         }
         let delay_ms = 50u64 * (1u64 << attempt.saturating_sub(1));
@@ -315,20 +342,61 @@ async fn run_tool_safely(
     result.unwrap_or_else(|_| ToolOutput::error("tool panicked unexpectedly"))
 }
 
+// ── Result Store ─────────────────────────────────────────────────────────────
+
+/// Persists large tool outputs so the LLM receives a compact preview
+/// instead of the full content.
+///
+/// When a tool result exceeds `max_output_chars`, the executor saves the
+/// complete content via `ResultStore::save` and replaces the LLM-facing
+/// output with a preview + the returned reference (path, URI, etc.).
+///
+/// # Example
+///
+/// ```rust,ignore
+/// struct FileResultStore { dir: PathBuf }
+///
+/// #[async_trait::async_trait]
+/// impl ResultStore for FileResultStore {
+///     async fn save(&self, tool_id: &ToolCallId, content: &str) -> Option<String> {
+///         let path = self.dir.join(format!("{tool_id}.txt"));
+///         tokio::fs::write(&path, content).await.ok()?;
+///         Some(path.display().to_string())
+///     }
+/// }
+/// ```
+#[async_trait::async_trait]
+pub trait ResultStore: Send + Sync + 'static {
+    /// Save the full tool output and return a reference string (path, URI, key).
+    ///
+    /// Returns `None` if the save fails — the executor falls back to simple
+    /// truncation. The returned reference is included in the truncation notice
+    /// so the LLM (or a subsequent tool) can retrieve the full content.
+    async fn save(&self, tool_id: &ToolCallId, content: &str) -> Option<String>;
+}
+
 /// Truncate tool output that exceeds the tool's declared character limit.
 ///
-/// When a tool exceeds `max_output_chars()`, the content is cut at the
-/// nearest UTF-8 character boundary and a truncation notice is appended.
-/// This prevents a single large result from consuming disproportionate context.
-///
-/// The truncation is always visible to the LLM — it sees the notice and can
-/// decide whether to request a narrower result rather than silently receiving
-/// an incomplete one.
-fn apply_output_limit(mut output: ToolOutput, limit: Option<usize>) -> ToolOutput {
+/// When a `ResultStore` is configured, the full content is persisted before
+/// truncation and the notice includes the store reference. Without a store,
+/// content is simply cut and a truncation notice is appended.
+async fn apply_output_limit(
+    mut output: ToolOutput,
+    limit: Option<usize>,
+    tool_id: &ToolCallId,
+    result_store: Option<&dyn ResultStore>,
+) -> ToolOutput {
     let Some(max) = limit else { return output };
     if output.content.len() <= max {
         return output;
     }
+
+    // Persist the full content if a store is available.
+    let reference = if let Some(store) = result_store {
+        store.save(tool_id, &output.content).await
+    } else {
+        None
+    };
 
     // Find the last valid UTF-8 boundary at or before `max` bytes.
     let cut = (0..=max)
@@ -336,9 +404,20 @@ fn apply_output_limit(mut output: ToolOutput, limit: Option<usize>) -> ToolOutpu
         .find(|&i| output.content.is_char_boundary(i))
         .unwrap_or(0);
     output.content.truncate(cut);
-    output.content.push_str(&format!(
-        "\n[output truncated: exceeded {max} character limit declared by this tool]"
-    ));
+
+    match reference {
+        Some(path) => {
+            output.content.push_str(&format!(
+                "\n[output truncated: exceeded {max} character limit — full output saved to: {path}]"
+            ));
+        }
+        None => {
+            output.content.push_str(&format!(
+                "\n[output truncated: exceeded {max} character limit declared by this tool]"
+            ));
+        }
+    }
+
     output.truncated = true;
     output
 }
@@ -347,10 +426,10 @@ fn make_ctx(
     cancel: CancellationToken,
     messages: Arc<[Message]>,
     tx: mpsc::Sender<AgentEvent>,
-    tool_id: String,
+    tool_id: ToolCallId,
     tool_name: String,
 ) -> ToolCtx {
-    // Clone once here so the closure captures owned Strings rather than
+    // Clone once here so the closure captures owned values rather than
     // cloning on every ctx.report() call.
     let id_cap = tool_id.clone();
     let name_cap = tool_name.clone();

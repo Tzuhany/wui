@@ -67,6 +67,7 @@ use serde::{Deserialize, Serialize};
 use tracing::Span;
 
 use wui_core::event::{AgentEvent, RunSummary, TokenUsage};
+use wui_core::types::ToolCallId;
 
 // ── TimelineEvent ─────────────────────────────────────────────────────────────
 
@@ -88,14 +89,14 @@ pub enum TimelineEventKind {
 
     /// A tool call began.
     ToolStart {
-        id: String,
+        id: ToolCallId,
         name: String,
         input: serde_json::Value,
     },
 
     /// A tool call completed successfully.
     ToolDone {
-        id: String,
+        id: ToolCallId,
         name: String,
         output: String,
         ms: u64,
@@ -103,7 +104,7 @@ pub enum TimelineEventKind {
 
     /// A tool call failed.
     ToolError {
-        id: String,
+        id: ToolCallId,
         name: String,
         error: String,
         ms: u64,
@@ -229,7 +230,7 @@ pub struct ObservedStream<S> {
     /// Root span for the whole run — kept alive until `into_timeline()`.
     run_span: Span,
     /// In-flight tool spans, keyed by tool call id.
-    tool_spans: HashMap<String, Span>,
+    tool_spans: HashMap<ToolCallId, Span>,
 }
 
 impl<S> ObservedStream<S> {
@@ -249,6 +250,18 @@ impl<S> ObservedStream<S> {
     }
 }
 
+impl<S> ObservedStream<S> {
+    /// Close and record the tool span when a tool finishes (Done or Error).
+    fn close_tool_span(&mut self, id: &ToolCallId, ms: u64, error: Option<&str>) {
+        if let Some(span) = self.tool_spans.remove(id) {
+            span.record("wui.tool.duration_ms", ms);
+            if let Some(err) = error {
+                span.record("wui.tool.error", err);
+            }
+        }
+    }
+}
+
 impl<S: Stream<Item = AgentEvent> + Unpin> Stream for ObservedStream<S> {
     type Item = AgentEvent;
 
@@ -263,8 +276,6 @@ impl<S: Stream<Item = AgentEvent> + Unpin> Stream for ObservedStream<S> {
 
         let kind = match &event {
             AgentEvent::ToolStart { id, name, input } => {
-                // Create a child span for this tool call.  It stays open until
-                // ToolDone / ToolError arrives with the same id.
                 let span = tracing::info_span!(
                     parent: &self.run_span,
                     "wui.tool.call",
@@ -272,7 +283,6 @@ impl<S: Stream<Item = AgentEvent> + Unpin> Stream for ObservedStream<S> {
                     "wui.tool.id"      = %id,
                 );
                 self.tool_spans.insert(id.clone(), span);
-
                 Some(TimelineEventKind::ToolStart {
                     id: id.clone(),
                     name: name.clone(),
@@ -280,43 +290,17 @@ impl<S: Stream<Item = AgentEvent> + Unpin> Stream for ObservedStream<S> {
                 })
             }
 
-            AgentEvent::ToolDone {
-                id,
-                name,
-                output,
-                ms,
-                ..
-            } => {
-                if let Some(span) = self.tool_spans.remove(id) {
-                    // Record duration, then drop → span ends.
-                    span.record("wui.tool.duration_ms", ms);
-                    drop(span);
-                }
+            AgentEvent::ToolDone { id, name, output, ms, .. } => {
+                self.close_tool_span(id, *ms, None);
                 Some(TimelineEventKind::ToolDone {
-                    id: id.clone(),
-                    name: name.clone(),
-                    output: output.clone(),
-                    ms: *ms,
+                    id: id.clone(), name: name.clone(), output: output.clone(), ms: *ms,
                 })
             }
 
-            AgentEvent::ToolError {
-                id,
-                name,
-                error,
-                ms,
-                ..
-            } => {
-                if let Some(span) = self.tool_spans.remove(id) {
-                    span.record("wui.tool.duration_ms", ms);
-                    span.record("wui.tool.error", error.as_str());
-                    drop(span);
-                }
+            AgentEvent::ToolError { id, name, error, ms, .. } => {
+                self.close_tool_span(id, *ms, Some(error));
                 Some(TimelineEventKind::ToolError {
-                    id: id.clone(),
-                    name: name.clone(),
-                    error: error.clone(),
-                    ms: *ms,
+                    id: id.clone(), name: name.clone(), error: error.clone(), ms: *ms,
                 })
             }
 
@@ -325,40 +309,26 @@ impl<S: Stream<Item = AgentEvent> + Unpin> Stream for ObservedStream<S> {
                 chars_removed: None,
             }),
 
-            AgentEvent::Retrying {
-                attempt,
-                delay_ms,
-                reason,
-            } => {
+            AgentEvent::Retrying { attempt, delay_ms, reason } => {
                 tracing::warn!(
-                    parent: &self.run_span,
-                    attempt,
-                    delay_ms,
-                    reason = %reason,
-                    "retrying",
+                    parent: &self.run_span, attempt, delay_ms,
+                    reason = %reason, "retrying",
                 );
                 Some(TimelineEventKind::Retrying {
-                    attempt: *attempt,
-                    delay_ms: *delay_ms,
-                    reason: reason.clone(),
+                    attempt: *attempt, delay_ms: *delay_ms, reason: reason.clone(),
                 })
             }
 
             AgentEvent::Done(summary) => {
-                // Record final usage on the run span.
-                self.run_span
-                    .record("gen_ai.usage.input_tokens", summary.usage.input_tokens);
-                self.run_span
-                    .record("gen_ai.usage.output_tokens", summary.usage.output_tokens);
+                self.run_span.record("gen_ai.usage.input_tokens", summary.usage.input_tokens);
+                self.run_span.record("gen_ai.usage.output_tokens", summary.usage.output_tokens);
                 self.run_span.record("wui.iterations", summary.iterations);
-
-                let kind = TimelineEventKind::RunDone {
+                self.summary = Some(summary.clone());
+                Some(TimelineEventKind::RunDone {
                     iterations: summary.iterations,
                     input_tokens: summary.usage.input_tokens,
                     output_tokens: summary.usage.output_tokens,
-                };
-                self.summary = Some(summary.clone());
-                Some(kind)
+                })
             }
 
             _ => None,

@@ -33,6 +33,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::message::Message;
 use crate::tool::FailureKind;
+use crate::types::ToolCallId;
 
 // ── Internal: LLM → Engine ───────────────────────────────────────────────────
 
@@ -50,20 +51,20 @@ pub enum StreamEvent {
 
     /// The LLM has started describing a tool call.
     ToolUseStart {
-        id: String,
+        id: ToolCallId,
         name: String,
     },
 
     /// A chunk of JSON input for an in-progress tool call.
     ToolInputDelta {
-        id: String,
+        id: ToolCallId,
         chunk: String,
     },
 
     /// The LLM has finished describing the tool call. The engine submits it
     /// to the executor immediately upon receiving this event.
     ToolUseEnd {
-        id: String,
+        id: ToolCallId,
     },
 
     MessageEnd {
@@ -149,12 +150,12 @@ pub enum AgentEvent {
 
     // ── Tool lifecycle ────────────────────────────────────────────────
     ToolStart {
-        id: String,
+        id: ToolCallId,
         name: String,
         input: serde_json::Value,
     },
     ToolDone {
-        id: String,
+        id: ToolCallId,
         name: String,
         output: String,
         ms: u64,
@@ -165,7 +166,7 @@ pub enum AgentEvent {
         structured: Option<serde_json::Value>,
     },
     ToolError {
-        id: String,
+        id: ToolCallId,
         name: String,
         error: String,
         /// Structured reason for the failure. Use this to tailor UI and
@@ -190,7 +191,7 @@ pub enum AgentEvent {
     /// disk, object storage, a UI renderer.
     Artifact {
         /// ID of the tool call that produced this artifact.
-        tool_id: String,
+        tool_id: ToolCallId,
         tool_name: String,
         artifact: crate::tool::Artifact,
     },
@@ -201,7 +202,7 @@ pub enum AgentEvent {
     /// Emitted in real time — use this to stream tool status to a UI
     /// without waiting for the tool to complete.
     ToolProgress {
-        tool_id: String,
+        tool_id: ToolCallId,
         tool_name: String,
         text: String,
     },

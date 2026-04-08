@@ -37,6 +37,17 @@ async fn main() -> anyhow::Result<()> {
 
 **Provider-owned tuning.** Provider-specific knobs belong on the provider itself, not in the generic agent builder. Configure them where they live.
 
+## Non-goals
+
+Wui is deliberately scoped. These are things the framework **does not do** and does not plan to do:
+
+- **Planning quality.** The framework executes what the LLM decides. It does not evaluate whether the plan is good, correct, or optimal. That is the LLM's job (and yours, via hooks).
+- **World-model correctness.** Wui does not verify that tool results reflect reality. A tool says "file written" — the framework believes it.
+- **Memory truth.** Compression and summarisation are lossy. Wui does not guarantee that recalled context is accurate or complete.
+- **Tool idempotency.** Tools can have side effects. The framework does not deduplicate, replay-protect, or transactionally wrap tool calls. If your tool needs exactly-once semantics, implement them in the tool.
+- **Multi-agent orchestration.** Wui provides `SubAgent` (synchronous delegation) and `wui-spawn` (background delegation). It does not provide a multi-agent consensus protocol, shared memory bus, or agent-to-agent messaging. Compose these from the primitives if you need them.
+- **Provider-specific optimizations.** Wui's core loop is provider-agnostic. Provider-specific features (caching, batching, model routing) belong in the provider implementation, not the framework.
+
 ## What is stable today
 
 | What | Status | Notes |
@@ -81,8 +92,7 @@ New to wui? Start with `wui`. The extension crates are companion libraries — u
 | `wui-memory` | Reference memory capabilities (string + vector) | beta |
 | `wui-spawn` | Background sub-agent delegation on top of Wui runs | beta |
 | `wui-observe` | Structured timeline + OpenTelemetry spans | beta |
-| `wui-workflow` | Deterministic pipeline orchestration overlay | beta |
-| `wui-skills` | File-based discoverable instruction catalogs | beta |
+| `wui-skills` | File-based discoverable skill catalogs with manifest | beta |
 | `wui-eval` | Testing infrastructure: MockProvider + AgentHarness | beta |
 
 **stable** — API is settled; breaking changes follow semver.

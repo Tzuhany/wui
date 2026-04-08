@@ -32,9 +32,10 @@ use std::collections::HashSet;
 use async_trait::async_trait;
 use serde_json::Value;
 
-use crate::event::RunStopReason;
+use crate::event::{RunStopReason, RunSummary};
 use crate::message::Message;
 use crate::tool::ToolOutput;
+use crate::types::SessionId;
 
 /// A hook that intercepts the agent loop at key moments.
 ///
@@ -116,6 +117,29 @@ pub enum HookEvent<'a> {
         /// The current message history, in conversation order.
         messages: &'a [Message],
     },
+
+    // ── Lifecycle events (informational, decision is ignored) ──────────
+
+    /// A session has started (or resumed from a store).
+    SessionStart { session_id: &'a SessionId },
+
+    /// A session turn is about to begin. Fires after history is loaded
+    /// but before the LLM is called.
+    TurnStart { messages: &'a [Message] },
+
+    /// A session turn has completed.
+    TurnEnd { summary: &'a RunSummary },
+
+    /// A sub-agent is about to start.
+    SubagentStart { name: &'a str, prompt: &'a str },
+
+    /// A sub-agent has finished.
+    SubagentEnd {
+        name: &'a str,
+        result: Result<&'a str, &'a str>,
+    },
+
+    // ── Decision events ─────────────────────────────────────────────
 
     /// The run is about to stop for any reason. The hook runs before the
     /// `RunSummary` is returned to the caller.

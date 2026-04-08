@@ -30,6 +30,7 @@ use serde_json::Value;
 use wui::Agent;
 use wui_core::event::{AgentEvent, RunStopReason, RunSummary, StopReason, StreamEvent, TokenUsage};
 use wui_core::provider::{ChatRequest, Provider, ProviderError};
+use wui_core::types::ToolCallId;
 
 // ── MockProvider ──────────────────────────────────────────────────────────────
 
@@ -138,6 +139,7 @@ impl Provider for MockProvider {
 
             MockResponse::ToolCall { name, id, input } => {
                 let input_json = serde_json::to_string(&input).unwrap_or_default();
+                let id = ToolCallId::from(id);
                 vec![
                     Ok(StreamEvent::ToolUseStart {
                         id: id.clone(),
@@ -388,24 +390,19 @@ impl ScenarioRunner {
                         ));
                     }
                 }
-                Check::ToolCalled(name) => {
-                    let found = harness
+                Check::ToolCalled(name) | Check::ToolNotCalled(name) => {
+                    let called = harness
                         .events
                         .iter()
                         .any(|e| matches!(e, AgentEvent::ToolStart { name: n, .. } if n == name));
-                    if !found {
-                        failures.push(format!("ToolCalled: tool '{name}' was not called"));
-                    }
-                }
-                Check::ToolNotCalled(name) => {
-                    let found = harness
-                        .events
-                        .iter()
-                        .any(|e| matches!(e, AgentEvent::ToolStart { name: n, .. } if n == name));
-                    if found {
-                        failures.push(format!(
-                            "ToolNotCalled: tool '{name}' was called but should not have been"
-                        ));
+                    let want_called = matches!(check, Check::ToolCalled(_));
+                    if called != want_called {
+                        let msg = if want_called {
+                            format!("ToolCalled: tool '{name}' was not called")
+                        } else {
+                            format!("ToolNotCalled: tool '{name}' was called but should not have been")
+                        };
+                        failures.push(msg);
                     }
                 }
                 Check::StopReason(expected) => {

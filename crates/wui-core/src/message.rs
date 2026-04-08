@@ -23,6 +23,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::types::ToolCallId;
+
 /// A single turn in the conversation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
@@ -170,7 +172,7 @@ pub enum ContentBlock {
 
     /// A tool invocation requested by the LLM.
     ToolUse {
-        id: String,
+        id: ToolCallId,
         name: String,
         input: serde_json::Value,
         /// A short summary of what this invocation does, supplied by the tool
@@ -185,7 +187,7 @@ pub enum ContentBlock {
 
     /// The result of executing a tool.
     ToolResult {
-        tool_use_id: String,
+        tool_use_id: ToolCallId,
         content: String,
         is_error: bool,
     },

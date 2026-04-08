@@ -407,7 +407,7 @@ async fn session_preserves_history() {
     let session = agent.session(session_id).await;
 
     // First turn.
-    let mut stream = session.send("first turn");
+    let mut stream = session.send("first turn").await;
     let mut text1 = String::new();
     while let Some(event) = stream.next().await {
         if let AgentEvent::TextDelta(t) = event {
@@ -417,7 +417,7 @@ async fn session_preserves_history() {
     assert!(text1.contains("turn one response"), "first turn: {text1}");
 
     // Second turn — the session should include history from turn one.
-    let mut stream = session.send("second turn");
+    let mut stream = session.send("second turn").await;
     let mut text2 = String::new();
     let mut summary2: Option<wui::RunSummary> = None;
     while let Some(event) = stream.next().await {

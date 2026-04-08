@@ -259,6 +259,7 @@ pub(crate) fn build_run_config(
         thinking_budget: config.thinking_budget,
         checkpoint_store: config.checkpoint_store.clone(),
         checkpoint_run_id: config.checkpoint_run_id.clone(),
+        result_store: config.result_store.clone(),
     }
 }
 

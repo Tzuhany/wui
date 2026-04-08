@@ -40,6 +40,7 @@ use serde_json::{json, Value};
 use wui_core::event::{StopReason, StreamEvent, TokenUsage};
 use wui_core::message::{ContentBlock, ImageSource, Message, Role};
 use wui_core::provider::{ChatRequest, Provider, ProviderError, ToolDef};
+use wui_core::types::ToolCallId;
 
 // ── OpenAi ────────────────────────────────────────────────────────────────────
 
@@ -205,7 +206,7 @@ impl SseParser {
                         self.tool_calls
                             .insert(index, (id.to_string(), name.clone()));
                         events.push(StreamEvent::ToolUseStart {
-                            id: id.to_string(),
+                            id: ToolCallId::from(id),
                             name,
                         });
                     }
@@ -215,7 +216,7 @@ impl SseParser {
                         if !chunk.is_empty() {
                             if let Some((id, _)) = self.tool_calls.get(&index) {
                                 events.push(StreamEvent::ToolInputDelta {
-                                    id: id.clone(),
+                                    id: ToolCallId::from(id.as_str()),
                                     chunk: chunk.to_string(),
                                 });
                             }
@@ -235,7 +236,7 @@ impl SseParser {
                     indices.sort_unstable();
                     for idx in indices {
                         if let Some((id, _)) = self.tool_calls.remove(&idx) {
-                            events.push(StreamEvent::ToolUseEnd { id });
+                            events.push(StreamEvent::ToolUseEnd { id: id.into() });
                         }
                     }
                 }

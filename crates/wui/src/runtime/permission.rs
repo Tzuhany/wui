@@ -99,17 +99,32 @@ impl PermissionRules {
     /// Returns `Some(false)` → hard denied, `Some(true)` → pre-approved,
     /// `None` → no rule matched (fall through to mode check).
     pub fn evaluate(&self, tool_name: &str, permission_key: Option<&str>) -> Option<bool> {
+        self.evaluate_with_matcher(tool_name, permission_key, None)
+    }
+
+    /// Evaluate with an optional tool-provided matcher for wildcard rules.
+    ///
+    /// When `matcher` is `Some`, sub-tool rules (e.g. `"bash(git *)"`) are
+    /// tested via the matcher closure instead of simple prefix matching.
+    /// This allows tools to implement arbitrarily complex pattern matching
+    /// (glob, regex, parsed-command matching) for their permission rules.
+    pub fn evaluate_with_matcher(
+        &self,
+        tool_name: &str,
+        permission_key: Option<&str>,
+        matcher: Option<&(dyn Fn(&str) -> bool + Send + Sync)>,
+    ) -> Option<bool> {
         if self
             .always_deny
             .iter()
-            .any(|r| matches_rule(r, tool_name, permission_key))
+            .any(|r| matches_rule_with_matcher(r, tool_name, permission_key, matcher))
         {
             return Some(false);
         }
         if self
             .always_allow
             .iter()
-            .any(|r| matches_rule(r, tool_name, permission_key))
+            .any(|r| matches_rule_with_matcher(r, tool_name, permission_key, matcher))
         {
             return Some(true);
         }
@@ -121,23 +136,36 @@ impl PermissionRules {
     }
 }
 
-/// Match a rule pattern against a tool name and optional permission key.
+/// Match a rule with an optional tool-provided matcher.
 ///
-/// Pattern `"bash(ls"` matches tool `"bash"` whose permission key starts
-/// with `"ls"`. Pattern `"bash"` matches any call to tool `"bash"`.
-fn matches_rule(rule: &str, tool_name: &str, permission_key: Option<&str>) -> bool {
-    if let Some(open) = rule.find('(') {
-        let rule_tool = &rule[..open];
-        // A well-formed key rule looks like "tool_name(key_prefix)".
-        // strip_suffix removes exactly one closing paren; malformed rules (missing
-        // closing paren) are skipped rather than matched incorrectly.
-        let Some(rule_key) = rule[open + 1..].strip_suffix(')') else {
-            return false;
-        };
-        rule_tool == tool_name && permission_key.is_some_and(|k| k.starts_with(rule_key))
-    } else {
-        rule == tool_name
+/// When `matcher` is provided, sub-tool patterns are tested against the
+/// matcher closure first. If the matcher rejects, falls through to the
+/// default prefix matching. This lets tools implement glob, wildcard,
+/// or parsed-command matching for their permission rules.
+fn matches_rule_with_matcher(
+    rule: &str,
+    tool_name: &str,
+    permission_key: Option<&str>,
+    matcher: Option<&(dyn Fn(&str) -> bool + Send + Sync)>,
+) -> bool {
+    let Some(open) = rule.find('(') else {
+        return rule == tool_name;
+    };
+    let rule_tool = &rule[..open];
+    let Some(rule_key) = rule[open + 1..].strip_suffix(')') else {
+        return false;
+    };
+    if rule_tool != tool_name {
+        return false;
     }
+    // Try the tool-provided matcher first (supports wildcards, globs, etc.).
+    if let Some(matcher) = matcher {
+        if matcher(rule_key) {
+            return true;
+        }
+    }
+    // Fall back to prefix matching on permission_key.
+    permission_key.is_some_and(|k| k.starts_with(rule_key))
 }
 
 // ── Permission Mode ───────────────────────────────────────────────────────────
@@ -311,6 +339,7 @@ impl PermissionRules {
         permission_key: Option<&str>,
         is_readonly: bool,
         requires_interaction: bool,
+        matcher: Option<&(dyn Fn(&str) -> bool + Send + Sync)>,
     ) -> PermissionVerdict {
         // 1. Structural check: tools that require user interaction cannot run
         //    headlessly in Auto mode.
@@ -324,7 +353,7 @@ impl PermissionRules {
         }
 
         // Evaluate static rules once — used at steps 2 and 4 below.
-        let static_rule = self.evaluate(tool_name, permission_key);
+        let static_rule = self.evaluate_with_matcher(tool_name, permission_key, matcher);
 
         // 2. Static deny rules — developer hard constraint.
         if static_rule == Some(false) {

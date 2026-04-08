@@ -141,7 +141,7 @@ async fn test_approve_always(provider: Anthropic) {
 
     // First turn: prompt should trigger one Control → approve_always.
     {
-        let mut stream = session.send("Please stamp this once.");
+        let mut stream = session.send("Please stamp this once.").await;
         while let Some(event) = stream.next().await {
             match event {
                 AgentEvent::Control(handle) => {
@@ -164,7 +164,7 @@ async fn test_approve_always(provider: Anthropic) {
 
     // Second turn: the same tool should run without prompting.
     {
-        let mut stream = session.send("Please stamp this once more.");
+        let mut stream = session.send("Please stamp this once more.").await;
         while let Some(event) = stream.next().await {
             match event {
                 AgentEvent::Control(handle) => {
