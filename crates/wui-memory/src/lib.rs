@@ -42,9 +42,10 @@
 // ============================================================================
 
 mod keyword_store;
+mod semantic_tool;
 mod tools;
 mod traits;
-mod vector;
+mod vector_store;
 
 // ── Error type (lives here, used by traits and tools) ────────────────────────
 
@@ -63,6 +64,7 @@ pub enum MemoryError {
 // ── Re-exports ───────────────────────────────────────────────────────────────
 
 pub use keyword_store::InMemoryStore;
+pub use semantic_tool::{EmbedFn, SemanticMemoryTool};
 pub use tools::{all_memory_tools, memory_tools, MemoryTools};
 pub use traits::{ForgetBackend, MemoryHit, MemoryRef, NewMemory, RecallBackend, RememberBackend};
-pub use vector::{EmbedFn, InMemoryVectorStore, SemanticMemoryTool, VectorHit, VectorStore};
+pub use vector_store::{InMemoryVectorStore, VectorHit, VectorStore};
