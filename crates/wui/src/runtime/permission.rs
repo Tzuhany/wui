@@ -248,6 +248,16 @@ impl SessionPermissions {
         inner.always_allow.remove(&tool);
         inner.always_deny.insert(tool);
     }
+
+    /// Clear any always-allow or always-deny decision for a tool, returning
+    /// it to the default per-invocation approval behaviour.
+    ///
+    /// No-op if the tool has no standing decision.
+    pub async fn revoke(&self, tool: &str) {
+        let mut inner = self.inner.write().await;
+        inner.always_allow.remove(tool);
+        inner.always_deny.remove(tool);
+    }
 }
 
 // ── Decision ─────────────────────────────────────────────────────────────────

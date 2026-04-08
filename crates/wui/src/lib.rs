@@ -60,7 +60,7 @@ pub use structured::StructuredRun;
 pub use runtime::{
     CheckpointStore, ExecutorHints, FileCheckpointStore, InMemoryCheckpointStore,
     InMemorySessionStore, PermissionMode, PermissionRules, PermissionVerdict, RetryPolicy,
-    RunCheckpoint, RunStream, SessionStore, SessionStoreError, StoredSession,
+    RunCheckpoint, RunStream, SessionPermissions, SessionStore, SessionStoreError, StoredSession,
 };
 
 // ── Compress ──────────────────────────────────────────────────────────────────

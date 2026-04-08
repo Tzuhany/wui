@@ -270,11 +270,17 @@ impl CompressPipeline {
                             let tokens = self.estimate_tokens(content);
                             if tokens > self.budget_per_result {
                                 let limit = self.budget_per_result * self.chars_per_token_estimate;
+                                // Find the nearest valid UTF-8 boundary at or before `limit`
+                                // so slicing never panics on multi-byte characters.
+                                let safe_limit = (0..=limit.min(content.len()))
+                                    .rev()
+                                    .find(|&i| content.is_char_boundary(i))
+                                    .unwrap_or(0);
                                 let notice = format!(
                                     "[Result truncated: {} tokens → {} token limit]\n\n{}",
                                     tokens,
                                     self.budget_per_result,
-                                    &content[..limit.min(content.len())],
+                                    &content[..safe_limit],
                                 );
                                 return ContentBlock::ToolResult {
                                     tool_use_id: tool_use_id.clone(),
