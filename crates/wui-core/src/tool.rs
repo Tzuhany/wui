@@ -478,20 +478,25 @@ impl Artifact {
         }
     }
 
-    /// Construct a file artifact from raw bytes.
-    pub fn bytes(title: impl Into<String>, mime_type: impl Into<String>, data: Vec<u8>) -> Self {
+    /// Construct a binary artifact from raw bytes with an explicit kind.
+    pub fn bytes(
+        title: impl Into<String>,
+        kind: ArtifactKind,
+        mime_type: Option<impl Into<String>>,
+        data: impl Into<Vec<u8>>,
+    ) -> Self {
         Self {
-            kind: ArtifactKind::File,
+            kind,
             title: title.into(),
-            mime_type: Some(mime_type.into()),
-            content: ArtifactContent::Inline { data },
+            mime_type: mime_type.map(|m| m.into()),
+            content: ArtifactContent::Inline { data: data.into() },
         }
     }
 
     /// Construct a reference artifact (the content lives elsewhere).
-    pub fn reference(title: impl Into<String>, uri: impl Into<String>) -> Self {
+    pub fn reference(title: impl Into<String>, kind: ArtifactKind, uri: impl Into<String>) -> Self {
         Self {
-            kind: ArtifactKind::File,
+            kind,
             title: title.into(),
             mime_type: None,
             content: ArtifactContent::Reference { uri: uri.into() },
@@ -521,11 +526,6 @@ pub struct ContextInjection {
 impl ContextInjection {
     pub fn new(text: impl Into<String>) -> Self {
         Self { text: text.into() }
-    }
-
-    /// Alias for [`Self::new`] — conveys intent when injecting system-level context.
-    pub fn system(text: impl Into<String>) -> Self {
-        Self::new(text)
     }
 }
 

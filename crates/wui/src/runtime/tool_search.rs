@@ -25,11 +25,22 @@ use crate::catalog::{search_catalogs, ToolCatalog};
 pub struct ToolSearch {
     deferred: Vec<Arc<dyn Tool>>,
     catalogs: Vec<Arc<dyn ToolCatalog>>,
+    catalog_results_limit: usize,
 }
 
 impl ToolSearch {
     pub fn new(deferred: Vec<Arc<dyn Tool>>, catalogs: Vec<Arc<dyn ToolCatalog>>) -> Self {
-        Self { deferred, catalogs }
+        Self {
+            deferred,
+            catalogs,
+            catalog_results_limit: 5,
+        }
+    }
+
+    /// Set the maximum number of results returned from catalog searches.
+    pub fn with_catalog_limit(mut self, n: usize) -> Self {
+        self.catalog_results_limit = n;
+        self
     }
 }
 
@@ -82,7 +93,8 @@ impl Tool for ToolSearch {
             .collect();
 
         // Search external catalogs.
-        let catalog_hits = search_catalogs(&self.catalogs, &query, 5).await;
+        let catalog_hits =
+            search_catalogs(&self.catalogs, &query, self.catalog_results_limit).await;
 
         if deferred_matches.is_empty() && catalog_hits.is_empty() {
             let available = self

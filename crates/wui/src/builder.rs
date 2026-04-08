@@ -64,40 +64,43 @@ impl Effort {
 /// All configuration needed to build an `Agent`.
 #[derive(Clone)]
 pub struct AgentConfig {
-    pub provider: Arc<dyn Provider>,
-    pub tools: Vec<Arc<dyn Tool>>,
-    pub hooks: Vec<Arc<dyn Hook>>,
-    pub session_store: Option<Arc<dyn SessionStore>>,
-    pub compress: Arc<dyn CompressStrategy>,
-    pub permission: PermissionMode,
+    pub(crate) provider: Arc<dyn Provider>,
+    pub(crate) tools: Vec<Arc<dyn Tool>>,
+    pub(crate) hooks: Vec<Arc<dyn Hook>>,
+    pub(crate) session_store: Option<Arc<dyn SessionStore>>,
+    pub(crate) compress: Arc<dyn CompressStrategy>,
+    pub(crate) permission: PermissionMode,
     /// Static allow/deny rules applied before the permission mode check.
-    pub rules: PermissionRules,
-    pub system: String,
-    pub model: Option<String>,
-    pub max_tokens: u32,
-    pub temperature: Option<f32>,
-    pub max_iter: u32,
-    pub retry: RetryPolicy,
-    pub tool_timeout: Option<std::time::Duration>,
-    pub ignore_diminishing_returns: bool,
+    pub(crate) rules: PermissionRules,
+    pub(crate) system: String,
+    pub(crate) model: Option<String>,
+    pub(crate) max_tokens: u32,
+    pub(crate) temperature: Option<f32>,
+    pub(crate) max_iter: u32,
+    pub(crate) retry: RetryPolicy,
+    pub(crate) tool_timeout: Option<std::time::Duration>,
+    pub(crate) ignore_diminishing_returns: bool,
     /// Hard ceiling on cumulative tokens (input + output). `None` = no limit.
-    pub token_budget: Option<u64>,
+    pub(crate) token_budget: Option<u64>,
     /// Extended thinking budget (tokens) sent on every LLM call.
     ///
     /// Set via `.effort(Effort::High)` or directly. `None` = no thinking.
-    pub thinking_budget: Option<u32>,
+    pub(crate) thinking_budget: Option<u32>,
     /// Tools with deferred schemas — listed by name only in the initial prompt.
     /// The LLM calls `ToolSearch` to load their full schema before use.
-    pub deferred_tools: Vec<Arc<dyn Tool>>,
+    pub(crate) deferred_tools: Vec<Arc<dyn Tool>>,
     /// Lazily-loaded, searchable tool catalogs.
-    pub catalogs: Vec<Arc<dyn crate::catalog::ToolCatalog>>,
+    pub(crate) catalogs: Vec<Arc<dyn crate::catalog::ToolCatalog>>,
     /// Session-level lifecycle hooks.
-    pub session_hooks: Option<Arc<SessionHooks>>,
+    pub(crate) session_hooks: Option<Arc<SessionHooks>>,
     /// Checkpoint store for save/resume support. `None` disables checkpointing.
-    pub checkpoint_store: Option<Arc<dyn CheckpointStore>>,
+    pub(crate) checkpoint_store: Option<Arc<dyn CheckpointStore>>,
     /// The run ID under which checkpoints are saved and loaded.
     /// Required when `checkpoint_store` is `Some`.
-    pub checkpoint_run_id: Option<String>,
+    pub(crate) checkpoint_run_id: Option<String>,
+    /// Maximum number of results returned by `ToolSearch` from catalog searches.
+    /// Default: 5.
+    pub(crate) catalog_limit: usize,
 }
 
 /// Fluent builder for `Agent`.
@@ -132,6 +135,7 @@ impl AgentBuilder {
                 session_hooks: None,
                 checkpoint_store: None,
                 checkpoint_run_id: None,
+                catalog_limit: 5,
             },
         }
     }
@@ -299,12 +303,6 @@ impl AgentBuilder {
         self
     }
 
-    /// Deprecated — use [`compress`](Self::compress) instead.
-    #[deprecated(since = "0.2.0", note = "use compress() instead")]
-    pub fn compaction(self, s: impl CompressStrategy + 'static) -> Self {
-        self.compress(s)
-    }
-
     /// Add a `ToolCatalog` — a lazily-loaded, searchable tool source.
     ///
     /// Catalog tools are NOT listed in the initial prompt. The LLM discovers
@@ -319,6 +317,15 @@ impl AgentBuilder {
         self.config
             .catalogs
             .push(Arc::new(catalog) as Arc<dyn crate::catalog::ToolCatalog>);
+        self
+    }
+
+    /// Set the maximum number of results returned per catalog search.
+    ///
+    /// Applies to `ToolSearch` when catalogs are registered via `.catalog()`.
+    /// Default: 5.
+    pub fn catalog_limit(mut self, n: usize) -> Self {
+        self.config.catalog_limit = n;
         self
     }
 

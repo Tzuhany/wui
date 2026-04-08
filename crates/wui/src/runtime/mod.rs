@@ -8,7 +8,6 @@ pub(crate) mod session_store;
 pub(crate) mod tool_search;
 
 pub(crate) use hooks::HookRunner;
-pub(crate) use permission::SessionPermissions as _;
 pub(crate) use registry::ToolRegistry;
 pub(crate) use run::{run, RunConfig};
 pub(crate) use tool_search::ToolSearch;
