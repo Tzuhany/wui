@@ -301,6 +301,18 @@ pub enum PermissionOutcome {
     NeedsApproval,
 }
 
+/// Per-invocation data needed by the permission pipeline.
+///
+/// Bundles the tool identity, semantic flags, and optional matcher so
+/// callers don't have to thread 5+ arguments through every call.
+pub struct PermissionCheck<'a> {
+    pub tool_name: &'a str,
+    pub permission_key: Option<&'a str>,
+    pub is_readonly: bool,
+    pub requires_interaction: bool,
+    pub matcher: Option<&'a (dyn Fn(&str) -> bool + Send + Sync)>,
+}
+
 /// The verdict returned by the unified permission pipeline.
 ///
 /// Combines static rules, session memory, and mode-based decisions into a
@@ -335,15 +347,13 @@ impl PermissionRules {
         &self,
         session: &SessionPermissions,
         mode: &PermissionMode,
-        tool_name: &str,
-        permission_key: Option<&str>,
-        is_readonly: bool,
-        requires_interaction: bool,
-        matcher: Option<&(dyn Fn(&str) -> bool + Send + Sync)>,
+        check: &PermissionCheck<'_>,
     ) -> PermissionVerdict {
+        let tool_name = check.tool_name;
+
         // 1. Structural check: tools that require user interaction cannot run
         //    headlessly in Auto mode.
-        if requires_interaction && matches!(mode, PermissionMode::Auto) {
+        if check.requires_interaction && matches!(mode, PermissionMode::Auto) {
             return PermissionVerdict::Denied {
                 reason: format!(
                     "tool '{tool_name}' requires user interaction and cannot run in Auto mode; \
@@ -353,7 +363,8 @@ impl PermissionRules {
         }
 
         // Evaluate static rules once — used at steps 2 and 4 below.
-        let static_rule = self.evaluate_with_matcher(tool_name, permission_key, matcher);
+        let static_rule =
+            self.evaluate_with_matcher(tool_name, check.permission_key, check.matcher);
 
         // 2. Static deny rules — developer hard constraint.
         if static_rule == Some(false) {
@@ -383,7 +394,7 @@ impl PermissionRules {
         match mode {
             PermissionMode::Auto => PermissionVerdict::Allowed,
             PermissionMode::Readonly => {
-                if is_readonly {
+                if check.is_readonly {
                     PermissionVerdict::Allowed
                 } else {
                     PermissionVerdict::Denied {

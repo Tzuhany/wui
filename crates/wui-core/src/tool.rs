@@ -43,6 +43,9 @@ use serde_json::Value;
 
 use crate::message::Message;
 
+/// A permission-matching closure returned by [`Tool::permission_matcher`].
+pub type PermissionMatcher = Box<dyn Fn(&str) -> bool + Send + Sync>;
+
 // ── InterruptBehavior ─────────────────────────────────────────────────────────
 
 /// What should happen when the user submits a new message while this tool runs.
@@ -220,10 +223,7 @@ pub trait Tool: Send + Sync + 'static {
     ///     }))
     /// }
     /// ```
-    fn permission_matcher(
-        &self,
-        _input: &Value,
-    ) -> Option<Box<dyn Fn(&str) -> bool + Send + Sync>> {
+    fn permission_matcher(&self, _input: &Value) -> Option<PermissionMatcher> {
         None
     }
 

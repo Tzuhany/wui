@@ -686,15 +686,15 @@ mod tests {
             )| {
                 let mut parser = SseParser::default();
                 // Empty object
-                let _ = parser.parse(&event_type, "{}");
+                let _ = parser.parse(event_type, "{}");
                 // Null
-                let _ = parser.parse(&event_type, "null");
+                let _ = parser.parse(event_type, "null");
                 // Array
-                let _ = parser.parse(&event_type, "[]");
+                let _ = parser.parse(event_type, "[]");
                 // Deeply nested
-                let _ = parser.parse(&event_type, r#"{"a":{"b":{"c":{"d":1}}}}"#);
+                let _ = parser.parse(event_type, r#"{"a":{"b":{"c":{"d":1}}}}"#);
                 // Wrong types for expected fields
-                let _ = parser.parse(&event_type, r#"{"index":"not_a_number","delta":42}"#);
+                let _ = parser.parse(event_type, r#"{"index":"not_a_number","delta":42}"#);
             });
         }
 

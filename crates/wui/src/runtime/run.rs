@@ -1491,17 +1491,16 @@ async fn authorize_tool(
     // Steps 2–6: unified permission verdict (structural check → static rules →
     // session memory → mode-based decision). The PreToolUse hook (step 1) runs
     // above; HITL approval (step 7) runs below when NeedsApproval is returned.
+    let check = permission::PermissionCheck {
+        tool_name: &name,
+        permission_key: perm_key_ref,
+        is_readonly: tool_is_readonly,
+        requires_interaction: needs_interaction,
+        matcher: matcher_ref,
+    };
     let verdict = config
         .rules
-        .verdict(
-            &config.session_perms,
-            &config.permission,
-            &name,
-            perm_key_ref,
-            tool_is_readonly,
-            needs_interaction,
-            matcher_ref,
-        )
+        .verdict(&config.session_perms, &config.permission, &check)
         .await;
 
     match verdict {

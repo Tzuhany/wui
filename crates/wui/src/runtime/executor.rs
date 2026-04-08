@@ -214,18 +214,14 @@ impl ToolExecutor {
                 tool.id.clone(),
                 tool.name.clone(),
             );
-            let store_ref = self.result_store.as_deref();
-            let (out, attempts) = run_with_retries(
-                tool.impl_,
-                tool.input,
-                &ctx,
-                timeout,
-                hints.max_output_chars,
-                hints.max_retries,
-                &tool.id,
-                store_ref,
-            )
-            .await;
+            let out_cfg = OutputConfig {
+                tool_id: &tool.id,
+                max_chars: hints.max_output_chars,
+                max_retries: hints.max_retries,
+                result_store: self.result_store.as_deref(),
+            };
+            let (out, attempts) =
+                run_with_retries(tool.impl_, tool.input, &ctx, timeout, &out_cfg).await;
             let ms = start.elapsed().as_millis() as u64;
             results.push(CompletedTool {
                 id: tool.id,
@@ -255,17 +251,13 @@ impl ToolExecutor {
         self.pending.spawn(async move {
             let start = Instant::now();
             let ctx = make_ctx(cancel, messages, tx, id.clone(), name.clone());
-            let (out, attempts) = run_with_retries(
-                impl_,
-                input,
-                &ctx,
-                timeout,
-                hints.max_output_chars,
-                hints.max_retries,
-                &id,
-                result_store.as_deref(),
-            )
-            .await;
+            let out_cfg = OutputConfig {
+                tool_id: &id,
+                max_chars: hints.max_output_chars,
+                max_retries: hints.max_retries,
+                result_store: result_store.as_deref(),
+            };
+            let (out, attempts) = run_with_retries(impl_, input, &ctx, timeout, &out_cfg).await;
             let ms = start.elapsed().as_millis() as u64;
             (id, name, out, ms, attempts)
         });
@@ -273,6 +265,14 @@ impl ToolExecutor {
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
+
+/// Per-invocation output-handling context for retries and truncation.
+struct OutputConfig<'a> {
+    tool_id: &'a ToolCallId,
+    max_chars: Option<usize>,
+    max_retries: u32,
+    result_store: Option<&'a dyn ResultStore>,
+}
 
 /// Run a tool with automatic retries.
 ///
@@ -286,22 +286,19 @@ async fn run_with_retries(
     input: serde_json::Value,
     ctx: &ToolCtx,
     timeout: Option<Duration>,
-    max_chars: Option<usize>,
-    max_retries: u32,
-    tool_id: &ToolCallId,
-    result_store: Option<&dyn ResultStore>,
+    out_cfg: &OutputConfig<'_>,
 ) -> (ToolOutput, u32) {
     let mut attempt = 0u32;
     loop {
         attempt += 1;
         let out = apply_output_limit(
             run_tool_safely(Arc::clone(&impl_), input.clone(), ctx, timeout).await,
-            max_chars,
-            tool_id,
-            result_store,
+            out_cfg.max_chars,
+            out_cfg.tool_id,
+            out_cfg.result_store,
         )
         .await;
-        let retries_left = max_retries.saturating_sub(attempt - 1);
+        let retries_left = out_cfg.max_retries.saturating_sub(attempt - 1);
         if retries_left == 0 || !out.is_retryable() {
             return (out, attempt);
         }
@@ -309,7 +306,7 @@ async fn run_with_retries(
         tracing::debug!(
             tool     = %impl_.name(),
             attempt,
-            max      = 1 + max_retries,
+            max      = 1 + out_cfg.max_retries,
             delay_ms,
             "tool output retryable — waiting before retry"
         );
