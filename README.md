@@ -27,7 +27,7 @@ async fn main() -> anyhow::Result<()> {
 
 ## Why Wui
 
-**Streaming concurrent tools.** Tools start executing the moment the LLM describes them — not after it finishes. Two tool calls in one response run in parallel, automatically.
+**Streaming concurrent tools.** Tool calls are parsed as the LLM streams, then authorized and dispatched together once the response ends. Two tool calls in one response run in parallel, automatically.
 
 **Three-tier context compression.** Every long-running agent eventually runs out of context. Wui handles this gracefully: trim tool outputs, collapse old messages, summarize with the LLM — in that order, stopping as soon as pressure is relieved.
 
