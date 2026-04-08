@@ -570,68 +570,11 @@ async fn run_loop(
             "iteration start"
         );
 
-        // Notify lifecycle hooks at the start of each iteration.
         config.hooks.notify_turn_start(&messages).await;
 
-        // ── Context compression ────────────────────────────────────────────────
-        //
-        // Only fire PreCompact when the context is actually approaching the
-        // compression threshold — not on every iteration. This avoids unnecessary
-        // async overhead on short conversations.
-        //
-        // A Block decision injects context the hook wants preserved. Because it is
-        // appended last, the injection lands in the "recent" tail that survives
-        // L2/L3 compression, so the summariser always sees it.
-        if config.compress.pressure(&messages) >= config.compress.threshold() {
-            if let HookDecision::Block { reason } = config.hooks.pre_compact(&messages).await {
-                tracing::debug!("pre_compact hook injecting preservation context");
-                messages.push(system_reminder_msg(&reason));
-            }
-        }
+        // ── Context compression ──────────────────────────────────────────
+        maybe_compress(&config, &mut messages, tx).await;
 
-        // Only clone messages and call compress() when pressure is above
-        // threshold. This avoids a full Vec<Message> clone on every iteration
-        // when the context is small enough to skip compression entirely.
-        if config.compress.pressure(&messages) >= config.compress.threshold() {
-            let pressure_before = config.compress.pressure(&messages);
-            let result = config
-                .compress
-                .compress(
-                    messages.clone(),
-                    config.provider.clone(),
-                    config.model.as_deref(),
-                )
-                .await;
-            match result {
-                Ok(CompressResult {
-                    method: Some(method),
-                    freed,
-                    messages: new_msgs,
-                }) => {
-                    let pressure_after = config.compress.pressure(&new_msgs);
-                    tracing::debug!(method = ?method, freed_tokens = freed, %pressure_before, %pressure_after, "context compressed");
-                    messages = new_msgs;
-                    if method == wui_core::event::CompressMethod::L3Failed {
-                        tx.send(AgentEvent::CompressFallback { freed }).await.ok();
-                    }
-                    tx.send(AgentEvent::Compressed {
-                        method,
-                        freed,
-                        pressure_before,
-                        pressure_after,
-                    })
-                    .await
-                    .ok();
-                }
-                Ok(_) => {} // compression checked but not needed
-                Err(e) => {
-                    tracing::warn!(error = %e, "compression failed, continuing without");
-                }
-            }
-        }
-
-        // Even after compression, check whether the context is still above the
-        // hard ceiling. If we cannot make room for a new LLM call, stop gracefully.
         if config.compress.is_critically_full(&messages) {
             tracing::warn!(iterations, "context overflow: cannot relieve pressure");
             return Ok(RunSummary {
@@ -659,54 +602,14 @@ async fn run_loop(
             thinking_budget: config.thinking_budget,
         };
 
-        // ── Call provider with retry ───────────────────────────────────────────
-        // If the provider rejects the request as too long (400), attempt an
-        // emergency compression and retry the iteration. This handles the case
-        // where token estimation undershot and the actual prompt exceeds the
-        // provider's context window. At most one emergency compression per
-        // iteration to avoid infinite loops.
+        // ── Call provider with retry ──────────────────────────────────────
         let stream = match call_with_retry(&config, &req, tx).await {
             Ok(s) => s,
             Err(e) if is_prompt_too_long(&e) => {
-                tracing::warn!(
-                    "provider rejected prompt as too long — attempting emergency compression"
-                );
-                let pressure_before = config.compress.pressure(&messages);
-                let result = config
-                    .compress
-                    .compress(
-                        messages.clone(),
-                        config.provider.clone(),
-                        config.model.as_deref(),
-                    )
-                    .await;
-                match result {
-                    Ok(CompressResult {
-                        method: Some(method),
-                        freed,
-                        messages: new_msgs,
-                    }) => {
-                        let pressure_after = config.compress.pressure(&new_msgs);
-                        tracing::info!(
-                            ?method, freed, %pressure_before, %pressure_after,
-                            "emergency compression succeeded — retrying"
-                        );
-                        messages = new_msgs;
-                        tx.send(AgentEvent::Compressed {
-                            method,
-                            freed,
-                            pressure_before,
-                            pressure_after,
-                        })
-                        .await
-                        .ok();
-                        continue; // restart iteration with compressed messages
-                    }
-                    _ => {
-                        tracing::error!("emergency compression failed or had no effect");
-                        return Err(e);
-                    }
+                if emergency_compress(&config, &mut messages, tx).await {
+                    continue; // restart iteration with compressed messages
                 }
+                return Err(e);
             }
             Err(e) => return Err(e),
         };
@@ -1305,19 +1208,112 @@ async fn run_loop(
     }
 }
 
+// ── Compression helpers ──────────────────────────────────────────────────────
+
+/// Run context compression if pressure exceeds the threshold.
+///
+/// Fires the PreCompact hook first (may inject preservation context),
+/// then runs the compression pipeline. Mutates `messages` in place.
+async fn maybe_compress(
+    config: &RunConfig,
+    messages: &mut Vec<Message>,
+    tx: &mpsc::Sender<AgentEvent>,
+) {
+    if config.compress.pressure(messages) >= config.compress.threshold() {
+        if let HookDecision::Block { reason } = config.hooks.pre_compact(messages).await {
+            tracing::debug!("pre_compact hook injecting preservation context");
+            messages.push(system_reminder_msg(&reason));
+        }
+    }
+
+    if config.compress.pressure(messages) < config.compress.threshold() {
+        return;
+    }
+
+    let pressure_before = config.compress.pressure(messages);
+    let result = config
+        .compress
+        .compress(
+            messages.clone(),
+            config.provider.clone(),
+            config.model.as_deref(),
+        )
+        .await;
+    match result {
+        Ok(CompressResult {
+            method: Some(method),
+            freed,
+            messages: new_msgs,
+        }) => {
+            let pressure_after = config.compress.pressure(&new_msgs);
+            tracing::debug!(?method, freed, %pressure_before, %pressure_after, "context compressed");
+            *messages = new_msgs;
+            if method == wui_core::event::CompressMethod::L3Failed {
+                tx.send(AgentEvent::CompressFallback { freed }).await.ok();
+            }
+            tx.send(AgentEvent::Compressed {
+                method,
+                freed,
+                pressure_before,
+                pressure_after,
+            })
+            .await
+            .ok();
+        }
+        Ok(_) => {}
+        Err(e) => {
+            tracing::warn!(error = %e, "compression failed, continuing without");
+        }
+    }
+}
+
+/// Attempt emergency compression after a prompt-too-long rejection.
+///
+/// Returns `true` if compression succeeded and the caller should retry.
+async fn emergency_compress(
+    config: &RunConfig,
+    messages: &mut Vec<Message>,
+    tx: &mpsc::Sender<AgentEvent>,
+) -> bool {
+    tracing::warn!("provider rejected prompt as too long — attempting emergency compression");
+    let pressure_before = config.compress.pressure(messages);
+    let result = config
+        .compress
+        .compress(
+            messages.clone(),
+            config.provider.clone(),
+            config.model.as_deref(),
+        )
+        .await;
+    match result {
+        Ok(CompressResult {
+            method: Some(method),
+            freed,
+            messages: new_msgs,
+        }) => {
+            let pressure_after = config.compress.pressure(&new_msgs);
+            tracing::info!(?method, freed, %pressure_before, %pressure_after, "emergency compression succeeded");
+            *messages = new_msgs;
+            tx.send(AgentEvent::Compressed {
+                method,
+                freed,
+                pressure_before,
+                pressure_after,
+            })
+            .await
+            .ok();
+            true
+        }
+        _ => {
+            tracing::error!("emergency compression failed or had no effect");
+            false
+        }
+    }
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 /// Call the provider, retrying transient errors with exponential back-off.
-///
-/// Extracted from the main loop to keep `run_loop` readable. This function
-/// contains all the retry state; `run_loop` just awaits a clean result or
-/// a terminal error.
-///
-/// Retry behaviour:
-/// - `RateLimit { retry_after_ms }` — uses the provider's hint when set,
-///   otherwise falls back to the policy's exponential + jitter formula.
-/// - `ServerError` / `Timeout` — always uses the policy formula.
-/// - Non-retryable errors are returned immediately.
 async fn call_with_retry(
     config: &RunConfig,
     req: &ChatRequest,
