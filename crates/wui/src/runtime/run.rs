@@ -56,6 +56,83 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
+// ── EmissionGuard ─────────────────────────────────────────────────────────────
+
+/// Guards against double-emission of tool events.
+///
+/// Tools that fail instantly (malformed JSON, denied) are emitted immediately
+/// and recorded here. The post-tool-hook pass skips any ID already present.
+struct EmissionGuard {
+    emitted: HashSet<String>,
+}
+
+impl EmissionGuard {
+    fn new() -> Self {
+        Self {
+            emitted: HashSet::new(),
+        }
+    }
+
+    /// Mark `id` as emitted. Returns `true` if this is the first time — i.e.,
+    /// the caller **should** emit the event. Returns `false` if already emitted.
+    fn first_time(&mut self, id: &str) -> bool {
+        self.emitted.insert(id.to_owned())
+    }
+}
+
+// ── handle_stop! ──────────────────────────────────────────────────────────────
+//
+// Shared stop-condition logic used by BudgetExhausted, MaxTokensExhausted,
+// DiminishingReturns, and Completed.
+//
+// Each invocation:
+//   1. Runs the PreStop hook (unless stop_hook_active is set).
+//   2. On Block: injects the reason as a system reminder, sets the flag, and
+//      `continue`s the outer loop.
+//   3. On non-Block (or when already active): returns Ok(RunSummary{...}).
+//
+// The Completed variant also handles MutateOutput — pass the optional
+// `$on_mutate` expression (evaluated when MutateOutput fires) as a block.
+//
+// `$extra_on_block` runs extra reset logic (e.g., resetting counters) before
+// the `continue`. Pass `{}` when not needed.
+macro_rules! handle_stop {
+    (
+        hooks        = $hooks:expr,
+        messages     = $messages:expr,
+        iterations   = $iterations:expr,
+        total_usage  = $total_usage:expr,
+        stop_active  = $stop_hook_active:expr,
+        reason       = $reason:expr,
+        extra_on_block = $extra_on_block:block,
+        on_mutate    = |$mutated:ident| $on_mutate:block $(,)?
+    ) => {{
+        match $hooks
+            .pre_stop(
+                last_assistant_text(&$messages),
+                $reason,
+                $stop_hook_active,
+            )
+            .await
+        {
+            HookDecision::Block { reason } if !$stop_hook_active => {
+                $messages.push(system_reminder_msg(&reason));
+                $stop_hook_active = true;
+                $extra_on_block
+                continue;
+            }
+            HookDecision::MutateOutput { content: $mutated } => $on_mutate,
+            _ => {}
+        }
+        return Ok(RunSummary {
+            stop_reason: $reason,
+            iterations: $iterations,
+            usage: $total_usage,
+            messages: $messages,
+        });
+    }};
+}
+
 use futures::StreamExt;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
@@ -81,7 +158,7 @@ use super::checkpoint::{CheckpointStore, RunCheckpoint};
 use super::executor::{CompletedTool, PendingTool, ToolExecutor};
 use super::hooks::HookRunner;
 use super::permission::{
-    self, PermissionMode, PermissionOutcome, PermissionRules, SessionPermissions,
+    self, PermissionMode, PermissionOutcome, PermissionRules, PermissionVerdict, SessionPermissions,
 };
 use super::registry::ToolRegistry;
 
@@ -487,9 +564,13 @@ async fn run_loop(
                     method: Some(method),
                     freed,
                     messages: new_msgs,
+                    fallback_used,
                 }) => {
                     tracing::debug!(method = ?method, freed_tokens = freed, "context compressed");
                     messages = new_msgs;
+                    if fallback_used {
+                        tx.send(AgentEvent::CompressFallback { freed }).await.ok();
+                    }
                     tx.send(AgentEvent::Compressed { method, freed }).await.ok();
                 }
                 Ok(_) => {} // no compression needed
@@ -555,7 +636,7 @@ async fn run_loop(
         // Track tools whose events were already emitted (instant failures and
         // denied tools).  All other completions are held until after post-tool
         // hooks run so that MutateOutput is reflected in the emitted event.
-        let mut pre_emitted: HashSet<String> = HashSet::new();
+        let mut emission_guard = EmissionGuard::new();
         // Validated tool calls collected during streaming. Authorization and
         // execution happen after MessageEnd — once the LLM has finished speaking
         // — so HITL prompts are never shown mid-stream.
@@ -628,7 +709,7 @@ async fn run_loop(
                                     "malformed tool input JSON: {e}"
                                 )),
                             );
-                            pre_emitted.insert(denied.id.clone());
+                            emission_guard.first_time(&denied.id);
                             emit_tool_event(&denied, tx).await;
                             completed_map.insert(denied.id.clone(), denied);
                             continue;
@@ -770,7 +851,7 @@ async fn run_loop(
                     }
                     AuthOutcome::Denied { tool, injections } => {
                         auth_injections.extend(injections);
-                        pre_emitted.insert(tool.id.clone());
+                        emission_guard.first_time(&tool.id);
                         emit_tool_event(&tool, tx).await;
                         completed_map.insert(tool.id.clone(), tool);
                     }
@@ -840,7 +921,7 @@ async fn run_loop(
 
             // Emit the tool event now — after any mutation — unless it was
             // already emitted as an instant failure (malformed JSON / denied).
-            if !pre_emitted.contains(id) {
+            if emission_guard.first_time(id) {
                 if let Some(done) = completed_map.get(id) {
                     emit_tool_event(done, tx).await;
                 }
@@ -972,29 +1053,18 @@ async fn run_loop(
             let spent = total_usage.input_tokens as u64 + total_usage.output_tokens as u64;
             if spent >= budget {
                 tracing::info!(iterations, spent, budget, "token budget exhausted");
-                match config
-                    .hooks
-                    .pre_stop(
-                        last_assistant_text(&messages),
-                        RunStopReason::BudgetExhausted,
-                        stop_hook_active,
-                    )
-                    .await
-                {
-                    HookDecision::Block { reason } if !stop_hook_active => {
+                handle_stop! {
+                    hooks        = config.hooks,
+                    messages     = messages,
+                    iterations   = iterations,
+                    total_usage  = total_usage,
+                    stop_active  = stop_hook_active,
+                    reason       = RunStopReason::BudgetExhausted,
+                    extra_on_block = {
                         tracing::debug!("pre_stop hook blocked BudgetExhausted");
-                        messages.push(system_reminder_msg(&reason));
-                        stop_hook_active = true;
-                        continue;
-                    }
-                    _ => {}
-                }
-                return Ok(RunSummary {
-                    stop_reason: RunStopReason::BudgetExhausted,
-                    iterations,
-                    usage: total_usage,
-                    messages,
-                });
+                    },
+                    on_mutate    = |_content| {},
+                };
             }
         }
 
@@ -1040,31 +1110,20 @@ async fn run_loop(
                     escalations = token_escalations,
                     "MaxTokens exhausted after escalation and continuation — aborting"
                 );
-                match config
-                    .hooks
-                    .pre_stop(
-                        last_assistant_text(&messages),
-                        RunStopReason::MaxTokensExhausted,
-                        stop_hook_active,
-                    )
-                    .await
-                {
-                    HookDecision::Block { reason } if !stop_hook_active => {
+                handle_stop! {
+                    hooks        = config.hooks,
+                    messages     = messages,
+                    iterations   = iterations,
+                    total_usage  = total_usage,
+                    stop_active  = stop_hook_active,
+                    reason       = RunStopReason::MaxTokensExhausted,
+                    extra_on_block = {
                         tracing::debug!("pre_stop hook blocked MaxTokensExhausted");
-                        messages.push(system_reminder_msg(&reason));
-                        stop_hook_active = true;
                         token_escalations = 0;
                         effective_max_tokens = config.max_tokens;
-                        continue;
-                    }
-                    _ => {}
-                }
-                return Ok(RunSummary {
-                    stop_reason: RunStopReason::MaxTokensExhausted,
-                    iterations,
-                    usage: total_usage,
-                    messages,
-                });
+                    },
+                    on_mutate    = |_content| {},
+                };
             }
         }
 
@@ -1094,67 +1153,45 @@ async fn run_loop(
                         "diminishing returns: stopping after {} low-output turns",
                         low_output_streak
                     );
-                    match config
-                        .hooks
-                        .pre_stop(
-                            last_assistant_text(&messages),
-                            RunStopReason::DiminishingReturns,
-                            stop_hook_active,
-                        )
-                        .await
-                    {
-                        HookDecision::Block { reason } if !stop_hook_active => {
+                    handle_stop! {
+                        hooks        = config.hooks,
+                        messages     = messages,
+                        iterations   = iterations,
+                        total_usage  = total_usage,
+                        stop_active  = stop_hook_active,
+                        reason       = RunStopReason::DiminishingReturns,
+                        extra_on_block = {
                             tracing::debug!("pre_stop hook blocked DiminishingReturns");
-                            messages.push(system_reminder_msg(&reason));
-                            stop_hook_active = true;
                             low_output_streak = 0; // reset streak so the hook's injection gets a fair turn
-                            continue;
-                        }
-                        _ => {}
-                    }
-                    return Ok(RunSummary {
-                        stop_reason: RunStopReason::DiminishingReturns,
-                        iterations,
-                        usage: total_usage,
-                        messages,
-                    });
+                        },
+                        on_mutate    = |_content| {},
+                    };
                 }
             }
         }
 
         if stop_reason == StopReason::EndTurn {
-            let last_text = last_assistant_text(&messages);
-
-            match config
-                .hooks
-                .pre_stop(last_text, RunStopReason::Completed, stop_hook_active)
-                .await
-            {
-                HookDecision::Block { reason } if !stop_hook_active => {
-                    tracing::debug!("pre_stop hook blocked Completed — retrying");
-                    messages.push(system_reminder_msg(&reason));
-                    stop_hook_active = true;
-                    continue;
-                }
-                HookDecision::MutateOutput { content } => {
-                    tracing::debug!("pre_stop hook mutated final response");
-                    replace_last_assistant_text(&mut messages, content);
-                }
-                _ => {}
-            }
-
             tracing::info!(
                 iterations,
                 input_tokens = total_usage.input_tokens,
                 output_tokens = total_usage.output_tokens,
                 "agent run completed"
             );
-            return Ok(RunSummary {
-                stop_reason: RunStopReason::Completed,
-                iterations,
-                usage: total_usage,
-                messages,
-            });
+            handle_stop! {
+                hooks        = config.hooks,
+                messages     = messages,
+                iterations   = iterations,
+                total_usage  = total_usage,
+                stop_active  = stop_hook_active,
+                reason       = RunStopReason::Completed,
+                extra_on_block = {
+                    tracing::debug!("pre_stop hook blocked Completed — retrying");
+                },
+                on_mutate    = |content| {
+                    tracing::debug!("pre_stop hook mutated final response");
+                    replace_last_assistant_text(&mut messages, content);
+                },
+            };
         }
 
         // stop_reason == ToolUse → loop with tool results appended.
@@ -1243,6 +1280,7 @@ async fn emit_tool_event(done: &CompletedTool, tx: &mpsc::Sender<AgentEvent>) {
             name: done.name.clone(),
             output: done.output.content.clone(),
             ms: done.ms,
+            attempts: done.attempts,
             structured: done.output.structured.clone(),
         }
     };
@@ -1340,72 +1378,45 @@ async fn authorize_tool(
     let perm_key = tool_meta.permission_key.clone();
     let perm_key_ref = perm_key.as_deref();
     let is_destructive = tool_meta.destructive;
+    let tool_is_readonly = tool_meta.readonly;
     let needs_interaction = tool_meta.requires_interaction;
 
-    // 2. Structural check: tools that require user interaction cannot run
-    //    headlessly. This is not a permission decision — the loop literally
-    //    has no mechanism to fulfil the tool's interaction requirement in
-    //    Auto mode. Deny immediately rather than hanging indefinitely.
-    if needs_interaction && config.permission.is_auto() {
-        return (
-            Err(instant_failure(
-                id,
-                name.clone(),
-                wui_core::tool::ToolOutput::permission_denied(format!(
-                    "tool '{name}' requires user interaction and cannot run in Auto mode; \
-                 switch to PermissionMode::Ask or disable this tool for headless runs"
+    // Steps 2–6: unified permission verdict (structural check → static rules →
+    // session memory → mode-based decision). The PreToolUse hook (step 1) runs
+    // above; HITL approval (step 7) runs below when NeedsApproval is returned.
+    let verdict = config
+        .rules
+        .verdict(
+            &config.session_perms,
+            &config.permission,
+            &name,
+            perm_key_ref,
+            tool_is_readonly,
+            needs_interaction,
+        )
+        .await;
+
+    match verdict {
+        PermissionVerdict::Allowed => return (Ok(input), vec![]),
+        PermissionVerdict::Denied { reason } => {
+            return (
+                Err(instant_failure(
+                    id,
+                    name,
+                    wui_core::tool::ToolOutput::permission_denied(reason),
                 )),
-            )),
-            vec![],
-        );
-    }
-
-    // Evaluate static rules once — used at steps 3 and 5 below.
-    // `None` = no rule matched; `Some(false)` = deny; `Some(true)` = allow.
-    let static_rule = config.rules.evaluate(&name, perm_key_ref);
-
-    // 3. Static deny rules — developer hard constraint.
-    if static_rule == Some(false) {
-        return (
-            Err(instant_failure(
-                id,
-                name.clone(),
-                wui_core::tool::ToolOutput::permission_denied(format!(
-                    "tool '{name}' is in the configured deny list"
-                )),
-            )),
-            vec![],
-        );
-    }
-
-    // 4. Session always-denied — user's runtime decision (strengthens security).
-    if config.session_perms.is_always_denied(&name).await {
-        return (
-            Err(instant_failure(
-                id,
-                name.clone(),
-                wui_core::tool::ToolOutput::permission_denied(format!(
-                    "tool '{name}' was previously denied for this session"
-                )),
-            )),
-            vec![],
-        );
-    }
-
-    // 5. Static allow rules — developer pre-approval (bypasses prompting).
-    if static_rule == Some(true) {
-        return (Ok(input), vec![]);
-    }
-
-    // 6. Session always-allowed — user's runtime decision to allow.
-    if config.session_perms.is_always_allowed(&name).await {
-        return (Ok(input), vec![]);
+                vec![],
+            )
+        }
+        // NeedsApproval: fall through to mode-based check below.
+        // The verdict returns NeedsApproval for both Ask and Callback modes;
+        // the existing `permission::check` call handles the Callback distinction.
+        PermissionVerdict::NeedsApproval => {}
     }
 
     // 7. Mode-based permission check.
     //    Enrich the description with key suffix and destructive flag so the
     //    human sees enough context to make a meaningful decision.
-    let tool_is_readonly = tool_meta.readonly;
     let description = {
         let base = match perm_key_ref {
             Some(key) => format!("call {name}({key})"),

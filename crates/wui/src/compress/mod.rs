@@ -76,6 +76,9 @@ pub struct CompressResult {
     pub freed: usize,
     /// Which compression method was applied, if any.
     pub method: Option<CompressMethod>,
+    /// `true` when L3 summarisation was attempted but failed and the pipeline
+    /// fell back to L2 collapse.
+    pub fallback_used: bool,
 }
 
 /// Configuration for the compression pipeline.
@@ -99,11 +102,12 @@ pub struct CompressPipeline {
     /// with a notice injected so the LLM knows the output was cut.
     pub budget_per_result: usize,
 
-    /// How many characters approximate one token (`chars / N ≈ tokens`).
+    /// Estimated characters per token (`chars / N ≈ tokens`).
     ///
-    /// `4` is a reasonable default for English prose. Code and JSON are
-    /// denser — use `2` if your agent works heavily with structured data.
-    pub chars_per_token: usize,
+    /// `4` is a reasonable default for English prose (accurate for ASCII).
+    /// For code or CJK text this estimate may be off by 2-4x — use `2` if
+    /// your agent works heavily with structured data or non-Latin scripts.
+    pub chars_per_token_estimate: usize,
 
     /// Fraction of messages to keep during L2 collapse.
     ///
@@ -129,6 +133,12 @@ pub struct CompressPipeline {
     /// };
     /// ```
     pub compact_focus: Option<String>,
+
+    /// Whether to attempt L3 (LLM summarisation) when L2 is insufficient.
+    ///
+    /// Set to `false` to skip L3 entirely and rely only on L1 + L2.
+    /// Defaults to `true`.
+    pub allow_l3: bool,
 }
 
 impl Default for CompressPipeline {
@@ -137,10 +147,11 @@ impl Default for CompressPipeline {
             window_tokens: 200_000,
             compact_threshold: 0.80,
             budget_per_result: 10_000,
-            chars_per_token: 4,
+            chars_per_token_estimate: 4,
             collapse_keep_fraction: 0.5,
             collapse_keep_min: 4,
             compact_focus: None,
+            allow_l3: true,
         }
     }
 }
@@ -148,7 +159,7 @@ impl Default for CompressPipeline {
 impl CompressPipeline {
     /// Estimate token count from character count.
     fn estimate_tokens(&self, text: &str) -> usize {
-        text.len() / self.chars_per_token.max(1)
+        text.len() / self.chars_per_token_estimate.max(1)
     }
 
     fn total_tokens(&self, messages: &[Message]) -> usize {
@@ -215,7 +226,12 @@ impl CompressPipeline {
             return Some((collapsed, CompressMethod::Collapse, freed));
         }
 
-        // L3: LLM summarises the oldest batch.
+        // L3: LLM summarises the oldest batch (skipped when allow_l3 is false).
+        if !self.allow_l3 {
+            let freed = before.saturating_sub(self.total_tokens(&collapsed));
+            return Some((collapsed, CompressMethod::Collapse, freed));
+        }
+
         match self.l3_summarize(&working, provider, model).await {
             Some(summarised) => {
                 let freed = before.saturating_sub(self.total_tokens(&summarised));
@@ -224,7 +240,7 @@ impl CompressPipeline {
             None => {
                 // L3 failed (network error, etc.) — fall back to L2.
                 let freed = before.saturating_sub(self.total_tokens(&collapsed));
-                Some((collapsed, CompressMethod::Collapse, freed))
+                Some((collapsed, CompressMethod::L3Failed, freed))
             }
         }
     }
@@ -247,7 +263,7 @@ impl CompressPipeline {
                         {
                             let tokens = self.estimate_tokens(content);
                             if tokens > self.budget_per_result {
-                                let limit = self.budget_per_result * self.chars_per_token;
+                                let limit = self.budget_per_result * self.chars_per_token_estimate;
                                 let notice = format!(
                                     "[Result truncated: {} tokens → {} token limit]\n\n{}",
                                     tokens,
@@ -440,15 +456,20 @@ impl CompactionStrategy for CompressPipeline {
             .maybe_compress(&messages, provider.as_ref(), model)
             .await
         {
-            Some((msgs, method, freed)) => Ok(CompressResult {
-                messages: msgs,
-                freed,
-                method: Some(method),
-            }),
+            Some((msgs, method, freed)) => {
+                let fallback_used = method == CompressMethod::L3Failed;
+                Ok(CompressResult {
+                    messages: msgs,
+                    freed,
+                    method: Some(method),
+                    fallback_used,
+                })
+            }
             None => Ok(CompressResult {
                 messages,
                 freed: 0,
                 method: None,
+                fallback_used: false,
             }),
         }
     }
@@ -492,9 +513,10 @@ pub struct SummarizingCompressor {
     /// Pressure fraction `[0.0, 1.0]` above which compression triggers.
     /// Default: 0.75.
     pub threshold: f32,
-    /// Rough token-per-character ratio used to estimate pressure.
-    /// Default: 4 (i.e. ~4 chars per token, English prose).
-    pub chars_per_token: usize,
+    /// Estimated characters per token used to estimate pressure.
+    /// Default: 4 (accurate for ASCII/English prose; may be off by 2-4x for
+    /// code or CJK text).
+    pub chars_per_token_estimate: usize,
     /// Assumed context window size in tokens.
     /// Default: 200 000.
     pub window_tokens: usize,
@@ -510,7 +532,7 @@ impl Default for SummarizingCompressor {
                               continue the task."
                 .to_string(),
             threshold: 0.75,
-            chars_per_token: 4,
+            chars_per_token_estimate: 4,
             window_tokens: 200_000,
         }
     }
@@ -523,7 +545,7 @@ impl SummarizingCompressor {
             .flat_map(|m| m.content.iter())
             .map(|b| block_text(b).len())
             .sum::<usize>()
-            / self.chars_per_token.max(1)
+            / self.chars_per_token_estimate.max(1)
     }
 
     fn current_pressure(&self, messages: &[wui_core::message::Message]) -> f32 {
@@ -548,6 +570,7 @@ impl SummarizingCompressor {
                 messages,
                 freed: 0,
                 method: None,
+                fallback_used: false,
             });
         }
 
@@ -560,6 +583,7 @@ impl SummarizingCompressor {
                 messages,
                 freed: 0,
                 method: None,
+                fallback_used: false,
             });
         }
 
@@ -577,6 +601,7 @@ impl SummarizingCompressor {
                 messages,
                 freed: 0,
                 method: None,
+                fallback_used: false,
             });
         }
 
@@ -607,6 +632,7 @@ impl SummarizingCompressor {
                 messages,
                 freed: 0,
                 method: None,
+                fallback_used: false,
             });
         }
 
@@ -628,6 +654,7 @@ impl SummarizingCompressor {
             messages: result,
             freed,
             method: Some(wui_core::event::CompressMethod::Summarize),
+            fallback_used: false,
         })
     }
 }
@@ -715,7 +742,7 @@ mod tests {
 
     #[test]
     fn estimate_tokens_basic() {
-        let p = CompressPipeline::default(); // chars_per_token = 4
+        let p = CompressPipeline::default(); // chars_per_token_estimate = 4
         assert_eq!(p.estimate_tokens(""), 0);
         assert_eq!(p.estimate_tokens("abcd"), 1);
         assert_eq!(p.estimate_tokens("abcdefgh"), 2);
@@ -723,9 +750,9 @@ mod tests {
     }
 
     #[test]
-    fn estimate_tokens_custom_chars_per_token() {
+    fn estimate_tokens_custom_chars_per_token_estimate() {
         let p = CompressPipeline {
-            chars_per_token: 2,
+            chars_per_token_estimate: 2,
             ..Default::default()
         };
         assert_eq!(p.estimate_tokens("abcd"), 2);
@@ -734,9 +761,9 @@ mod tests {
 
     #[test]
     fn estimate_tokens_zero_guard() {
-        // chars_per_token = 0 must not panic (guarded by .max(1))
+        // chars_per_token_estimate = 0 must not panic (guarded by .max(1))
         let p = CompressPipeline {
-            chars_per_token: 0,
+            chars_per_token_estimate: 0,
             ..Default::default()
         };
         assert_eq!(p.estimate_tokens("abcd"), 4);
@@ -782,8 +809,8 @@ mod tests {
     #[test]
     fn l1_trims_oversized_results() {
         let p = CompressPipeline {
-            budget_per_result: 10, // 10 token limit
-            chars_per_token: 4,    // → 40 char limit
+            budget_per_result: 10,       // 10 token limit
+            chars_per_token_estimate: 4, // → 40 char limit
             ..Default::default()
         };
         let huge = "a".repeat(400); // 400 chars / 4 = 100 tokens > 10 limit
@@ -817,7 +844,7 @@ mod tests {
     fn l1_preserves_is_error_flag() {
         let p = CompressPipeline {
             budget_per_result: 1,
-            chars_per_token: 1,
+            chars_per_token_estimate: 1,
             ..Default::default()
         };
         let mut msg = tool_result_msg(&"x".repeat(100));
@@ -954,10 +981,11 @@ mod tests {
             window_tokens: 1000,
             compact_threshold: 0.05, // very sensitive: any content triggers
             budget_per_result: 10,   // 10 token limit per result
-            chars_per_token: 4,
+            chars_per_token_estimate: 4,
             collapse_keep_min: 2,
             collapse_keep_fraction: 0.5,
             compact_focus: None,
+            allow_l3: true,
         };
 
         // One huge tool result: 400 chars / 4 = 100 tokens >> budget of 10.
@@ -1021,10 +1049,11 @@ mod tests {
             window_tokens: 200,
             compact_threshold: 0.5,
             budget_per_result: 10_000,
-            chars_per_token: 4,
+            chars_per_token_estimate: 4,
             collapse_keep_min: 1,
             collapse_keep_fraction: 0.2,
             compact_focus: None,
+            allow_l3: true,
         };
 
         // 20 messages × 40 chars = 800 chars / 4 = 200 tokens.

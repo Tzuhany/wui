@@ -411,19 +411,56 @@ pub enum FailureKind {
 
 // ── Artifact ──────────────────────────────────────────────────────────────────
 
+/// The semantic kind of an [`Artifact`].
+///
+/// Use [`ArtifactKind::Custom`] for application-specific kinds not covered
+/// by the standard variants.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtifactKind {
+    /// A file artifact (source code, documents, data files, etc.)
+    File,
+    /// An image artifact (PNG, JPEG, SVG, etc.)
+    Image,
+    /// A structured chart or graph artifact.
+    Chart,
+    /// A JSON data artifact.
+    Json,
+    /// An application-specific artifact kind.
+    Custom(String),
+}
+
+impl ArtifactKind {
+    /// Returns the string representation of this kind.
+    pub fn as_str(&self) -> &str {
+        match self {
+            ArtifactKind::File => "file",
+            ArtifactKind::Image => "image",
+            ArtifactKind::Chart => "chart",
+            ArtifactKind::Json => "json",
+            ArtifactKind::Custom(s) => s.as_str(),
+        }
+    }
+}
+
+impl std::fmt::Display for ArtifactKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// A discrete output produced by a tool — beyond the primary text content.
 ///
 /// Artifacts are emitted as `AgentEvent::Artifact` events, separate from
 /// `ToolDone`, so callers can route them to the right destination:
 /// save files to disk, render images in a UI, index structured data, etc.
 ///
-/// The `kind` field is open-ended — the framework does not interpret it.
-/// Producers and consumers agree on their own convention:
-///   `"file"`, `"image"`, `"chart"`, `"json"`, `"diff"`, ...
+/// The `kind` field uses [`ArtifactKind`] — use [`ArtifactKind::Custom`] for
+/// application-specific kinds not covered by the standard variants.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Artifact {
-    /// Open-ended type tag. The framework does not interpret this.
-    pub kind: String,
+    /// Semantic type of this artifact.
+    pub kind: ArtifactKind,
     /// Human-readable title for display.
     pub title: String,
     /// MIME type, if known.
@@ -445,13 +482,9 @@ pub enum ArtifactContent {
 
 impl Artifact {
     /// Construct a text artifact (UTF-8 content as inline bytes).
-    pub fn text(
-        kind: impl Into<String>,
-        title: impl Into<String>,
-        text: impl Into<String>,
-    ) -> Self {
+    pub fn text(title: impl Into<String>, text: impl Into<String>) -> Self {
         Self {
-            kind: kind.into(),
+            kind: ArtifactKind::File,
             title: title.into(),
             mime_type: Some("text/plain".to_string()),
             content: ArtifactContent::Inline {
@@ -461,14 +494,9 @@ impl Artifact {
     }
 
     /// Construct a file artifact from raw bytes.
-    pub fn bytes(
-        kind: impl Into<String>,
-        title: impl Into<String>,
-        mime_type: impl Into<String>,
-        data: Vec<u8>,
-    ) -> Self {
+    pub fn bytes(title: impl Into<String>, mime_type: impl Into<String>, data: Vec<u8>) -> Self {
         Self {
-            kind: kind.into(),
+            kind: ArtifactKind::File,
             title: title.into(),
             mime_type: Some(mime_type.into()),
             content: ArtifactContent::Inline { data },
@@ -476,13 +504,9 @@ impl Artifact {
     }
 
     /// Construct a reference artifact (the content lives elsewhere).
-    pub fn reference(
-        kind: impl Into<String>,
-        title: impl Into<String>,
-        uri: impl Into<String>,
-    ) -> Self {
+    pub fn reference(title: impl Into<String>, uri: impl Into<String>) -> Self {
         Self {
-            kind: kind.into(),
+            kind: ArtifactKind::File,
             title: title.into(),
             mime_type: None,
             content: ArtifactContent::Reference { uri: uri.into() },

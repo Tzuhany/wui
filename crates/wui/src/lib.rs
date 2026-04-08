@@ -49,8 +49,8 @@ pub use wui_core::hook::{DenyList, Hook, HookDecision, HookEvent};
 pub use wui_core::message::{ContentBlock, DocumentSource, ImageSource, Message, Role};
 pub use wui_core::provider::Provider;
 pub use wui_core::tool::{
-    Artifact, ArtifactContent, ContextInjection, FailureKind, Tool, ToolCtx, ToolInput, ToolMeta,
-    ToolOutput,
+    Artifact, ArtifactContent, ArtifactKind, ContextInjection, FailureKind, Tool, ToolCtx,
+    ToolInput, ToolMeta, ToolOutput,
 };
 
 pub use structured::StructuredRun;
@@ -59,8 +59,8 @@ pub use structured::StructuredRun;
 
 pub use runtime::{
     CheckpointStore, ExecutorHints, FileCheckpointStore, InMemoryCheckpointStore,
-    InMemorySessionStore, PermissionMode, PermissionRules, RetryPolicy, RunCheckpoint, RunStream,
-    SessionStore, SessionStoreError, StoredSession,
+    InMemorySessionStore, PermissionMode, PermissionRules, PermissionVerdict, RetryPolicy,
+    RunCheckpoint, RunStream, SessionStore, SessionStoreError, StoredSession,
 };
 
 // ── Compress ──────────────────────────────────────────────────────────────────

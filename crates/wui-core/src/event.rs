@@ -136,6 +136,7 @@ pub enum AgentEvent {
         name: String,
         output: String,
         ms: u64,
+        attempts: u32,
         /// Machine-readable result alongside the LLM-facing text, if the
         /// tool provided one. The LLM sees `output`; callers can extract
         /// typed data from `structured` without parsing human-readable prose.
@@ -191,6 +192,13 @@ pub enum AgentEvent {
         freed: usize,
     },
 
+    /// L3 (LLM summarization) was attempted but failed and the pipeline fell
+    /// back to L2 collapse. The `freed` field shows how many tokens were
+    /// reclaimed by the fallback L2 pass.
+    CompressFallback {
+        freed: usize,
+    },
+
     // ── Retry ─────────────────────────────────────────────────────────
     /// The provider returned a transient error; the engine is about to retry.
     ///
@@ -227,6 +235,8 @@ pub enum CompressMethod {
     Collapse,
     /// L3: the LLM was asked to summarise old messages.
     Summarize,
+    /// L3 summarization was attempted but failed; fell back to L2 collapse.
+    L3Failed,
 }
 
 // ── ControlHandle ─────────────────────────────────────────────────────────────
