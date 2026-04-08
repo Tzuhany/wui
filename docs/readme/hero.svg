@@ -1,0 +1,91 @@
+<svg width="1600" height="720" viewBox="0 0 1600 720" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="120" y1="60" x2="1480" y2="660" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#0F172A"/>
+      <stop offset="1" stop-color="#111827"/>
+    </linearGradient>
+    <linearGradient id="accentA" x1="220" y1="220" x2="640" y2="540" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#14B8A6" stop-opacity="0.95"/>
+      <stop offset="1" stop-color="#0EA5E9" stop-opacity="0.72"/>
+    </linearGradient>
+    <linearGradient id="accentB" x1="1060" y1="120" x2="1430" y2="480" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#F59E0B" stop-opacity="0.80"/>
+      <stop offset="1" stop-color="#FB7185" stop-opacity="0.42"/>
+    </linearGradient>
+    <pattern id="grid" width="44" height="44" patternUnits="userSpaceOnUse">
+      <path d="M44 0H0V44" stroke="#94A3B8" stroke-opacity="0.12"/>
+    </pattern>
+    <filter id="blur" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="42"/>
+    </filter>
+  </defs>
+
+  <rect width="1600" height="720" rx="32" fill="url(#bg)"/>
+  <rect width="1600" height="720" rx="32" fill="url(#grid)"/>
+
+  <circle cx="410" cy="465" r="190" fill="url(#accentA)" filter="url(#blur)"/>
+  <circle cx="1240" cy="210" r="170" fill="url(#accentB)" filter="url(#blur)"/>
+
+  <rect x="112" y="98" width="164" height="34" rx="17" fill="#0F766E"/>
+  <text x="194" y="120" text-anchor="middle" fill="#F8FAFC" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="16" font-weight="700" letter-spacing="0.10em">EXECUTOR FIRST</text>
+
+  <text x="112" y="258" fill="#F8FAFC" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="124" font-weight="800" letter-spacing="-0.05em">Wui</text>
+
+  <text x="112" y="334" fill="#CBD5E1" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="32" font-weight="500">
+    An honest Rust runtime for LLM agents.
+  </text>
+  <text x="112" y="382" fill="#94A3B8" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="26">
+    Stream text, run tools, pause for humans, compress context, and keep
+  </text>
+  <text x="112" y="420" fill="#94A3B8" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="26">
+    execution semantics explicit.
+  </text>
+
+  <g opacity="0.95">
+    <rect x="112" y="506" width="188" height="50" rx="25" fill="#111827" stroke="#1E293B"/>
+    <text x="206" y="538" text-anchor="middle" fill="#E2E8F0" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="18" font-weight="600">streaming tools</text>
+
+    <rect x="320" y="506" width="156" height="50" rx="25" fill="#111827" stroke="#1E293B"/>
+    <text x="398" y="538" text-anchor="middle" fill="#E2E8F0" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="18" font-weight="600">native HITL</text>
+
+    <rect x="496" y="506" width="214" height="50" rx="25" fill="#111827" stroke="#1E293B"/>
+    <text x="603" y="538" text-anchor="middle" fill="#E2E8F0" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="18" font-weight="600">optional extensions</text>
+  </g>
+
+  <g transform="translate(980 126)">
+    <rect width="474" height="468" rx="28" fill="#0B1220" stroke="#1E293B"/>
+    <rect x="28" y="28" width="418" height="54" rx="16" fill="#111827" stroke="#1F2937"/>
+    <circle cx="58" cy="55" r="7" fill="#14B8A6"/>
+    <circle cx="82" cy="55" r="7" fill="#0EA5E9"/>
+    <circle cx="106" cy="55" r="7" fill="#F59E0B"/>
+    <text x="138" y="61" fill="#E2E8F0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="18">runtime loop</text>
+
+    <rect x="28" y="118" width="188" height="104" rx="20" fill="#0F172A" stroke="#164E63"/>
+    <text x="54" y="156" fill="#F8FAFC" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="22" font-weight="700">provider stream</text>
+    <text x="54" y="188" fill="#93C5FD" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="18">TextDelta</text>
+    <text x="54" y="212" fill="#93C5FD" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="18">ToolUseEnd</text>
+
+    <rect x="258" y="118" width="188" height="104" rx="20" fill="#0F172A" stroke="#115E59"/>
+    <text x="284" y="156" fill="#F8FAFC" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="22" font-weight="700">authorize</text>
+    <text x="284" y="188" fill="#99F6E4" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="18">readonly</text>
+    <text x="284" y="212" fill="#99F6E4" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="18">HITL / allow / deny</text>
+
+    <rect x="28" y="258" width="188" height="104" rx="20" fill="#0F172A" stroke="#1D4ED8"/>
+    <text x="54" y="296" fill="#F8FAFC" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="22" font-weight="700">dispatch tools</text>
+    <text x="54" y="328" fill="#BFDBFE" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="18">concurrent</text>
+    <text x="54" y="352" fill="#BFDBFE" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="18">per invocation</text>
+
+    <rect x="258" y="258" width="188" height="104" rx="20" fill="#0F172A" stroke="#9A3412"/>
+    <text x="284" y="296" fill="#F8FAFC" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="22" font-weight="700">compress</text>
+    <text x="284" y="328" fill="#FDE68A" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="18">trim</text>
+    <text x="284" y="352" fill="#FDE68A" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="18">collapse -> summarize</text>
+
+    <path d="M216 170H250" stroke="#475569" stroke-width="2.5" stroke-linecap="round"/>
+    <path d="M446 170H458C468 170 476 178 476 188V310C476 320 468 328 458 328H446" stroke="#475569" stroke-width="2.5" stroke-linecap="round"/>
+    <path d="M216 310H250" stroke="#475569" stroke-width="2.5" stroke-linecap="round"/>
+    <path d="M122 362V394C122 404 130 412 140 412H334C344 412 352 420 352 430V438" stroke="#475569" stroke-width="2.5" stroke-linecap="round"/>
+
+    <rect x="108" y="398" width="258" height="40" rx="20" fill="#111827" stroke="#1F2937"/>
+    <text x="237" y="424" text-anchor="middle" fill="#CBD5E1" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="17">repeat until StopReason::EndTurn</text>
+  </g>
+</svg>
