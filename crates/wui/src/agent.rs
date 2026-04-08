@@ -31,6 +31,7 @@ use crate::structured::StructuredRun;
 ///
 /// Create one via `Agent::builder()`, then call `run()`, `stream()`, or
 /// `session()`. Cheap to clone — all configuration is behind an Arc.
+#[must_use = "an Agent does nothing until you call run(), stream(), or session()"]
 #[derive(Clone)]
 pub struct Agent {
     pub(crate) config: Arc<AgentConfig>,
@@ -130,7 +131,8 @@ impl Agent {
     {
         // Generate a JSON Schema for T so we can inject it into the prompt.
         let schema_root = schemars::gen::SchemaGenerator::default().into_root_schema_for::<T>();
-        let schema_str = serde_json::to_string_pretty(&schema_root).unwrap_or_default();
+        let schema_str =
+            serde_json::to_string_pretty(&schema_root).unwrap_or_else(|_| "{}".to_string());
 
         // Create a derived agent whose system prompt includes the format instruction.
         // This does not mutate the original agent — we clone the Arc'd config and
@@ -213,16 +215,12 @@ impl Agent {
 /// remaining string can be parsed directly.
 fn strip_json_fences(text: &str) -> &str {
     let text = text.trim();
-    // Try ```json ... ``` first (most common).
-    if let Some(rest) = text.strip_prefix("```json") {
-        if let Some(inner) = rest.rfind("```").map(|i| rest[..i].trim()) {
-            return inner;
-        }
-    }
-    // Fall back to ``` ... ```.
-    if let Some(rest) = text.strip_prefix("```") {
-        if let Some(inner) = rest.rfind("```").map(|i| rest[..i].trim()) {
-            return inner;
+    // Try ```json first, then bare ```.
+    for prefix in &["```json", "```"] {
+        if let Some(rest) = text.strip_prefix(prefix) {
+            if let Some(i) = rest.rfind("```") {
+                return rest[..i].trim();
+            }
         }
     }
     text

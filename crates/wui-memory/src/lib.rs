@@ -264,13 +264,13 @@ impl MemoryTools {
     pub fn build(self) -> Vec<Arc<dyn Tool>> {
         let mut tools: Vec<Arc<dyn Tool>> = Vec::new();
         if let Some(b) = self.recall {
-            tools.push(Arc::new(RecallTool { backend: b }));
+            tools.push(Arc::new(RecallTool::new(b)));
         }
         if let Some(b) = self.remember {
-            tools.push(Arc::new(RememberTool { backend: b }));
+            tools.push(Arc::new(RememberTool::new(b)));
         }
         if let Some(b) = self.forget {
-            tools.push(Arc::new(ForgetTool { backend: b }));
+            tools.push(Arc::new(ForgetTool::new(b)));
         }
         tools
     }
@@ -305,11 +305,31 @@ pub fn all_memory_tools(store: Arc<InMemoryStore>) -> Vec<Arc<dyn Tool>> {
 struct RecallTool {
     backend: Arc<dyn RecallBackend>,
 }
+
+impl RecallTool {
+    pub(crate) fn new(b: Arc<dyn RecallBackend>) -> Self {
+        Self { backend: b }
+    }
+}
+
 struct RememberTool {
     backend: Arc<dyn RememberBackend>,
 }
+
+impl RememberTool {
+    pub(crate) fn new(b: Arc<dyn RememberBackend>) -> Self {
+        Self { backend: b }
+    }
+}
+
 struct ForgetTool {
     backend: Arc<dyn ForgetBackend>,
+}
+
+impl ForgetTool {
+    pub(crate) fn new(b: Arc<dyn ForgetBackend>) -> Self {
+        Self { backend: b }
+    }
 }
 
 #[async_trait]

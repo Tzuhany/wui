@@ -17,16 +17,19 @@ impl HookRunner {
         Self { hooks }
     }
 
+    #[must_use]
     pub async fn pre_tool_use(&self, name: &str, input: &serde_json::Value) -> HookDecision {
         let event = HookEvent::PreToolUse { name, input };
         self.run(&event).await
     }
 
+    #[must_use]
     pub async fn post_tool_use(&self, name: &str, output: &ToolOutput) -> HookDecision {
         let event = HookEvent::PostToolUse { name, output };
         self.run(&event).await
     }
 
+    #[must_use]
     pub async fn post_tool_failure(
         &self,
         name: &str,
@@ -46,6 +49,7 @@ impl HookRunner {
     /// Returns `Block { reason }` when the hook wants to inject preservation
     /// context into the conversation before the summariser runs. The caller
     /// is responsible for inserting the reason as a system message.
+    #[must_use]
     pub async fn pre_compact(&self, messages: &[Message]) -> HookDecision {
         let event = HookEvent::PreCompact { messages };
         self.run(&event).await
@@ -57,6 +61,7 @@ impl HookRunner {
     /// `stop_hook_active` is `true` when this hook already blocked the current
     /// stop attempt once — a signal that the hook should return `Allow` to
     /// avoid an infinite loop.
+    #[must_use]
     pub async fn pre_stop(
         &self,
         response: &str,

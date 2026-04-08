@@ -101,6 +101,7 @@ pub struct AgentConfig {
 }
 
 /// Fluent builder for `Agent`.
+#[must_use = "AgentBuilder does nothing until you call .build()"]
 pub struct AgentBuilder {
     config: AgentConfig,
 }

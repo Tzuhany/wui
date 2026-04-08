@@ -191,6 +191,7 @@ const TOKEN_ESCALATION_FACTOR: u32 = 4;
 /// let token = stream.cancel_token();
 /// tokio::spawn(async move { /* call token.cancel() when needed */ });
 /// ```
+#[must_use = "RunStream does nothing unless polled; use .next().await or collect the events"]
 pub struct RunStream {
     inner: ReceiverStream<AgentEvent>,
     cancel: CancellationToken,
@@ -938,10 +939,7 @@ async fn run_loop(
             "llm call complete"
         );
 
-        total_usage.input_tokens += usage.input_tokens;
-        total_usage.output_tokens += usage.output_tokens;
-        total_usage.cache_read_tokens += usage.cache_read_tokens;
-        total_usage.cache_write_tokens += usage.cache_write_tokens;
+        total_usage += usage.clone();
         iterations += 1;
 
         // ── Checkpoint save ────────────────────────────────────────────────────
