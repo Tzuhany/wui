@@ -40,7 +40,7 @@
 // immediately. A new `send()` replaces the token for that turn.
 // ============================================================================
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use futures::StreamExt;
 use tokio::sync::Semaphore;
@@ -53,6 +53,14 @@ use wui_core::types::SessionId;
 
 use crate::agent::build_run_config;
 use crate::builder::AgentConfig;
+
+/// Lock a mutex, recovering from poisoning with a logged warning.
+fn recover_mutex<'a, T>(mutex: &'a Mutex<T>, label: &str) -> MutexGuard<'a, T> {
+    mutex.lock().unwrap_or_else(|e| {
+        tracing::error!("{label} mutex poisoned, recovering");
+        e.into_inner()
+    })
+}
 
 // ── SessionHooks ──────────────────────────────────────────────────────────────
 
@@ -104,6 +112,58 @@ pub struct Session {
     turn_guard: Arc<Semaphore>,
 }
 
+// ── TurnCleanup ──────────────────────────────────────────────────────────────
+//
+// Bundles the shared state that the stream's `then` closure needs for terminal
+// events (Done / Error). Keeps the closure flat — no tuple destructuring, no
+// 8-deep nesting.
+
+struct TurnCleanup {
+    messages: Arc<Mutex<Vec<Message>>>,
+    session_store: Option<Arc<dyn SessionStore>>,
+    session_id: SessionId,
+    cancel_store: Arc<Mutex<Option<CancellationToken>>>,
+    session_hooks: Option<Arc<SessionHooks>>,
+    permit: Arc<Mutex<Option<tokio::sync::OwnedSemaphorePermit>>>,
+}
+
+impl TurnCleanup {
+    /// Handle a terminal event (Done or Error): clear the cancel token,
+    /// update history, fire hooks, persist, and release the turn guard.
+    async fn on_terminal(&self, event: &AgentEvent) {
+        *recover_mutex(&self.cancel_store, "current_cancel") = None;
+
+        if let AgentEvent::Done(ref summary) = event {
+            let updated = summary.messages.clone();
+            *recover_mutex(&self.messages, "session messages") = updated.clone();
+
+            if let Some(f) = self
+                .session_hooks
+                .as_ref()
+                .and_then(|h| h.on_after_turn.as_ref())
+            {
+                f(summary);
+            }
+
+            if let Some(store) = &self.session_store {
+                let snapshot = StoredSession {
+                    session_id: self.session_id.to_string(),
+                    messages: updated,
+                };
+                if let Err(e) = store.save(self.session_id.as_str(), &snapshot).await {
+                    tracing::warn!(
+                        session_id = %self.session_id, error = %e,
+                        "session store save failed"
+                    );
+                }
+            }
+        }
+
+        // Release the turn guard so the next send() can proceed.
+        drop(recover_mutex(&self.permit, "permit_slot").take());
+    }
+}
+
 impl Session {
     pub(crate) async fn new(id: impl Into<String>, config: Arc<AgentConfig>) -> Self {
         let id = SessionId::from(id.into());
@@ -153,8 +213,8 @@ impl Session {
     ) -> impl futures::Stream<Item = AgentEvent> + Unpin + '_ {
         // Acquire the turn guard — ensures only one turn runs at a time.
         // If another turn is in progress, this awaits until it completes.
-        // The permit is moved into the stream's `then` closure and held for
-        // its lifetime; it is released when the stream is dropped or Done fires.
+        // The permit is moved into TurnCleanup and held for the stream's
+        // lifetime; it is released when Done/Error fires or the stream drops.
         let permit = self
             .turn_guard
             .clone()
@@ -168,120 +228,57 @@ impl Session {
         // ends in an error, `self.messages` stays at its pre-send state so the
         // next `send()` does not see a dangling user message without a response.
         let messages = {
-            let lock = self.messages.lock().unwrap_or_else(|e| {
-                tracing::error!("session messages mutex poisoned, recovering");
-                e.into_inner()
-            });
+            let lock = recover_mutex(&self.messages, "session messages");
             let mut messages = lock.clone();
             messages.push(Message::user(content.into()));
             messages
         };
 
         // Apply on_before_send hook if configured.
-        let messages = if let Some(ref hooks) = self.config.session_hooks {
-            if let Some(ref f) = hooks.on_before_send {
-                f(messages)
-            } else {
-                messages
-            }
-        } else {
-            messages
+        let messages = match self
+            .config
+            .session_hooks
+            .as_ref()
+            .and_then(|h| h.on_before_send.as_ref())
+        {
+            Some(f) => f(messages),
+            None => messages,
         };
 
         let run_config = self.make_run_config();
         let run_stream = run(Arc::new(run_config), messages);
 
         // Store the cancel token for this turn so cancel_current() can abort it.
-        *self.current_cancel.lock().unwrap_or_else(|e| {
-            tracing::error!("current_cancel mutex poisoned, recovering");
-            e.into_inner()
-        }) = Some(run_stream.cancel_token());
-
-        // Wire Done back to session state.
-        let messages_ref = self.messages.clone();
-        let session_store = self.session_store.clone();
-        let session_id = self.id.clone();
-        let cancel_store = self.current_cancel.clone();
-        let session_hooks = self.config.session_hooks.clone();
+        *recover_mutex(&self.current_cancel, "current_cancel") = Some(run_stream.cancel_token());
 
         // Use `then` (async map) so session-store I/O completes before `Done` is
         // yielded to the caller. This guarantees that by the time the caller
         // sees `Done`, both in-memory history and the persisted session state
         // are up to date.
         //
-        // The 5 Arcs are only cloned when the event is `Done` (once per run).
-        // All other events (TextDelta, ToolStart, …) pass through without any
-        // heap allocation in this closure.
+        // TurnCleanup is cloned (Arc bumps) only for terminal events. All other
+        // events pass through without heap allocation.
         //
         // Box::pin makes the result Unpin so callers can use `stream.next().await`
         // without pinning manually.
-        // The semaphore permit is wrapped in Arc<Mutex<Option<_>>> so it can be
-        // explicitly released when Done fires. This ensures the next send() can
-        // proceed even if the caller keeps the stream alive after consuming Done.
-        // If the stream is dropped without reaching Done, the permit is released
-        // via the Arc's Drop — the closure owns the last Arc.
-        let permit_slot: Arc<std::sync::Mutex<Option<tokio::sync::OwnedSemaphorePermit>>> =
-            Arc::new(std::sync::Mutex::new(Some(permit)));
-        Box::pin(run_stream.then(move |event| {
-            let is_terminal = matches!(event, AgentEvent::Done(_) | AgentEvent::Error(_));
+        let cleanup = Arc::new(TurnCleanup {
+            messages: self.messages.clone(),
+            session_store: self.session_store.clone(),
+            session_id: self.id.clone(),
+            cancel_store: self.current_cancel.clone(),
+            session_hooks: self.config.session_hooks.clone(),
+            permit: Arc::new(Mutex::new(Some(permit))),
+        });
 
-            // Capture state only for terminal events (Done or Error).
-            // All other events pass through without heap allocation.
-            let terminal_state = if is_terminal {
-                Some((
-                    messages_ref.clone(),
-                    session_store.clone(),
-                    session_id.clone(),
-                    cancel_store.clone(),
-                    session_hooks.clone(),
-                    permit_slot.clone(),
-                ))
+        Box::pin(run_stream.then(move |event| {
+            let cleanup = if matches!(event, AgentEvent::Done(_) | AgentEvent::Error(_)) {
+                Some(cleanup.clone())
             } else {
                 None
             };
             async move {
-                if let Some((messages_ref, session_store, session_id, cancel_store, session_hooks, permit_slot)) = terminal_state {
-                    // Clear the cancel token on any terminal event.
-                    match cancel_store.lock() {
-                        Ok(mut guard) => *guard = None,
-                        Err(e) => {
-                            tracing::error!("current_cancel mutex poisoned on terminal event, recovering");
-                            *e.into_inner() = None;
-                        }
-                    }
-
-                    // Done-specific: update history, run hooks, persist.
-                    if let AgentEvent::Done(ref summary) = event {
-                        let updated = summary.messages.clone();
-
-                        match messages_ref.lock() {
-                            Ok(mut guard) => *guard = updated.clone(),
-                            Err(e) => {
-                                tracing::error!("session messages mutex poisoned on Done, recovering");
-                                *e.into_inner() = updated.clone();
-                            }
-                        }
-
-                        if let Some(ref hooks) = session_hooks {
-                            if let Some(ref f) = hooks.on_after_turn {
-                                f(summary);
-                            }
-                        }
-
-                        if let Some(store) = session_store {
-                            let snapshot = StoredSession {
-                                session_id: session_id.to_string(),
-                                messages: updated,
-                            };
-                            if let Err(e) = store.save(session_id.as_str(), &snapshot).await {
-                                tracing::warn!(session_id = %session_id, error = %e, "session store save failed");
-                            }
-                        }
-                    }
-
-                    // Release the turn guard on ANY terminal event (Done or Error)
-                    // so the next send() can proceed.
-                    drop(permit_slot.lock().ok().and_then(|mut g| g.take()));
+                if let Some(c) = cleanup {
+                    c.on_terminal(&event).await;
                 }
                 event
             }
@@ -293,10 +290,7 @@ impl Session {
     /// The run loop will emit `AgentEvent::Done` with `stop_reason: Cancelled`
     /// and exit. Has no effect if no turn is running.
     pub fn cancel_current(&self) {
-        let guard = self.current_cancel.lock().unwrap_or_else(|e| {
-            tracing::error!("current_cancel mutex poisoned in cancel_current, recovering");
-            e.into_inner()
-        });
+        let guard = recover_mutex(&self.current_cancel, "current_cancel");
         if let Some(token) = guard.as_ref() {
             token.cancel();
         }
@@ -304,13 +298,7 @@ impl Session {
 
     /// The current message history for this session (read-only snapshot).
     pub fn messages(&self) -> Vec<Message> {
-        self.messages
-            .lock()
-            .unwrap_or_else(|e| {
-                tracing::error!("session messages mutex poisoned in messages(), recovering");
-                e.into_inner()
-            })
-            .clone()
+        recover_mutex(&self.messages, "session messages").clone()
     }
 
     /// The session's permission memory.

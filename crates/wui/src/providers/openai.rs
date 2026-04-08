@@ -326,137 +326,151 @@ fn tools_to_json(tools: &[ToolDef]) -> Value {
 fn messages_to_json(system: &str, messages: &[Message]) -> Value {
     let mut out: Vec<Value> = Vec::new();
 
-    if !system.is_empty() {
-        out.push(json!({"role": "system", "content": system}));
+    if let Some(sys) = system_message_to_json(system) {
+        out.push(sys);
     }
 
     for msg in messages {
         match msg.role {
-            // Framework-injected mid-conversation messages (hook rejections,
-            // permission decisions, compression summaries, reminders).
-            // OpenAI has no mid-conversation system role, so surface as user.
             Role::System => {
-                let text = collect_text(&msg.content);
-                if !text.is_empty() {
-                    out.push(json!({"role": "user", "content": text}));
+                if let Some(v) = framework_message_to_json(msg) {
+                    out.push(v);
                 }
             }
-
-            Role::User => {
-                // Tool results and regular text/images may coexist in the same
-                // wui message; OpenAI requires them in separate typed messages.
-                let mut tool_results: Vec<(&str, &str)> = Vec::new();
-                let mut content_items: Vec<Value> = Vec::new();
-                let mut has_images = false;
-
-                for block in &msg.content {
-                    match block {
-                        ContentBlock::ToolResult {
-                            tool_use_id,
-                            content,
-                            ..
-                        } => {
-                            tool_results.push((tool_use_id.as_str(), content.as_str()));
-                        }
-                        ContentBlock::Image { .. } => {
-                            has_images = true;
-                            content_items.push(block_to_content_item(block));
-                        }
-                        _ => {
-                            let t = block_to_text(block);
-                            if !t.is_empty() {
-                                content_items.push(json!({ "type": "text", "text": t }));
-                            }
-                        }
-                    }
-                }
-
-                // One "tool" message per tool result, in submission order.
-                for (tool_call_id, content) in tool_results {
-                    out.push(json!({
-                        "role":        "tool",
-                        "tool_call_id": tool_call_id,
-                        "content":     content,
-                    }));
-                }
-
-                // Remaining content: use array form when images are present
-                // (required by OpenAI), plain string otherwise (more compatible).
-                if !content_items.is_empty() {
-                    if has_images {
-                        out.push(json!({"role": "user", "content": content_items}));
-                    } else {
-                        // Extract text from items and join as a plain string.
-                        let combined: String = content_items
-                            .iter()
-                            .filter_map(|item| item["text"].as_str().map(str::to_string))
-                            .collect::<Vec<_>>()
-                            .join("\n\n");
-                        if !combined.is_empty() {
-                            out.push(json!({"role": "user", "content": combined}));
-                        }
-                    }
-                }
-            }
-
+            Role::User => out.extend(user_message_to_json(msg)),
             Role::Assistant => {
-                let mut text_parts: Vec<String> = Vec::new();
-                let mut tool_calls: Vec<Value> = Vec::new();
-
-                for block in &msg.content {
-                    match block {
-                        ContentBlock::Text { text } => {
-                            text_parts.push(text.clone());
-                        }
-                        ContentBlock::ToolUse {
-                            id, name, input, ..
-                        } => {
-                            // OpenAI expects arguments as a JSON-encoded string.
-                            let arguments =
-                                serde_json::to_string(input).unwrap_or_else(|_| "{}".to_string());
-                            tool_calls.push(json!({
-                                "id":   id,
-                                "type": "function",
-                                "function": { "name": name, "arguments": arguments },
-                            }));
-                        }
-                        // Thinking is Anthropic-specific — skip to avoid confusing
-                        // OpenAI models with proprietary content format.
-                        ContentBlock::Thinking { .. } => {}
-                        // Compression markers → plain text so context survives replay.
-                        _ => {
-                            let t = block_to_text(block);
-                            if !t.is_empty() {
-                                text_parts.push(t);
-                            }
-                        }
-                    }
+                if let Some(v) = assistant_message_to_json(msg) {
+                    out.push(v);
                 }
-
-                let combined = text_parts.join("\n\n");
-
-                // Skip assistant messages that would be empty (e.g. thinking-only
-                // turns from a previous Anthropic session). Sending an empty
-                // assistant message causes a 400 from the OpenAI API.
-                if combined.is_empty() && tool_calls.is_empty() {
-                    continue;
-                }
-
-                let mut obj = json!({"role": "assistant"});
-                obj["content"] = if combined.is_empty() {
-                    json!(null)
-                } else {
-                    json!(combined)
-                };
-                if !tool_calls.is_empty() {
-                    obj["tool_calls"] = json!(tool_calls);
-                }
-                out.push(obj);
             }
         }
     }
 
     json!(out)
+}
+
+/// Serialise the top-level system prompt (if non-empty).
+fn system_message_to_json(system: &str) -> Option<Value> {
+    if system.is_empty() {
+        return None;
+    }
+    Some(json!({"role": "system", "content": system}))
+}
+
+/// Serialise a framework-injected mid-conversation system message as a user
+/// message (OpenAI has no mid-conversation system role).
+fn framework_message_to_json(msg: &Message) -> Option<Value> {
+    let text = collect_text(&msg.content);
+    if text.is_empty() {
+        return None;
+    }
+    Some(json!({"role": "user", "content": text}))
+}
+
+/// Serialise a user message into one or more JSON values.
+///
+/// Tool results and regular text/images may coexist in the same wui message;
+/// OpenAI requires them in separate typed messages. Returns a Vec because a
+/// single wui user message can expand into multiple OpenAI messages (tool
+/// results + content).
+fn user_message_to_json(msg: &Message) -> Vec<Value> {
+    let mut out = Vec::new();
+    let mut content_items: Vec<Value> = Vec::new();
+    let mut has_images = false;
+
+    for block in &msg.content {
+        match block {
+            ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                ..
+            } => {
+                out.push(json!({
+                    "role":         "tool",
+                    "tool_call_id": tool_use_id,
+                    "content":      content,
+                }));
+            }
+            ContentBlock::Image { .. } => {
+                has_images = true;
+                content_items.push(block_to_content_item(block));
+            }
+            _ => {
+                let t = block_to_text(block);
+                if !t.is_empty() {
+                    content_items.push(json!({ "type": "text", "text": t }));
+                }
+            }
+        }
+    }
+
+    // Remaining content: use array form when images are present
+    // (required by OpenAI), plain string otherwise (more compatible).
+    if !content_items.is_empty() {
+        if has_images {
+            out.push(json!({"role": "user", "content": content_items}));
+        } else {
+            let combined: String = content_items
+                .iter()
+                .filter_map(|item| item["text"].as_str().map(str::to_string))
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            if !combined.is_empty() {
+                out.push(json!({"role": "user", "content": combined}));
+            }
+        }
+    }
+
+    out
+}
+
+/// Serialise an assistant message. Returns `None` when empty (e.g. thinking-only
+/// turns from a previous Anthropic session — sending an empty assistant message
+/// causes a 400 from the OpenAI API).
+fn assistant_message_to_json(msg: &Message) -> Option<Value> {
+    let mut text_parts: Vec<String> = Vec::new();
+    let mut tool_calls: Vec<Value> = Vec::new();
+
+    for block in &msg.content {
+        match block {
+            ContentBlock::Text { text } => text_parts.push(text.clone()),
+            ContentBlock::ToolUse {
+                id, name, input, ..
+            } => {
+                let arguments = serde_json::to_string(input).unwrap_or_else(|_| "{}".to_string());
+                tool_calls.push(json!({
+                    "id":   id,
+                    "type": "function",
+                    "function": { "name": name, "arguments": arguments },
+                }));
+            }
+            // Thinking is Anthropic-specific — skip.
+            ContentBlock::Thinking { .. } => {}
+            // Compression markers → plain text so context survives replay.
+            _ => {
+                let t = block_to_text(block);
+                if !t.is_empty() {
+                    text_parts.push(t);
+                }
+            }
+        }
+    }
+
+    let combined = text_parts.join("\n\n");
+    if combined.is_empty() && tool_calls.is_empty() {
+        return None;
+    }
+
+    let mut obj = json!({"role": "assistant"});
+    obj["content"] = if combined.is_empty() {
+        json!(null)
+    } else {
+        json!(combined)
+    };
+    if !tool_calls.is_empty() {
+        obj["tool_calls"] = json!(tool_calls);
+    }
+    Some(obj)
 }
 
 fn collect_text(blocks: &[ContentBlock]) -> String {
