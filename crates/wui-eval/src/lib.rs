@@ -400,7 +400,9 @@ impl ScenarioRunner {
                         let msg = if want_called {
                             format!("ToolCalled: tool '{name}' was not called")
                         } else {
-                            format!("ToolNotCalled: tool '{name}' was called but should not have been")
+                            format!(
+                                "ToolNotCalled: tool '{name}' was called but should not have been"
+                            )
                         };
                         failures.push(msg);
                     }

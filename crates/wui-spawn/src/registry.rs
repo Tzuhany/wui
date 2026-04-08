@@ -74,10 +74,14 @@ impl AgentRegistry {
             Ok(text)
         });
 
-        self.jobs
-            .lock()
-            .await
-            .insert(id, Job { cancel, handle, event_tx });
+        self.jobs.lock().await.insert(
+            id,
+            Job {
+                cancel,
+                handle,
+                event_tx,
+            },
+        );
         id
     }
 

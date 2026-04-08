@@ -290,17 +290,35 @@ impl<S: Stream<Item = AgentEvent> + Unpin> Stream for ObservedStream<S> {
                 })
             }
 
-            AgentEvent::ToolDone { id, name, output, ms, .. } => {
+            AgentEvent::ToolDone {
+                id,
+                name,
+                output,
+                ms,
+                ..
+            } => {
                 self.close_tool_span(id, *ms, None);
                 Some(TimelineEventKind::ToolDone {
-                    id: id.clone(), name: name.clone(), output: output.clone(), ms: *ms,
+                    id: id.clone(),
+                    name: name.clone(),
+                    output: output.clone(),
+                    ms: *ms,
                 })
             }
 
-            AgentEvent::ToolError { id, name, error, ms, .. } => {
+            AgentEvent::ToolError {
+                id,
+                name,
+                error,
+                ms,
+                ..
+            } => {
                 self.close_tool_span(id, *ms, Some(error));
                 Some(TimelineEventKind::ToolError {
-                    id: id.clone(), name: name.clone(), error: error.clone(), ms: *ms,
+                    id: id.clone(),
+                    name: name.clone(),
+                    error: error.clone(),
+                    ms: *ms,
                 })
             }
 
@@ -309,19 +327,27 @@ impl<S: Stream<Item = AgentEvent> + Unpin> Stream for ObservedStream<S> {
                 chars_removed: None,
             }),
 
-            AgentEvent::Retrying { attempt, delay_ms, reason } => {
+            AgentEvent::Retrying {
+                attempt,
+                delay_ms,
+                reason,
+            } => {
                 tracing::warn!(
                     parent: &self.run_span, attempt, delay_ms,
                     reason = %reason, "retrying",
                 );
                 Some(TimelineEventKind::Retrying {
-                    attempt: *attempt, delay_ms: *delay_ms, reason: reason.clone(),
+                    attempt: *attempt,
+                    delay_ms: *delay_ms,
+                    reason: reason.clone(),
                 })
             }
 
             AgentEvent::Done(summary) => {
-                self.run_span.record("gen_ai.usage.input_tokens", summary.usage.input_tokens);
-                self.run_span.record("gen_ai.usage.output_tokens", summary.usage.output_tokens);
+                self.run_span
+                    .record("gen_ai.usage.input_tokens", summary.usage.input_tokens);
+                self.run_span
+                    .record("gen_ai.usage.output_tokens", summary.usage.output_tokens);
                 self.run_span.record("wui.iterations", summary.iterations);
                 self.summary = Some(summary.clone());
                 Some(TimelineEventKind::RunDone {

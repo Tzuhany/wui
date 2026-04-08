@@ -223,10 +223,14 @@ fn extract_doc_comment(field: &Field) -> Option<String> {
 
 /// If `ty` is `Option<T>`, returns `(true, T)`. Otherwise returns `(false, ty)`.
 fn extract_option_inner(ty: &Type) -> (bool, &Type) {
-    let Type::Path(tp) = ty else { return (false, ty) };
+    let Type::Path(tp) = ty else {
+        return (false, ty);
+    };
     let seg = tp.path.segments.last().filter(|s| s.ident == "Option");
     let Some(seg) = seg else { return (false, ty) };
-    let syn::PathArguments::AngleBracketed(ab) = &seg.arguments else { return (false, ty) };
+    let syn::PathArguments::AngleBracketed(ab) = &seg.arguments else {
+        return (false, ty);
+    };
     match ab.args.first() {
         Some(syn::GenericArgument::Type(inner)) => (true, inner),
         _ => (false, ty),
@@ -236,12 +240,14 @@ fn extract_option_inner(ty: &Type) -> (bool, &Type) {
 /// Map a Rust type to a JSON Schema type string.
 fn rust_type_to_json_type(ty: &Type) -> &'static str {
     let Type::Path(tp) = ty else { return "string" };
-    let Some(seg) = tp.path.segments.last() else { return "string" };
+    let Some(seg) = tp.path.segments.last() else {
+        return "string";
+    };
     match seg.ident.to_string().as_str() {
         "String" | "str" => "string",
         "bool" => "boolean",
-        "u8" | "u16" | "u32" | "u64" | "u128" | "usize" | "i8" | "i16" | "i32" | "i64"
-        | "i128" | "isize" => "integer",
+        "u8" | "u16" | "u32" | "u64" | "u128" | "usize" | "i8" | "i16" | "i32" | "i64" | "i128"
+        | "isize" => "integer",
         "f32" | "f64" => "number",
         "Vec" => "array",
         "HashMap" | "BTreeMap" | "IndexMap" | "Value" => "object",

@@ -251,7 +251,10 @@ impl SseParser {
 
                 if block_type == "tool_use" {
                     self.tool_index.insert(index, id.clone());
-                    return Ok(Some(StreamEvent::ToolUseStart { id: id.into(), name }));
+                    return Ok(Some(StreamEvent::ToolUseStart {
+                        id: id.into(),
+                        name,
+                    }));
                 }
                 Ok(None)
             }
@@ -259,18 +262,28 @@ impl SseParser {
             "content_block_delta" => {
                 let index = v["index"].as_u64().unwrap_or(0);
                 match v["delta"]["type"].as_str().unwrap_or("") {
-                    "text_delta" => Ok(Some(StreamEvent::TextDelta { text: jstr(&v["delta"]["text"]) })),
-                    "thinking_delta" => Ok(Some(StreamEvent::ThinkingDelta { text: jstr(&v["delta"]["thinking"]) })),
+                    "text_delta" => Ok(Some(StreamEvent::TextDelta {
+                        text: jstr(&v["delta"]["text"]),
+                    })),
+                    "thinking_delta" => Ok(Some(StreamEvent::ThinkingDelta {
+                        text: jstr(&v["delta"]["thinking"]),
+                    })),
                     "input_json_delta" => {
                         let id: ToolCallId = self
                             .tool_index
                             .get(&index)
                             .map(|id| ToolCallId::from(id.as_str()))
                             .unwrap_or_else(|| {
-                                tracing::error!(index, "input_json_delta for unknown content-block index");
+                                tracing::error!(
+                                    index,
+                                    "input_json_delta for unknown content-block index"
+                                );
                                 format!("unknown_tool_{index}").into()
                             });
-                        Ok(Some(StreamEvent::ToolInputDelta { id, chunk: jstr(&v["delta"]["partial_json"]) }))
+                        Ok(Some(StreamEvent::ToolInputDelta {
+                            id,
+                            chunk: jstr(&v["delta"]["partial_json"]),
+                        }))
                     }
                     _ => Ok(None),
                 }
@@ -703,7 +716,9 @@ mod tests {
             // message_delta (end)
             let data = r#"{"delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":50}}"#;
             let r = parser.parse("message_delta", data).unwrap();
-            assert!(matches!(r, Some(StreamEvent::MessageEnd { usage, .. }) if usage.input_tokens == 100 && usage.output_tokens == 50));
+            assert!(
+                matches!(r, Some(StreamEvent::MessageEnd { usage, .. }) if usage.input_tokens == 100 && usage.output_tokens == 50)
+            );
         }
     }
 }

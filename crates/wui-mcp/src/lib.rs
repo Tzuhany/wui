@@ -158,8 +158,7 @@ impl McpClient {
                     name: spec.name.into(),
                     description: spec.description.map(Into::into).unwrap_or_default(),
                     schema: Value::Object(
-                        Arc::try_unwrap(spec.input_schema)
-                            .unwrap_or_else(|arc| (*arc).clone()),
+                        Arc::try_unwrap(spec.input_schema).unwrap_or_else(|arc| (*arc).clone()),
                     ),
                     service: service.clone(),
                 }) as Arc<dyn Tool>

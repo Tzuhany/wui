@@ -659,7 +659,9 @@ async fn run_loop(
         let stream = match call_with_retry(&config, &req, tx).await {
             Ok(s) => s,
             Err(e) if is_prompt_too_long(&e) => {
-                tracing::warn!("provider rejected prompt as too long — attempting emergency compression");
+                tracing::warn!(
+                    "provider rejected prompt as too long — attempting emergency compression"
+                );
                 let result = config
                     .compress
                     .compress(
@@ -669,8 +671,16 @@ async fn run_loop(
                     )
                     .await;
                 match result {
-                    Ok(CompressResult { method: Some(method), freed, messages: new_msgs }) => {
-                        tracing::info!(?method, freed, "emergency compression succeeded — retrying");
+                    Ok(CompressResult {
+                        method: Some(method),
+                        freed,
+                        messages: new_msgs,
+                    }) => {
+                        tracing::info!(
+                            ?method,
+                            freed,
+                            "emergency compression succeeded — retrying"
+                        );
                         messages = new_msgs;
                         tx.send(AgentEvent::Compressed { method, freed }).await.ok();
                         continue; // restart iteration with compressed messages
@@ -1365,7 +1375,11 @@ async fn emit_tool_event(done: &CompletedTool, tx: &mpsc::Sender<AgentEvent>) {
 }
 
 /// Create an immediately-completed failed tool (no execution, no timer).
-fn instant_failure(id: ToolCallId, name: String, output: wui_core::tool::ToolOutput) -> CompletedTool {
+fn instant_failure(
+    id: ToolCallId,
+    name: String,
+    output: wui_core::tool::ToolOutput,
+) -> CompletedTool {
     CompletedTool {
         id,
         name,

@@ -365,7 +365,11 @@ impl CompressPipeline {
         };
 
         let working = after_aggregate.unwrap_or_else(|| {
-            if l1_reduced { trimmed } else { messages.to_vec() }
+            if l1_reduced {
+                trimmed
+            } else {
+                messages.to_vec()
+            }
         });
 
         if !self.should_compress(&working) {
@@ -418,7 +422,12 @@ impl CompressPipeline {
     /// Truncate a single ToolResult block if it exceeds the token budget.
     /// Non-ToolResult blocks are returned as-is.
     fn trim_block(&self, block: &ContentBlock) -> ContentBlock {
-        let ContentBlock::ToolResult { tool_use_id, content, is_error } = block else {
+        let ContentBlock::ToolResult {
+            tool_use_id,
+            content,
+            is_error,
+        } = block
+        else {
             return block.clone();
         };
         let tokens = self.estimate_tokens(content);
@@ -531,7 +540,12 @@ impl CompressPipeline {
         if keep {
             return block.clone();
         }
-        let ContentBlock::ToolResult { tool_use_id, is_error, .. } = block else {
+        let ContentBlock::ToolResult {
+            tool_use_id,
+            is_error,
+            ..
+        } = block
+        else {
             return block.clone();
         };
         ContentBlock::ToolResult {
@@ -1229,7 +1243,7 @@ mod tests {
         let p = CompressPipeline {
             window_tokens: 1000,
             compact_threshold: 0.05, // very sensitive: any content triggers
-            budget_per_result: 10, // 10 token limit per result
+            budget_per_result: 10,   // 10 token limit per result
             token_estimator: estimator(4),
             collapse_keep_min: 2,
             collapse_keep_fraction: 0.5,

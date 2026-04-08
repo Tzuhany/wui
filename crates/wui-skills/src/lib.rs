@@ -181,8 +181,9 @@ impl Tool for SkillTool {
             ));
         }
 
-        let mut output = ToolOutput::success(format!("Skill '{}' loaded into context.", self.skill_name))
-            .inject(ContextInjection::new(injection));
+        let mut output =
+            ToolOutput::success(format!("Skill '{}' loaded into context.", self.skill_name))
+                .inject(ContextInjection::new(injection));
 
         // Expose manifest as structured data for hooks, callers, or runtime
         // integrations that want to programmatically react to skill activation
@@ -230,7 +231,11 @@ async fn parse_skill_file(path: &PathBuf) -> anyhow::Result<SkillTool> {
         } else if let Some(v) = line.strip_prefix("description:") {
             desc = Some(v.trim().to_string());
         } else if let Some(v) = line.strip_prefix("allowed_tools:") {
-            manifest.allowed_tools = v.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+            manifest.allowed_tools = v
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
         } else if let Some(v) = line.strip_prefix("effort:") {
             manifest.effort = Some(v.trim().to_string());
         } else if let Some(v) = line.strip_prefix("model:") {

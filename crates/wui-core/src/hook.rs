@@ -119,7 +119,6 @@ pub enum HookEvent<'a> {
     },
 
     // ── Lifecycle events (informational, decision is ignored) ──────────
-
     /// A session has started (or resumed from a store).
     SessionStart { session_id: &'a SessionId },
 
@@ -140,7 +139,6 @@ pub enum HookEvent<'a> {
     },
 
     // ── Decision events ─────────────────────────────────────────────
-
     /// The run is about to stop for any reason. The hook runs before the
     /// `RunSummary` is returned to the caller.
     ///

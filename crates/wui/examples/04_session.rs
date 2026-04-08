@@ -24,7 +24,9 @@ async fn main() -> anyhow::Result<()> {
 
     // ── Turn 1 ────────────────────────────────────────────────────────────────
     println!("User: My favourite colour is blue.");
-    let mut stream = session.send("My favourite colour is blue. Just acknowledge.").await;
+    let mut stream = session
+        .send("My favourite colour is blue. Just acknowledge.")
+        .await;
 
     while let Some(event) = stream.next().await {
         match event {

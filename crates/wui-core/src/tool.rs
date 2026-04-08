@@ -220,7 +220,10 @@ pub trait Tool: Send + Sync + 'static {
     ///     }))
     /// }
     /// ```
-    fn permission_matcher(&self, _input: &Value) -> Option<Box<dyn Fn(&str) -> bool + Send + Sync>> {
+    fn permission_matcher(
+        &self,
+        _input: &Value,
+    ) -> Option<Box<dyn Fn(&str) -> bool + Send + Sync>> {
         None
     }
 
