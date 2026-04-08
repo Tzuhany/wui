@@ -455,159 +455,135 @@ async fn run_task(
 
 // ── Main loop ─────────────────────────────────────────────────────────────────
 
+/// Mutable state carried across iterations of the run loop.
+struct RunState {
+    messages: Vec<Message>,
+    total_usage: TokenUsage,
+    iterations: u32,
+    /// Augmented system prompt (base + deferred tool listings).
+    system: String,
+    /// How many times max_tokens has been bumped after MaxTokens stops.
+    token_escalations: u32,
+    /// Consecutive turns below MIN_USEFUL_OUTPUT_TOKENS.
+    low_output_streak: u32,
+    /// Effective max_tokens for the current call; may be escalated mid-run.
+    effective_max_tokens: u32,
+    /// True when a PreStop hook already blocked — prevents infinite loops.
+    stop_hook_active: bool,
+    /// Tools injected at runtime by ToolOutput::expose (e.g., via tool_search).
+    dynamic_tools: HashMap<String, Arc<dyn wui_core::tool::Tool>>,
+}
+
+impl RunState {
+    fn summary(&self, stop_reason: RunStopReason) -> RunSummary {
+        RunSummary {
+            stop_reason,
+            iterations: self.iterations,
+            usage: self.total_usage.clone(),
+            messages: self.messages.clone(),
+        }
+    }
+}
+
 async fn run_loop(
     config: Arc<RunConfig>,
-    mut messages: Vec<Message>,
+    messages: Vec<Message>,
     cancel: CancellationToken,
     tx: &mpsc::Sender<AgentEvent>,
 ) -> Result<RunSummary, AgentError> {
-    // Augment the system prompt with deferred tool listings once, before the loop.
-    // This tells the LLM which additional tools exist so it can call ToolSearch.
-    let system = augment_system(&config.system, &config.tools);
-
-    let mut total_usage = TokenUsage::default();
-    let mut iterations = 0u32;
+    let mut s = RunState {
+        system: augment_system(&config.system, &config.tools),
+        total_usage: TokenUsage::default(),
+        iterations: 0,
+        token_escalations: 0,
+        low_output_streak: 0,
+        effective_max_tokens: config.max_tokens,
+        stop_hook_active: false,
+        dynamic_tools: HashMap::new(),
+        messages,
+    };
 
     // ── Checkpoint restore ────────────────────────────────────────────────────
-    // If a checkpoint store and run ID are configured, attempt to restore from
-    // a previously saved state. This lets a run resume mid-task after a crash,
-    // process restart, or deliberate interruption.
     if let (Some(store), Some(run_id)) = (&config.checkpoint_store, &config.checkpoint_run_id) {
         match store.load(run_id).await {
             Ok(Some(cp)) => {
                 tracing::info!(
                     run_id,
                     iteration = cp.iteration,
-                    "checkpoint found — resuming from saved state"
+                    "checkpoint found — resuming"
                 );
-                messages = cp.messages;
-                iterations = cp.iteration;
-                total_usage = cp.total_usage;
+                s.messages = cp.messages;
+                s.iterations = cp.iteration;
+                s.total_usage = cp.total_usage;
             }
-            Ok(None) => {
-                tracing::debug!(run_id, "no checkpoint found — starting fresh");
-            }
-            Err(e) => {
-                tracing::warn!(run_id, error = %e, "checkpoint load failed — starting fresh");
-            }
+            Ok(None) => tracing::debug!(run_id, "no checkpoint found — starting fresh"),
+            Err(e) => tracing::warn!(run_id, error = %e, "checkpoint load failed — starting fresh"),
         }
     }
-    // ── Error-recovery state ──────────────────────────────────────────────────
-    // Carried across iterations; reset only on non-error turns.
-    let mut token_escalations = 0u32; // how many times we've bumped max_tokens
-    let mut low_output_streak = 0u32; // consecutive turns below MIN_USEFUL_OUTPUT_TOKENS
-                                      // The effective max_tokens for the current call; may be escalated mid-run.
-    let mut effective_max_tokens = config.max_tokens;
-    // ── PreStop hook state ────────────────────────────────────────────────────
-    // Tracks whether the PreStop hook already blocked the current stop attempt.
-    // When true, Block decisions are ignored (stop proceeds) to prevent infinite
-    // loops. Reset to false after any productive tool-use iteration.
-    let mut stop_hook_active = false;
-    // ── Dynamic tools ─────────────────────────────────────────────────────────
-    // Tools injected at runtime by ToolOutput::expose (e.g., via tool_search).
-    // Merged with the static registry each iteration.
-    let mut dynamic_tools: HashMap<String, Arc<dyn wui_core::tool::Tool>> = HashMap::new();
 
     loop {
         if cancel.is_cancelled() {
-            tracing::info!(iterations, "agent run cancelled");
-            return Ok(RunSummary {
-                stop_reason: RunStopReason::Cancelled,
-                iterations,
-                usage: total_usage,
-                messages,
-            });
+            return Ok(s.summary(RunStopReason::Cancelled));
         }
 
-        if iterations >= config.max_iter {
-            tracing::warn!(
-                iterations,
-                max_iter = config.max_iter,
-                "agent hit max iterations"
-            );
-            // When stop_hook_active is true the hook already blocked once —
-            // stop unconditionally to prevent an infinite loop.
-            if !stop_hook_active {
+        if s.iterations >= config.max_iter {
+            if !s.stop_hook_active {
                 match config
                     .hooks
                     .pre_stop(
-                        last_assistant_text(&messages),
+                        last_assistant_text(&s.messages),
                         RunStopReason::MaxIterations,
                         false,
                     )
                     .await
                 {
                     HookDecision::Block { reason } => {
-                        tracing::debug!(
-                            "pre_stop hook blocked MaxIterations — granting one extra iteration"
-                        );
-                        messages.push(system_reminder_msg(&reason));
-                        stop_hook_active = true;
-                        // fall through: run one more LLM iteration
+                        s.messages.push(system_reminder_msg(&reason));
+                        s.stop_hook_active = true;
                     }
-                    _ => {
-                        return Ok(RunSummary {
-                            stop_reason: RunStopReason::MaxIterations,
-                            iterations,
-                            usage: total_usage,
-                            messages,
-                        })
-                    }
+                    _ => return Ok(s.summary(RunStopReason::MaxIterations)),
                 }
             } else {
-                return Ok(RunSummary {
-                    stop_reason: RunStopReason::MaxIterations,
-                    iterations,
-                    usage: total_usage,
-                    messages,
-                });
+                return Ok(s.summary(RunStopReason::MaxIterations));
             }
         }
 
         tracing::debug!(
-            iteration = iterations,
-            messages = messages.len(),
+            iteration = s.iterations,
+            messages = s.messages.len(),
             "iteration start"
         );
-
-        config.hooks.notify_turn_start(&messages).await;
+        config.hooks.notify_turn_start(&s.messages).await;
 
         // ── Context compression ──────────────────────────────────────────
-        maybe_compress(&config, &mut messages, tx).await;
+        maybe_compress(&config, &mut s.messages, tx).await;
 
-        if config.compress.is_critically_full(&messages) {
-            tracing::warn!(iterations, "context overflow: cannot relieve pressure");
-            return Ok(RunSummary {
-                stop_reason: RunStopReason::ContextOverflow,
-                iterations,
-                usage: total_usage,
-                messages,
-            });
+        if config.compress.is_critically_full(&s.messages) {
+            return Ok(s.summary(RunStopReason::ContextOverflow));
         }
 
-        // Merge static registry with dynamic tools discovered this run.
-        let active_registry = if dynamic_tools.is_empty() {
+        let active_registry = if s.dynamic_tools.is_empty() {
             config.tools.clone()
         } else {
-            Arc::new(config.tools.with_dynamic(&dynamic_tools))
+            Arc::new(config.tools.with_dynamic(&s.dynamic_tools))
         };
 
         let req = ChatRequest {
             model: config.model.clone(),
-            max_tokens: effective_max_tokens,
+            max_tokens: s.effective_max_tokens,
             temperature: config.temperature,
-            system: system.clone(),
-            messages: messages.clone(),
+            system: s.system.clone(),
+            messages: s.messages.clone(),
             tools: active_registry.tool_defs(),
             thinking_budget: config.thinking_budget,
         };
 
         // ── Call provider with retry ──────────────────────────────────────
         let stream = match call_with_retry(&config, &req, tx).await {
-            Ok(s) => s,
+            Ok(stream) => stream,
             Err(e) if is_prompt_too_long(&e) => {
-                if emergency_compress(&config, &mut messages, tx).await {
-                    continue; // restart iteration with compressed messages
+                if emergency_compress(&config, &mut s.messages, tx).await {
+                    continue;
                 }
                 return Err(e);
             }
@@ -762,29 +738,12 @@ async fn run_loop(
             }
         }
 
-        // ── Stream-drop recovery ───────────────────────────────────────────────
-        //
-        // If we exited without a MessageEnd (network drop mid-stream), we have
-        // two cases:
-        //
-        //   Clean (no tools seen yet): no state is locked in. Retry this
-        //   iteration transparently — `continue` restarts from `call_with_retry`.
-        //
-        //   Dirty (ToolUse blocks already built): we've committed ToolUse blocks
-        //   to the assistant message. Restarting would produce duplicate blocks.
-        //   Surface a retryable error so the caller can restart the full run.
+        // ── Stream-drop recovery ──────────────────────────────────────────
         if !got_message_end {
             if submission_order.is_empty() {
-                tracing::warn!(
-                    iterations,
-                    "stream ended without MessageEnd, no tools in flight — retrying"
-                );
+                tracing::warn!(s.iterations, "stream ended without MessageEnd — retrying");
                 continue;
             }
-            tracing::error!(
-                iterations,
-                "stream dropped mid-response with tools in flight"
-            );
             return Err(AgentError::retryable(
                 "provider stream dropped mid-response with tools in flight",
             ));
@@ -843,7 +802,7 @@ async fn run_loop(
                         injections,
                     } => {
                         auth_injections.extend(injections);
-                        let history_snap = Arc::from(messages.as_slice());
+                        let history_snap = Arc::from(s.messages.as_slice());
                         tracing::debug!(tool = %name, "tool dispatched");
                         tx.send(AgentEvent::ToolStart {
                             id: id.clone(),
@@ -915,7 +874,7 @@ async fn run_loop(
             match decision {
                 HookDecision::Block { reason } => {
                     tracing::debug!(tool = %tool_name, %reason, "post-tool hook blocked output");
-                    messages.push(system_reminder_msg(&format!(
+                    s.messages.push(system_reminder_msg(&format!(
                         "The output of tool '{tool_name}' was blocked by policy: {reason}. \
                          Do not use this output.",
                     )));
@@ -938,11 +897,8 @@ async fn run_loop(
             }
         }
 
-        // ── Apply auth injections ──────────────────────────────────────────────
-        // HITL permission messages collected during authorization. These go
-        // before the assistant message so the LLM sees them as context for
-        // why certain tools were approved or denied on the next call.
-        messages.extend(auth_injections);
+        // ── Apply auth injections ─────────────────────────────────────────
+        s.messages.extend(auth_injections);
 
         // ── Build assistant message ────────────────────────────────────────────
         // Thinking first (so the LLM can reference its reasoning), then text,
@@ -958,7 +914,7 @@ async fn run_loop(
             assistant_blocks.insert(0, ContentBlock::Thinking { text: thinking_buf });
         }
         if !assistant_blocks.is_empty() {
-            messages.push(Message::assistant(assistant_blocks));
+            s.messages.push(Message::assistant(assistant_blocks));
         }
 
         // ── Append tool results in submission order ────────────────────────────
@@ -973,10 +929,10 @@ async fn run_loop(
                 .filter_map(|id| completed_map.remove(id))
                 .collect();
 
-            // Collect dynamic tools exposed by tool results.
             for done in &done_tools {
                 for tool in &done.output.expose_tools {
-                    dynamic_tools.insert(tool.name().to_string(), Arc::clone(tool));
+                    s.dynamic_tools
+                        .insert(tool.name().to_string(), Arc::clone(tool));
                 }
             }
 
@@ -1004,18 +960,16 @@ async fn run_loop(
                 .collect();
 
             if !result_blocks.is_empty() {
-                messages.push(Message::with_id(
+                s.messages.push(Message::with_id(
                     uuid::Uuid::new_v4().to_string(),
                     Role::User,
                     result_blocks,
                 ));
             }
 
-            // Inject context after the tool results. These are system-level
-            // reminders the tool wanted the LLM to see on the next turn.
             for done in &done_tools {
                 for injection in &done.output.injections {
-                    messages.push(system_reminder_msg(&injection.text));
+                    s.messages.push(system_reminder_msg(&injection.text));
                 }
             }
         }
@@ -1029,47 +983,38 @@ async fn run_loop(
             "llm call complete"
         );
 
-        total_usage += usage.clone();
-        iterations += 1;
+        s.total_usage += usage.clone();
+        s.iterations += 1;
 
-        // ── Checkpoint save ────────────────────────────────────────────────────
-        // Save after every tool-use iteration so a resume can pick up from the
-        // most recent complete tool exchange. We only checkpoint after tool use
-        // (not after text-only turns) because a text-only turn with no new tool
-        // results doesn't add resumable state to the history.
+        // ── Checkpoint save (only after tool-use iterations) ──────────────
         if !submission_order.is_empty() {
             if let (Some(store), Some(run_id)) =
                 (&config.checkpoint_store, &config.checkpoint_run_id)
             {
                 let cp = RunCheckpoint {
                     run_id: run_id.clone(),
-                    messages: messages.clone(),
-                    iteration: iterations,
-                    total_usage: total_usage.clone(),
+                    messages: s.messages.clone(),
+                    iteration: s.iterations,
+                    total_usage: s.total_usage.clone(),
                 };
                 if let Err(e) = store.save(run_id, &cp).await {
-                    tracing::warn!(run_id, error = %e, "checkpoint save failed — continuing");
-                } else {
-                    tracing::debug!(run_id, iteration = iterations, "checkpoint saved");
+                    tracing::warn!(run_id, error = %e, "checkpoint save failed");
                 }
             }
         }
 
-        // ── Token budget ───────────────────────────────────────────────────────
+        // ── Token budget ──────────────────────────────────────────────────
         if let Some(budget) = config.token_budget {
-            let spent = total_usage.input_tokens as u64 + total_usage.output_tokens as u64;
+            let spent = s.total_usage.input_tokens as u64 + s.total_usage.output_tokens as u64;
             if spent >= budget {
-                tracing::info!(iterations, spent, budget, "token budget exhausted");
                 handle_stop! {
                     hooks        = config.hooks,
-                    messages     = messages,
-                    iterations   = iterations,
-                    total_usage  = total_usage,
-                    stop_active  = stop_hook_active,
+                    messages     = s.messages,
+                    iterations   = s.iterations,
+                    total_usage  = s.total_usage,
+                    stop_active  = s.stop_hook_active,
                     reason       = RunStopReason::BudgetExhausted,
-                    extra_on_block = {
-                        tracing::debug!("pre_stop hook blocked BudgetExhausted");
-                    },
+                    extra_on_block = {},
                     on_mutate    = |_content| {},
                 };
             }
@@ -1085,58 +1030,36 @@ async fn run_loop(
         //   2. Inject a continuation prompt so the LLM picks up where it left off.
         //   3. If both fail, return MaxTokensExhausted.
         if stop_reason == StopReason::MaxTokens {
-            token_escalations += 1;
-
-            if token_escalations == 1 {
-                // First hit: escalate and retry the same turn.
-                let escalated = (effective_max_tokens * TOKEN_ESCALATION_FACTOR).min(131_072); // hard ceiling
-                tracing::warn!(
-                    iterations,
-                    current = effective_max_tokens,
-                    escalated,
-                    "MaxTokens hit — escalating max_tokens"
-                );
-                effective_max_tokens = escalated;
-                // Don't advance the iteration counter; retry immediately.
+            s.token_escalations += 1;
+            if s.token_escalations == 1 {
+                s.effective_max_tokens =
+                    (s.effective_max_tokens * TOKEN_ESCALATION_FACTOR).min(131_072);
                 continue;
-            } else if token_escalations <= MAX_TOKEN_ESCALATIONS {
-                // Subsequent hits: inject a continuation prompt.
-                tracing::warn!(
-                    iterations,
-                    escalation = token_escalations,
-                    "MaxTokens hit again — injecting continuation prompt"
-                );
-                messages.push(Message::user(
+            } else if s.token_escalations <= MAX_TOKEN_ESCALATIONS {
+                s.messages.push(Message::user(
                     "Your previous response was truncated due to length limits. \
                      Continue exactly where you left off. Do not repeat what you already said.",
                 ));
                 continue;
             } else {
-                tracing::error!(
-                    iterations,
-                    escalations = token_escalations,
-                    "MaxTokens exhausted after escalation and continuation — aborting"
-                );
                 handle_stop! {
                     hooks        = config.hooks,
-                    messages     = messages,
-                    iterations   = iterations,
-                    total_usage  = total_usage,
-                    stop_active  = stop_hook_active,
+                    messages     = s.messages,
+                    iterations   = s.iterations,
+                    total_usage  = s.total_usage,
+                    stop_active  = s.stop_hook_active,
                     reason       = RunStopReason::MaxTokensExhausted,
                     extra_on_block = {
-                        tracing::debug!("pre_stop hook blocked MaxTokensExhausted");
-                        token_escalations = 0;
-                        effective_max_tokens = config.max_tokens;
+                        s.token_escalations = 0;
+                        s.effective_max_tokens = config.max_tokens;
                     },
                     on_mutate    = |_content| {},
                 };
             }
         }
 
-        // Reset escalation state on a normal (non-MaxTokens) turn.
-        token_escalations = 0;
-        effective_max_tokens = config.max_tokens;
+        s.token_escalations = 0;
+        s.effective_max_tokens = config.max_tokens;
 
         // ── Diminishing returns ────────────────────────────────────────────────
         //
@@ -1150,27 +1073,18 @@ async fn run_loop(
         if !config.ignore_diminishing_returns {
             if stop_reason == StopReason::ToolUse || usage.output_tokens >= MIN_USEFUL_OUTPUT_TOKENS
             {
-                low_output_streak = 0;
+                s.low_output_streak = 0;
             } else {
-                low_output_streak += 1;
-                if low_output_streak >= MAX_LOW_OUTPUT_TURNS {
-                    tracing::warn!(
-                        iterations,
-                        streak = low_output_streak,
-                        "diminishing returns: stopping after {} low-output turns",
-                        low_output_streak
-                    );
+                s.low_output_streak += 1;
+                if s.low_output_streak >= MAX_LOW_OUTPUT_TURNS {
                     handle_stop! {
                         hooks        = config.hooks,
-                        messages     = messages,
-                        iterations   = iterations,
-                        total_usage  = total_usage,
-                        stop_active  = stop_hook_active,
+                        messages     = s.messages,
+                        iterations   = s.iterations,
+                        total_usage  = s.total_usage,
+                        stop_active  = s.stop_hook_active,
                         reason       = RunStopReason::DiminishingReturns,
-                        extra_on_block = {
-                            tracing::debug!("pre_stop hook blocked DiminishingReturns");
-                            low_output_streak = 0; // reset streak so the hook's injection gets a fair turn
-                        },
+                        extra_on_block = { s.low_output_streak = 0; },
                         on_mutate    = |_content| {},
                     };
                 }
@@ -1178,33 +1092,22 @@ async fn run_loop(
         }
 
         if stop_reason == StopReason::EndTurn {
-            tracing::info!(
-                iterations,
-                input_tokens = total_usage.input_tokens,
-                output_tokens = total_usage.output_tokens,
-                "agent run completed"
-            );
             handle_stop! {
                 hooks        = config.hooks,
-                messages     = messages,
-                iterations   = iterations,
-                total_usage  = total_usage,
-                stop_active  = stop_hook_active,
+                messages     = s.messages,
+                iterations   = s.iterations,
+                total_usage  = s.total_usage,
+                stop_active  = s.stop_hook_active,
                 reason       = RunStopReason::Completed,
-                extra_on_block = {
-                    tracing::debug!("pre_stop hook blocked Completed — retrying");
-                },
+                extra_on_block = {},
                 on_mutate    = |content| {
-                    tracing::debug!("pre_stop hook mutated final response");
-                    replace_last_assistant_text(&mut messages, content);
+                    replace_last_assistant_text(&mut s.messages, content);
                 },
             };
         }
 
-        // stop_reason == ToolUse → loop with tool results appended.
-        // A productive tool-use turn means the agent is making progress —
-        // reset the stop-hook flag so PreStop fires fresh on the next stop.
-        stop_hook_active = false;
+        // ToolUse → loop continues. Reset stop-hook flag.
+        s.stop_hook_active = false;
     }
 }
 
