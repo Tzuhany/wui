@@ -17,6 +17,8 @@ pub use checkpoint::{
     CheckpointStore, FileCheckpointStore, InMemoryCheckpointStore, RunCheckpoint,
 };
 pub use executor::{ExecutorHints, ResultStore};
-pub use permission::{PermissionMode, PermissionRules, PermissionVerdict, SessionPermissions};
+pub use permission::{
+    PermissionMode, PermissionRules, PermissionSource, PermissionVerdict, SessionPermissions,
+};
 pub use run::{RetryPolicy, RunStream};
 pub use session_store::{InMemorySessionStore, SessionStore, SessionStoreError, StoredSession};

@@ -593,6 +593,7 @@ async fn run_loop(
         // threshold. This avoids a full Vec<Message> clone on every iteration
         // when the context is small enough to skip compression entirely.
         if config.compress.pressure(&messages) >= config.compress.threshold() {
+            let pressure_before = config.compress.pressure(&messages);
             let result = config
                 .compress
                 .compress(
@@ -607,12 +608,20 @@ async fn run_loop(
                     freed,
                     messages: new_msgs,
                 }) => {
-                    tracing::debug!(method = ?method, freed_tokens = freed, "context compressed");
+                    let pressure_after = config.compress.pressure(&new_msgs);
+                    tracing::debug!(method = ?method, freed_tokens = freed, %pressure_before, %pressure_after, "context compressed");
                     messages = new_msgs;
                     if method == wui_core::event::CompressMethod::L3Failed {
                         tx.send(AgentEvent::CompressFallback { freed }).await.ok();
                     }
-                    tx.send(AgentEvent::Compressed { method, freed }).await.ok();
+                    tx.send(AgentEvent::Compressed {
+                        method,
+                        freed,
+                        pressure_before,
+                        pressure_after,
+                    })
+                    .await
+                    .ok();
                 }
                 Ok(_) => {} // compression checked but not needed
                 Err(e) => {
@@ -662,6 +671,7 @@ async fn run_loop(
                 tracing::warn!(
                     "provider rejected prompt as too long — attempting emergency compression"
                 );
+                let pressure_before = config.compress.pressure(&messages);
                 let result = config
                     .compress
                     .compress(
@@ -676,13 +686,20 @@ async fn run_loop(
                         freed,
                         messages: new_msgs,
                     }) => {
+                        let pressure_after = config.compress.pressure(&new_msgs);
                         tracing::info!(
-                            ?method,
-                            freed,
+                            ?method, freed, %pressure_before, %pressure_after,
                             "emergency compression succeeded — retrying"
                         );
                         messages = new_msgs;
-                        tx.send(AgentEvent::Compressed { method, freed }).await.ok();
+                        tx.send(AgentEvent::Compressed {
+                            method,
+                            freed,
+                            pressure_before,
+                            pressure_after,
+                        })
+                        .await
+                        .ok();
                         continue; // restart iteration with compressed messages
                     }
                     _ => {
@@ -1504,12 +1521,16 @@ async fn authorize_tool(
         .await;
 
     match verdict {
-        PermissionVerdict::Allowed => return (Ok(input), vec![]),
-        PermissionVerdict::Denied { reason } => {
+        PermissionVerdict::Allowed { source } => {
+            tracing::debug!(tool = %name, ?source, "permission granted");
+            return (Ok(input), vec![]);
+        }
+        PermissionVerdict::Denied { reason, source } => {
+            tracing::debug!(tool = %name, ?source, %reason, "permission denied");
             return (
                 Err(instant_failure(id, name, output_permission_denied(reason))),
                 vec![],
-            )
+            );
         }
         // NeedsApproval: fall through to mode-based check below.
         // The verdict returns NeedsApproval for both Ask and Callback modes;

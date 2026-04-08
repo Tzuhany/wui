@@ -318,12 +318,41 @@ pub struct PermissionCheck<'a> {
 /// Combines static rules, session memory, and mode-based decisions into a
 /// single value. The `PreToolUse` hook and HITL approval flow are handled
 /// separately in `run.rs` — they are not part of this verdict.
+/// Which step of the permission pipeline produced the decision.
+///
+/// Exposed for auditing and debugging — lets callers answer "why was
+/// this tool allowed/denied?" without guessing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PermissionSource {
+    /// A static `.deny_tool()` rule matched.
+    StaticDeny,
+    /// A static `.allow_tool()` rule matched.
+    StaticAllow,
+    /// The user previously chose `DenyAlways` for this tool in this session.
+    SessionDeny,
+    /// The user previously chose `ApproveAlways` for this tool in this session.
+    SessionAllow,
+    /// `PermissionMode::Auto` allowed the call.
+    ModeAuto,
+    /// `PermissionMode::Readonly` allowed a readonly tool.
+    ModeReadonly,
+    /// `PermissionMode::Readonly` denied a non-readonly tool.
+    ModeReadonlyDenied,
+    /// `PermissionMode::Ask` or `Callback` requires human decision.
+    ModeAsk,
+    /// The tool requires interaction but the mode is Auto.
+    StructuralDeny,
+}
+
 #[derive(Debug)]
 pub enum PermissionVerdict {
     /// The tool call is unconditionally allowed; execute immediately.
-    Allowed,
+    Allowed { source: PermissionSource },
     /// The tool call is unconditionally denied; do not execute.
-    Denied { reason: String },
+    Denied {
+        reason: String,
+        source: PermissionSource,
+    },
     /// Human approval is required before executing (or a Callback must be
     /// invoked with the actual input value — handled in `run.rs`).
     NeedsApproval,
@@ -359,6 +388,7 @@ impl PermissionRules {
                     "tool '{tool_name}' requires user interaction and cannot run in Auto mode; \
                      switch to PermissionMode::Ask or disable this tool for headless runs"
                 ),
+                source: PermissionSource::StructuralDeny,
             };
         }
 
@@ -370,6 +400,7 @@ impl PermissionRules {
         if static_rule == Some(false) {
             return PermissionVerdict::Denied {
                 reason: format!("tool '{tool_name}' is in the configured deny list"),
+                source: PermissionSource::StaticDeny,
             };
         }
 
@@ -377,35 +408,43 @@ impl PermissionRules {
         if session.is_always_denied(tool_name).await {
             return PermissionVerdict::Denied {
                 reason: format!("tool '{tool_name}' was previously denied for this session"),
+                source: PermissionSource::SessionDeny,
             };
         }
 
         // 4. Static allow rules — developer pre-approval (bypasses prompting).
         if static_rule == Some(true) {
-            return PermissionVerdict::Allowed;
+            return PermissionVerdict::Allowed {
+                source: PermissionSource::StaticAllow,
+            };
         }
 
         // 5. Session always-allowed — user's runtime decision to allow.
         if session.is_always_allowed(tool_name).await {
-            return PermissionVerdict::Allowed;
+            return PermissionVerdict::Allowed {
+                source: PermissionSource::SessionAllow,
+            };
         }
 
         // 6. Mode-based check.
         match mode {
-            PermissionMode::Auto => PermissionVerdict::Allowed,
+            PermissionMode::Auto => PermissionVerdict::Allowed {
+                source: PermissionSource::ModeAuto,
+            },
             PermissionMode::Readonly => {
                 if check.is_readonly {
-                    PermissionVerdict::Allowed
+                    PermissionVerdict::Allowed {
+                        source: PermissionSource::ModeReadonly,
+                    }
                 } else {
                     PermissionVerdict::Denied {
                         reason: format!(
                             "tool '{tool_name}' has side effects and is not permitted in read-only mode"
                         ),
+                        source: PermissionSource::ModeReadonlyDenied,
                     }
                 }
             }
-            // Callback mode: we return NeedsApproval so that run.rs can invoke
-            // the callback with the actual input Value (not available here).
             PermissionMode::Ask | PermissionMode::Callback(_) => PermissionVerdict::NeedsApproval,
         }
     }

@@ -162,6 +162,25 @@ pub enum HookEvent<'a> {
 // ── Hook Decision ─────────────────────────────────────────────────────────────
 
 /// What a hook decides to do with an event.
+///
+/// Not all decisions are honoured for all events. The matrix:
+///
+/// | Event             | Allow | Block | Mutate (input) | MutateOutput |
+/// |-------------------|-------|-------|----------------|--------------|
+/// | PreToolUse        | yes   | yes   | **yes**        | ignored      |
+/// | PostToolUse       | yes   | yes   | ignored        | **yes**      |
+/// | PostToolFailure   | yes   | yes   | ignored        | ignored      |
+/// | PreCompact        | yes   | **yes** (inject) | ignored | ignored |
+/// | PreStop           | yes   | **yes** (retry)  | ignored | **yes** (Completed only) |
+/// | SessionStart      | ignored | ignored | ignored   | ignored      |
+/// | TurnStart         | ignored | ignored | ignored   | ignored      |
+/// | TurnEnd           | ignored | ignored | ignored   | ignored      |
+/// | SubagentStart     | ignored | ignored | ignored   | ignored      |
+/// | SubagentEnd       | ignored | ignored | ignored   | ignored      |
+///
+/// **Lifecycle events** (Session/Turn/Subagent) are fire-and-forget
+/// notifications. The decision is always ignored — hooks observe but
+/// cannot alter behaviour. Use these for logging, metrics, and audit.
 #[derive(Debug, Clone)]
 pub enum HookDecision {
     /// Let the action proceed unchanged.

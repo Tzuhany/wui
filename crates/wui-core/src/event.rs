@@ -213,6 +213,10 @@ pub enum AgentEvent {
         method: CompressMethod,
         /// Approximate tokens freed.
         freed: usize,
+        /// Context pressure before compression (0.0–1.0).
+        pressure_before: f64,
+        /// Context pressure after compression (0.0–1.0).
+        pressure_after: f64,
     },
 
     /// L3 (LLM summarization) was attempted but failed and the pipeline fell
