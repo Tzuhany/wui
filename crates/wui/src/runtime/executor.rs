@@ -79,6 +79,22 @@ pub struct CompletedTool {
     pub attempts: u32,
 }
 
+impl CompletedTool {
+    /// Create an immediately-completed tool (zero duration, single attempt).
+    ///
+    /// Used for permission denials, hook blocks, and malformed-input rejections
+    /// where no actual execution takes place.
+    pub(crate) fn immediate(id: ToolCallId, name: String, output: ToolOutput) -> Self {
+        Self {
+            id,
+            name,
+            output,
+            ms: 0,
+            attempts: 1,
+        }
+    }
+}
+
 /// A validated tool waiting in the sequential queue.
 struct QueuedTool {
     id: ToolCallId,

@@ -57,10 +57,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use super::auth::{self, AuthOutcome};
-use super::run_helpers::{
-    augment_system, instant_failure, is_prompt_too_long, last_assistant_text,
-    replace_last_assistant_text, system_reminder_msg, EmissionGuard,
-};
 
 // ── handle_stop! ──────────────────────────────────────────────────────────────
 //
@@ -571,7 +567,7 @@ async fn parse_stream(
                             input: serde_json::Value::Null,
                             summary: None,
                         });
-                        let denied = instant_failure(
+                        let denied = CompletedTool::immediate(
                             id.clone(),
                             name,
                             wui_core::tool::ToolOutput::invalid_input(format!(
@@ -909,28 +905,6 @@ async fn init_run_state(config: &RunConfig, messages: Vec<Message>) -> RunState 
     s
 }
 
-/// Build the `ChatRequest` for the current iteration.
-fn build_request(config: &RunConfig, s: &RunState, registry: &ToolRegistry) -> ChatRequest {
-    ChatRequest {
-        model: config.model.clone(),
-        max_tokens: s.effective_max_tokens,
-        temperature: config.temperature,
-        system: s.system.clone(),
-        messages: s.messages.clone(),
-        tools: registry.tool_defs(),
-        thinking_budget: config.thinking_budget,
-    }
-}
-
-/// Resolve the active tool registry, merging dynamic tools when present.
-fn active_registry(config: &RunConfig, s: &RunState) -> Arc<ToolRegistry> {
-    if s.dynamic_tools.is_empty() {
-        config.tools.clone()
-    } else {
-        Arc::new(config.tools.with_dynamic(&s.dynamic_tools))
-    }
-}
-
 // ── Main loop ────────────────────────────────────────────────────────────────
 
 async fn run_loop(
@@ -957,8 +931,20 @@ async fn run_loop(
         if config.compress.is_critically_full(&s.messages) {
             return Ok(s.summary(RunStopReason::ContextOverflow));
         }
-        let registry = active_registry(&config, &s);
-        let req = build_request(&config, &s, &registry);
+        let registry: Arc<ToolRegistry> = if s.dynamic_tools.is_empty() {
+            config.tools.clone()
+        } else {
+            Arc::new(config.tools.with_dynamic(&s.dynamic_tools))
+        };
+        let req = ChatRequest {
+            model: config.model.clone(),
+            max_tokens: s.effective_max_tokens,
+            temperature: config.temperature,
+            system: s.system.clone(),
+            messages: s.messages.clone(),
+            tools: registry.tool_defs(),
+            thinking_budget: config.thinking_budget,
+        };
         let stream = match call_with_retry(&config, &req, tx).await {
             Ok(stream) => stream,
             Err(e) if is_prompt_too_long(&e) => {
@@ -1258,7 +1244,100 @@ async fn emit_tool_event(done: &CompletedTool, tx: &mpsc::Sender<AgentEvent>) {
     tx.send(event).await.ok();
 }
 
-// Auth, helpers, and small utilities live in auth.rs and run_helpers.rs.
+// ── Run-loop helpers ─────────────────────────────────────────────────────────
+
+/// Guards against double-emission of tool events.
+struct EmissionGuard {
+    emitted: std::collections::HashSet<String>,
+}
+
+impl EmissionGuard {
+    fn new() -> Self {
+        Self {
+            emitted: std::collections::HashSet::new(),
+        }
+    }
+
+    /// Returns `true` if this is the first time — caller should emit.
+    fn first_time(&mut self, id: &str) -> bool {
+        self.emitted.insert(id.to_owned())
+    }
+}
+
+/// Build a system-reminder `Message` from plain text.
+fn system_reminder_msg(text: &str) -> Message {
+    Message {
+        id: uuid::Uuid::new_v4().to_string(),
+        role: Role::System,
+        content: vec![ContentBlock::Text {
+            text: wui_core::fmt::system_reminder(text),
+        }],
+    }
+}
+
+/// Extract the text content of the most recent assistant message.
+fn last_assistant_text(messages: &[Message]) -> &str {
+    messages
+        .iter()
+        .rev()
+        .find_map(|m| {
+            if m.role != Role::Assistant {
+                return None;
+            }
+            m.content.iter().find_map(|b| match b {
+                ContentBlock::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+        })
+        .unwrap_or("")
+}
+
+/// Replace the text content of the most recent assistant message.
+fn replace_last_assistant_text(messages: &mut [Message], new_text: String) {
+    for msg in messages.iter_mut().rev() {
+        if msg.role != Role::Assistant {
+            continue;
+        }
+        for block in msg.content.iter_mut() {
+            if let ContentBlock::Text { text } = block {
+                *text = new_text;
+                return;
+            }
+        }
+    }
+}
+
+/// Append a deferred-tools listing to the system prompt when needed.
+fn augment_system(base: &str, registry: &ToolRegistry) -> String {
+    let deferred = registry.deferred_entries();
+    if deferred.is_empty() {
+        return base.to_string();
+    }
+
+    let listing = deferred
+        .iter()
+        .map(|e| format!("- **{}**: {}", e.name, e.description))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let section = format!(
+        "## Additional tools\n\
+        These tools are available but require loading. \
+        Call `ToolSearch` with the tool name or a keyword before using them:\n\n\
+        {listing}"
+    );
+
+    format!("{base}\n\n{}", wui_core::fmt::system_reminder(&section))
+}
+
+/// Detect whether an `AgentError` indicates a prompt-too-long rejection.
+fn is_prompt_too_long(e: &AgentError) -> bool {
+    let msg = e.message.to_lowercase();
+    msg.contains("prompt is too long")
+        || msg.contains("too long")
+        || msg.contains("maximum context length")
+        || msg.contains("context_length_exceeded")
+}
 
 #[cfg(test)]
 mod tests {

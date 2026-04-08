@@ -217,12 +217,12 @@ struct SseParser {
 }
 
 /// Extract a string from a JSON value, returning an empty string if absent.
-fn jstr(v: &Value) -> String {
+fn json_str(v: &Value) -> String {
     v.as_str().unwrap_or("").to_string()
 }
 
 /// Extract a u32 from a JSON value, returning 0 if absent.
-fn ju32(v: &Value) -> u32 {
+fn json_u32(v: &Value) -> u32 {
     v.as_u64().unwrap_or(0) as u32
 }
 
@@ -239,15 +239,15 @@ impl SseParser {
             // Input tokens arrive in message_start, not message_delta.
             // Capture them here; they are merged into MessageEnd below.
             "message_start" => {
-                self.input_tokens = ju32(&v["message"]["usage"]["input_tokens"]);
+                self.input_tokens = json_u32(&v["message"]["usage"]["input_tokens"]);
                 Ok(None)
             }
 
             "content_block_start" => {
                 let index = v["index"].as_u64().unwrap_or(0);
                 let block_type = v["content_block"]["type"].as_str().unwrap_or("");
-                let id = jstr(&v["content_block"]["id"]);
-                let name = jstr(&v["content_block"]["name"]);
+                let id = json_str(&v["content_block"]["id"]);
+                let name = json_str(&v["content_block"]["name"]);
 
                 if block_type == "tool_use" {
                     self.tool_index.insert(index, id.clone());
@@ -263,10 +263,10 @@ impl SseParser {
                 let index = v["index"].as_u64().unwrap_or(0);
                 match v["delta"]["type"].as_str().unwrap_or("") {
                     "text_delta" => Ok(Some(StreamEvent::TextDelta {
-                        text: jstr(&v["delta"]["text"]),
+                        text: json_str(&v["delta"]["text"]),
                     })),
                     "thinking_delta" => Ok(Some(StreamEvent::ThinkingDelta {
-                        text: jstr(&v["delta"]["thinking"]),
+                        text: json_str(&v["delta"]["thinking"]),
                     })),
                     "input_json_delta" => {
                         let id: ToolCallId = self
@@ -282,7 +282,7 @@ impl SseParser {
                             });
                         Ok(Some(StreamEvent::ToolInputDelta {
                             id,
-                            chunk: jstr(&v["delta"]["partial_json"]),
+                            chunk: json_str(&v["delta"]["partial_json"]),
                         }))
                     }
                     _ => Ok(None),
@@ -307,9 +307,9 @@ impl SseParser {
                 };
                 let usage = TokenUsage {
                     input_tokens: self.input_tokens,
-                    output_tokens: ju32(&v["usage"]["output_tokens"]),
-                    cache_read_tokens: ju32(&v["usage"]["cache_read_input_tokens"]),
-                    cache_write_tokens: ju32(&v["usage"]["cache_creation_input_tokens"]),
+                    output_tokens: json_u32(&v["usage"]["output_tokens"]),
+                    cache_read_tokens: json_u32(&v["usage"]["cache_read_input_tokens"]),
+                    cache_write_tokens: json_u32(&v["usage"]["cache_creation_input_tokens"]),
                 };
                 Ok(Some(StreamEvent::MessageEnd { usage, stop_reason }))
             }

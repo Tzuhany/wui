@@ -24,7 +24,22 @@ use super::executor::CompletedTool;
 use super::permission::{self, PermissionOutcome, PermissionVerdict};
 use super::registry::ToolRegistry;
 use super::run::RunConfig;
-use super::run_helpers::{instant_failure, output_hook_blocked, output_permission_denied};
+
+fn output_hook_blocked(reason: impl Into<String>) -> wui_core::tool::ToolOutput {
+    wui_core::tool::ToolOutput {
+        content: reason.into(),
+        failure: Some(wui_core::tool::FailureKind::HookBlocked),
+        ..Default::default()
+    }
+}
+
+fn output_permission_denied(reason: impl Into<String>) -> wui_core::tool::ToolOutput {
+    wui_core::tool::ToolOutput {
+        content: reason.into(),
+        failure: Some(wui_core::tool::FailureKind::PermissionDenied),
+        ..Default::default()
+    }
+}
 
 /// Outcome of a concurrent authorization task.
 pub(super) enum AuthOutcome {
@@ -53,7 +68,11 @@ pub(super) async fn authorize_tool(
     let input = match config.hooks.pre_tool_use(&name, &input).await {
         HookDecision::Block { reason } => {
             return (
-                Err(instant_failure(id, name, output_hook_blocked(reason))),
+                Err(CompletedTool::immediate(
+                    id,
+                    name,
+                    output_hook_blocked(reason),
+                )),
                 vec![],
             )
         }
@@ -99,7 +118,11 @@ pub(super) async fn authorize_tool(
         PermissionVerdict::Denied { reason, source } => {
             tracing::debug!(tool = %name, ?source, %reason, "permission denied");
             return (
-                Err(instant_failure(id, name, output_permission_denied(reason))),
+                Err(CompletedTool::immediate(
+                    id,
+                    name,
+                    output_permission_denied(reason),
+                )),
                 vec![],
             );
         }
@@ -129,7 +152,11 @@ pub(super) async fn authorize_tool(
     match permission::check(&config.permission, &ctrl_req, tool_is_readonly, &input) {
         PermissionOutcome::Allowed => (Ok(input), vec![]),
         PermissionOutcome::Denied { reason } => (
-            Err(instant_failure(id, name, output_permission_denied(reason))),
+            Err(CompletedTool::immediate(
+                id,
+                name,
+                output_permission_denied(reason),
+            )),
             vec![],
         ),
         PermissionOutcome::NeedsApproval => {
@@ -161,12 +188,18 @@ async fn await_approval(
     let injection = Message::system(permission::response_to_system_message(&response));
 
     let result = match response.decision {
-        ControlDecision::Deny { reason } => {
-            Err(instant_failure(id, name, output_permission_denied(reason)))
-        }
+        ControlDecision::Deny { reason } => Err(CompletedTool::immediate(
+            id,
+            name,
+            output_permission_denied(reason),
+        )),
         ControlDecision::DenyAlways { reason } => {
             config.session_perms.set_always_deny(name.clone()).await;
-            Err(instant_failure(id, name, output_permission_denied(reason)))
+            Err(CompletedTool::immediate(
+                id,
+                name,
+                output_permission_denied(reason),
+            ))
         }
         ControlDecision::ApproveAlways => {
             config.session_perms.set_always_allow(name).await;

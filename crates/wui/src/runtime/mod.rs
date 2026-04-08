@@ -5,7 +5,6 @@ pub(crate) mod hooks;
 pub(crate) mod permission;
 pub(crate) mod registry;
 pub(crate) mod run;
-pub(crate) mod run_helpers;
 pub(crate) mod session_store;
 pub(crate) mod tool_search;
 
