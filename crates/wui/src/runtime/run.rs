@@ -427,6 +427,16 @@ struct RunState {
     dynamic_tools: HashMap<String, Arc<dyn wui_core::tool::Tool>>,
 }
 
+/// Result of checking max-iterations at the top of each loop iteration.
+enum IterGuard {
+    /// Below the limit — proceed normally.
+    Proceed,
+    /// At the limit, hook blocked — the loop should `continue`.
+    Blocked,
+    /// At the limit, no block — return this summary.
+    Stop(RunSummary),
+}
+
 impl RunState {
     fn summary(&self, stop_reason: RunStopReason) -> RunSummary {
         RunSummary {
@@ -436,14 +446,438 @@ impl RunState {
             messages: self.messages.clone(),
         }
     }
+
+    /// Check whether we've hit `max_iter` and consult the PreStop hook.
+    async fn check_max_iter(&mut self, config: &RunConfig) -> IterGuard {
+        if self.iterations < config.max_iter {
+            return IterGuard::Proceed;
+        }
+        if !self.stop_hook_active {
+            if let HookDecision::Block { reason } = config
+                .hooks
+                .pre_stop(
+                    last_assistant_text(&self.messages),
+                    RunStopReason::MaxIterations,
+                    false,
+                )
+                .await
+            {
+                self.messages.push(system_reminder_msg(&reason));
+                self.stop_hook_active = true;
+                return IterGuard::Blocked;
+            }
+        }
+        IterGuard::Stop(self.summary(RunStopReason::MaxIterations))
+    }
 }
 
-async fn run_loop(
-    config: Arc<RunConfig>,
-    messages: Vec<Message>,
-    cancel: CancellationToken,
+// ── Per-iteration mutable state ──────────────────────────────────────────────
+
+/// Bundles all mutable state accumulated during a single loop iteration.
+/// Extracted phases operate on this struct, keeping `run_loop` slim.
+struct IterationCtx {
+    pending_inputs: HashMap<ToolCallId, (String, String)>,
+    assistant_blocks: Vec<ContentBlock>,
+    submission_order: Vec<ToolCallId>,
+    completed_map: HashMap<ToolCallId, CompletedTool>,
+    text_buf: String,
+    thinking_buf: String,
+    stop_reason: StopReason,
+    usage: TokenUsage,
+    pending_auths: Vec<(ToolCallId, String, serde_json::Value)>,
+    emission_guard: EmissionGuard,
+    auth_injections: Vec<Message>,
+}
+
+impl IterationCtx {
+    fn new() -> Self {
+        Self {
+            pending_inputs: HashMap::new(),
+            assistant_blocks: Vec::new(),
+            submission_order: Vec::new(),
+            completed_map: HashMap::new(),
+            text_buf: String::new(),
+            thinking_buf: String::new(),
+            stop_reason: StopReason::EndTurn,
+            usage: TokenUsage::default(),
+            pending_auths: Vec::new(),
+            emission_guard: EmissionGuard::new(),
+            auth_injections: Vec::new(),
+        }
+    }
+}
+
+/// Parse all stream events, accumulating tool calls, text, and thinking into
+/// the iteration context. Returns `Ok(true)` when `MessageEnd` was received,
+/// `Ok(false)` when the stream ended without it, `Err` on fatal errors.
+async fn parse_stream(
+    stream: &mut (impl futures::Stream<Item = Result<wui_core::event::StreamEvent, ProviderError>>
+              + Unpin),
+    ctx: &mut IterationCtx,
+    active_registry: &ToolRegistry,
     tx: &mpsc::Sender<AgentEvent>,
-) -> Result<RunSummary, AgentError> {
+) -> Result<bool, AgentError> {
+    use wui_core::event::StreamEvent::*;
+
+    while let Some(event) = stream.next().await {
+        let event = match event {
+            Ok(e) => e,
+            Err(e) => {
+                if e.is_retryable() {
+                    continue;
+                }
+                return Err(AgentError::fatal(e.to_string()));
+            }
+        };
+
+        match event {
+            TextDelta { text } => {
+                ctx.text_buf.push_str(&text);
+                tx.send(AgentEvent::TextDelta(text)).await.ok();
+            }
+
+            ThinkingDelta { text } => {
+                ctx.thinking_buf.push_str(&text);
+                tx.send(AgentEvent::ThinkingDelta(text)).await.ok();
+            }
+
+            ToolUseStart { id, name } => {
+                ctx.pending_inputs.insert(id, (name, String::new()));
+            }
+
+            ToolInputDelta { id, chunk } => {
+                if let Some((_, json)) = ctx.pending_inputs.get_mut(&id) {
+                    json.push_str(&chunk);
+                }
+            }
+
+            ToolUseEnd { id } => {
+                let Some((name, json)) = ctx.pending_inputs.remove(&id) else {
+                    continue;
+                };
+
+                // Record submission order before any early-exit path so the
+                // provider always sees a matching ToolResult regardless of
+                // what happens next.
+                ctx.submission_order.push(id.clone());
+
+                let input: serde_json::Value = match serde_json::from_str(&json) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::warn!(tool = %name, error = %e, "malformed tool input JSON from provider");
+                        ctx.assistant_blocks.push(ContentBlock::ToolUse {
+                            id: id.clone(),
+                            name: name.clone(),
+                            input: serde_json::Value::Null,
+                            summary: None,
+                        });
+                        let denied = instant_failure(
+                            id.clone(),
+                            name,
+                            wui_core::tool::ToolOutput::invalid_input(format!(
+                                "malformed tool input JSON: {e}"
+                            )),
+                        );
+                        ctx.emission_guard.first_time(&denied.id);
+                        emit_tool_event(&denied, tx).await;
+                        ctx.completed_map.insert(denied.id.clone(), denied);
+                        continue;
+                    }
+                };
+
+                let tool_summary = active_registry
+                    .get(&name)
+                    .and_then(|t| t.executor_hints(&input).summary);
+                ctx.assistant_blocks.push(ContentBlock::ToolUse {
+                    id: id.clone(),
+                    name: name.clone(),
+                    input: input.clone(),
+                    summary: tool_summary,
+                });
+
+                // Queue for authorization after MessageEnd.
+                ctx.pending_auths.push((id, name, input));
+            }
+
+            MessageEnd {
+                usage: u,
+                stop_reason: sr,
+            } => {
+                ctx.usage = u;
+                ctx.stop_reason = sr;
+                return Ok(true);
+            }
+
+            Error { message, retryable } => {
+                return Err(AgentError {
+                    message,
+                    retryable,
+                    detail: None,
+                    permission_denied: false,
+                });
+            }
+        }
+    }
+    Ok(false)
+}
+
+/// Authorize all collected tools concurrently and dispatch approved ones to
+/// the executor. Denied tools are recorded immediately with their events.
+async fn authorize_and_dispatch(
+    ctx: &mut IterationCtx,
+    config: &Arc<RunConfig>,
+    active_registry: &Arc<ToolRegistry>,
+    executor: &mut ToolExecutor,
+    messages: &[Message],
+    tx: &mpsc::Sender<AgentEvent>,
+) {
+    let mut auth_tasks: tokio::task::JoinSet<AuthOutcome> = tokio::task::JoinSet::new();
+
+    for (id, name, input) in std::mem::take(&mut ctx.pending_auths) {
+        let config_c = Arc::clone(config);
+        let registry_c = Arc::clone(active_registry);
+        let tx_c = tx.clone();
+        auth_tasks.spawn(async move {
+            let (result, injections) = auth::authorize_tool(
+                &config_c,
+                &registry_c,
+                id.clone(),
+                name.clone(),
+                input,
+                &tx_c,
+            )
+            .await;
+            match result {
+                Ok(effective_input) => AuthOutcome::Allowed {
+                    id,
+                    name,
+                    input: effective_input,
+                    injections,
+                },
+                Err(denied) => AuthOutcome::Denied {
+                    tool: denied,
+                    injections,
+                },
+            }
+        });
+    }
+
+    while let Some(outcome) = auth_tasks.join_next().await {
+        let outcome = match outcome {
+            Ok(o) => o,
+            Err(e) => {
+                tracing::error!(error = %e, "auth task panicked — skipping tool");
+                continue;
+            }
+        };
+        match outcome {
+            AuthOutcome::Allowed {
+                id,
+                name,
+                input,
+                injections,
+            } => {
+                ctx.auth_injections.extend(injections);
+                let history_snap = Arc::from(messages);
+                tracing::debug!(tool = %name, "tool dispatched");
+                tx.send(AgentEvent::ToolStart {
+                    id: id.clone(),
+                    name: name.clone(),
+                    input: input.clone(),
+                })
+                .await
+                .ok();
+                executor.submit(PendingTool {
+                    id,
+                    name,
+                    input,
+                    messages: history_snap,
+                });
+            }
+            AuthOutcome::Denied { tool, injections } => {
+                ctx.auth_injections.extend(injections);
+                ctx.emission_guard.first_time(&tool.id);
+                emit_tool_event(&tool, tx).await;
+                ctx.completed_map.insert(tool.id.clone(), tool);
+            }
+        }
+    }
+}
+
+/// Collect remaining executor results and run post-tool hooks.
+/// Emits tool events in submission order, after hook mutations are applied.
+async fn run_post_hooks(
+    ctx: &mut IterationCtx,
+    executor: ToolExecutor,
+    config: &RunConfig,
+    messages: &mut Vec<Message>,
+    tx: &mpsc::Sender<AgentEvent>,
+) {
+    for done in executor.collect_remaining().await {
+        ctx.completed_map.insert(done.id.clone(), done);
+    }
+
+    for id in &ctx.submission_order {
+        let Some(done) = ctx.completed_map.get(id) else {
+            continue;
+        };
+        let tool_name = done.name.clone();
+        let is_error = done.output.is_error();
+
+        let decision = if is_error {
+            let input = ctx.assistant_blocks.iter().find_map(|b| {
+                if let ContentBlock::ToolUse { id: bid, input, .. } = b {
+                    (bid == id).then_some(input)
+                } else {
+                    None
+                }
+            });
+            let input = input.unwrap_or(&serde_json::Value::Null);
+            config
+                .hooks
+                .post_tool_failure(&tool_name, input, &done.output)
+                .await
+        } else {
+            config.hooks.post_tool_use(&tool_name, &done.output).await
+        };
+
+        match decision {
+            HookDecision::Block { reason } => {
+                tracing::debug!(tool = %tool_name, %reason, "post-tool hook blocked output");
+                messages.push(system_reminder_msg(&format!(
+                    "The output of tool '{tool_name}' was blocked by policy: {reason}. \
+                     Do not use this output.",
+                )));
+            }
+            HookDecision::MutateOutput { content } => {
+                tracing::debug!(tool = %tool_name, "post-tool hook mutated output");
+                if let Some(done_mut) = ctx.completed_map.get_mut(id) {
+                    done_mut.output.content = content;
+                }
+            }
+            _ => {}
+        }
+
+        if ctx.emission_guard.first_time(id) {
+            if let Some(done) = ctx.completed_map.get(id) {
+                emit_tool_event(done, tx).await;
+            }
+        }
+    }
+}
+
+/// Build the assistant message and tool results, append them to history,
+/// update usage/iterations, and save a checkpoint if applicable.
+async fn assemble_history(
+    ctx: IterationCtx,
+    s: &mut RunState,
+    config: &RunConfig,
+    tx: &mpsc::Sender<AgentEvent>,
+) {
+    // Apply auth injections.
+    s.messages.extend(ctx.auth_injections);
+
+    // Build assistant message: thinking, text, then tool calls.
+    let mut blocks = ctx.assistant_blocks;
+    if !ctx.text_buf.is_empty() {
+        blocks.insert(0, ContentBlock::Text { text: ctx.text_buf });
+    }
+    if !ctx.thinking_buf.is_empty() {
+        blocks.insert(
+            0,
+            ContentBlock::Thinking {
+                text: ctx.thinking_buf,
+            },
+        );
+    }
+    if !blocks.is_empty() {
+        s.messages.push(Message::assistant(blocks));
+    }
+
+    // Append tool results in submission order.
+    if !ctx.submission_order.is_empty() {
+        let mut completed_map = ctx.completed_map;
+        let done_tools: Vec<CompletedTool> = ctx
+            .submission_order
+            .iter()
+            .filter_map(|id| completed_map.remove(id))
+            .collect();
+
+        for done in &done_tools {
+            for tool in &done.output.expose_tools {
+                s.dynamic_tools
+                    .insert(tool.name().to_string(), Arc::clone(tool));
+            }
+        }
+
+        for done in &done_tools {
+            for artifact in &done.output.artifacts {
+                tx.send(AgentEvent::Artifact {
+                    tool_id: done.id.clone(),
+                    tool_name: done.name.clone(),
+                    artifact: artifact.clone(),
+                })
+                .await
+                .ok();
+            }
+        }
+
+        let result_blocks: Vec<ContentBlock> = done_tools
+            .iter()
+            .map(|done| ContentBlock::ToolResult {
+                tool_use_id: done.id.clone(),
+                content: done.output.content.clone(),
+                is_error: done.output.is_error(),
+            })
+            .collect();
+
+        if !result_blocks.is_empty() {
+            s.messages.push(Message::with_id(
+                uuid::Uuid::new_v4().to_string(),
+                Role::User,
+                result_blocks,
+            ));
+        }
+
+        for done in &done_tools {
+            for injection in &done.output.injections {
+                s.messages.push(system_reminder_msg(&injection.text));
+            }
+        }
+    }
+
+    tracing::debug!(
+        stop_reason    = ?ctx.stop_reason,
+        input_tokens   = ctx.usage.input_tokens,
+        output_tokens  = ctx.usage.output_tokens,
+        cache_read     = ctx.usage.cache_read_tokens,
+        cache_write    = ctx.usage.cache_write_tokens,
+        "llm call complete"
+    );
+
+    s.total_usage += ctx.usage;
+    s.iterations += 1;
+
+    // Checkpoint save (only after tool-use iterations).
+    if !ctx.submission_order.is_empty() {
+        if let (Some(store), Some(run_id)) = (&config.checkpoint_store, &config.checkpoint_run_id) {
+            let cp = RunCheckpoint {
+                run_id: run_id.clone(),
+                messages: s.messages.clone(),
+                iteration: s.iterations,
+                total_usage: s.total_usage.clone(),
+            };
+            if let Err(e) = store.save(run_id, &cp).await {
+                tracing::warn!(run_id, error = %e, "checkpoint save failed");
+            }
+        }
+    }
+}
+
+// ── Initialization helpers ───────────────────────────────────────────────────
+
+/// Create the initial `RunState` and restore any saved checkpoint.
+async fn init_run_state(config: &RunConfig, messages: Vec<Message>) -> RunState {
     let mut s = RunState {
         system: augment_system(&config.system, &config.tools),
         total_usage: TokenUsage::default(),
@@ -456,7 +890,6 @@ async fn run_loop(
         messages,
     };
 
-    // ── Checkpoint restore ────────────────────────────────────────────────────
     if let (Some(store), Some(run_id)) = (&config.checkpoint_store, &config.checkpoint_run_id) {
         match store.load(run_id).await {
             Ok(Some(cp)) => {
@@ -473,65 +906,59 @@ async fn run_loop(
             Err(e) => tracing::warn!(run_id, error = %e, "checkpoint load failed — starting fresh"),
         }
     }
+    s
+}
+
+/// Build the `ChatRequest` for the current iteration.
+fn build_request(config: &RunConfig, s: &RunState, registry: &ToolRegistry) -> ChatRequest {
+    ChatRequest {
+        model: config.model.clone(),
+        max_tokens: s.effective_max_tokens,
+        temperature: config.temperature,
+        system: s.system.clone(),
+        messages: s.messages.clone(),
+        tools: registry.tool_defs(),
+        thinking_budget: config.thinking_budget,
+    }
+}
+
+/// Resolve the active tool registry, merging dynamic tools when present.
+fn active_registry(config: &RunConfig, s: &RunState) -> Arc<ToolRegistry> {
+    if s.dynamic_tools.is_empty() {
+        config.tools.clone()
+    } else {
+        Arc::new(config.tools.with_dynamic(&s.dynamic_tools))
+    }
+}
+
+// ── Main loop ────────────────────────────────────────────────────────────────
+
+async fn run_loop(
+    config: Arc<RunConfig>,
+    messages: Vec<Message>,
+    cancel: CancellationToken,
+    tx: &mpsc::Sender<AgentEvent>,
+) -> Result<RunSummary, AgentError> {
+    let mut s = init_run_state(&config, messages).await;
 
     loop {
         if cancel.is_cancelled() {
             return Ok(s.summary(RunStopReason::Cancelled));
         }
 
-        if s.iterations >= config.max_iter {
-            if !s.stop_hook_active {
-                match config
-                    .hooks
-                    .pre_stop(
-                        last_assistant_text(&s.messages),
-                        RunStopReason::MaxIterations,
-                        false,
-                    )
-                    .await
-                {
-                    HookDecision::Block { reason } => {
-                        s.messages.push(system_reminder_msg(&reason));
-                        s.stop_hook_active = true;
-                    }
-                    _ => return Ok(s.summary(RunStopReason::MaxIterations)),
-                }
-            } else {
-                return Ok(s.summary(RunStopReason::MaxIterations));
-            }
+        match s.check_max_iter(&config).await {
+            IterGuard::Stop(summary) => return Ok(summary),
+            IterGuard::Blocked => continue,
+            IterGuard::Proceed => {}
         }
 
-        tracing::debug!(
-            iteration = s.iterations,
-            messages = s.messages.len(),
-            "iteration start"
-        );
         config.hooks.notify_turn_start(&s.messages).await;
-
-        // ── Context compression ──────────────────────────────────────────
         maybe_compress(&config, &mut s.messages, tx).await;
-
         if config.compress.is_critically_full(&s.messages) {
             return Ok(s.summary(RunStopReason::ContextOverflow));
         }
-
-        let active_registry = if s.dynamic_tools.is_empty() {
-            config.tools.clone()
-        } else {
-            Arc::new(config.tools.with_dynamic(&s.dynamic_tools))
-        };
-
-        let req = ChatRequest {
-            model: config.model.clone(),
-            max_tokens: s.effective_max_tokens,
-            temperature: config.temperature,
-            system: s.system.clone(),
-            messages: s.messages.clone(),
-            tools: active_registry.tool_defs(),
-            thinking_budget: config.thinking_budget,
-        };
-
-        // ── Call provider with retry ──────────────────────────────────────
+        let registry = active_registry(&config, &s);
+        let req = build_request(&config, &s, &registry);
         let stream = match call_with_retry(&config, &req, tx).await {
             Ok(stream) => stream,
             Err(e) if is_prompt_too_long(&e) => {
@@ -544,156 +971,20 @@ async fn run_loop(
         };
 
         let mut executor = ToolExecutor::new(
-            active_registry.clone(),
+            registry.clone(),
             cancel.clone(),
             tx.clone(),
             config.tool_timeout,
             config.result_store.clone(),
         );
-
-        // Accumulate tool input JSON chunks keyed by tool_use_id.
-        let mut pending_inputs: HashMap<ToolCallId, (String, String)> = HashMap::new();
-        let mut assistant_blocks: Vec<ContentBlock> = Vec::new();
-        // Track submission order for ordered history reconstruction.
-        let mut submission_order: Vec<ToolCallId> = Vec::new();
-        let mut completed_map: HashMap<ToolCallId, CompletedTool> = HashMap::new();
-        let mut text_buf = String::new();
-        let mut thinking_buf = String::new();
-        let mut stop_reason = StopReason::EndTurn;
-        let mut usage = TokenUsage::default();
-        let mut got_message_end = false;
-
+        let mut ctx = IterationCtx::new();
         futures::pin_mut!(stream);
 
-        // Track tools whose events were already emitted (instant failures and
-        // denied tools).  All other completions are held until after post-tool
-        // hooks run so that MutateOutput is reflected in the emitted event.
-        let mut emission_guard = EmissionGuard::new();
-        // Validated tool calls collected during streaming. Authorization and
-        // execution happen after MessageEnd — once the LLM has finished speaking
-        // — so HITL prompts are never shown mid-stream.
-        let mut pending_auths: Vec<(ToolCallId, String, serde_json::Value)> = Vec::new();
-        let mut auth_injections: Vec<Message> = Vec::new();
+        let got_message_end = parse_stream(&mut stream, &mut ctx, &registry, tx).await?;
 
-        use wui_core::event::StreamEvent::*;
-
-        while let Some(event) = stream.next().await {
-            let event = match event {
-                Ok(e) => e,
-                Err(e) => {
-                    if e.is_retryable() {
-                        continue;
-                    }
-                    return Err(AgentError::fatal(e.to_string()));
-                }
-            };
-
-            match event {
-                TextDelta { text } => {
-                    text_buf.push_str(&text);
-                    tx.send(AgentEvent::TextDelta(text)).await.ok();
-                }
-
-                ThinkingDelta { text } => {
-                    thinking_buf.push_str(&text);
-                    tx.send(AgentEvent::ThinkingDelta(text)).await.ok();
-                }
-
-                ToolUseStart { id, name } => {
-                    pending_inputs.insert(id, (name, String::new()));
-                }
-
-                ToolInputDelta { id, chunk } => {
-                    if let Some((_, json)) = pending_inputs.get_mut(&id) {
-                        json.push_str(&chunk);
-                    }
-                }
-
-                ToolUseEnd { id } => {
-                    let Some((name, json)) = pending_inputs.remove(&id) else {
-                        continue;
-                    };
-
-                    // Record submission order before any early-exit path so the
-                    // provider always sees a matching ToolResult regardless of
-                    // what happens next.
-                    submission_order.push(id.clone());
-
-                    // Malformed JSON is a provider/protocol error — surface it
-                    // explicitly rather than silently degrading to an empty object.
-                    // The silent `{}` path would let a protocol bug masquerade as
-                    // a valid (but empty) tool call, scattering the corruption
-                    // across subsequent reasoning turns.
-                    let input: serde_json::Value = match serde_json::from_str(&json) {
-                        Ok(v) => v,
-                        Err(e) => {
-                            tracing::warn!(tool = %name, error = %e, "malformed tool input JSON from provider");
-                            assistant_blocks.push(ContentBlock::ToolUse {
-                                id: id.clone(),
-                                name: name.clone(),
-                                input: serde_json::Value::Null,
-                                summary: None,
-                            });
-                            let denied = instant_failure(
-                                id.clone(),
-                                name,
-                                wui_core::tool::ToolOutput::invalid_input(format!(
-                                    "malformed tool input JSON: {e}"
-                                )),
-                            );
-                            emission_guard.first_time(&denied.id);
-                            emit_tool_event(&denied, tx).await;
-                            completed_map.insert(denied.id.clone(), denied);
-                            continue;
-                        }
-                    };
-
-                    // The Anthropic API (and most providers) require every
-                    // ToolUse in the assistant message to have a matching
-                    // ToolResult in the following user message — even when
-                    // the tool is denied, blocked, or fails validation.
-                    // Add the ToolUse block NOW, before any deny paths.
-                    //
-                    // Compute the tool summary at submission time while we
-                    // still have access to the registry and the input value.
-                    let tool_summary = active_registry
-                        .get(&name)
-                        .and_then(|t| t.executor_hints(&input).summary);
-                    assistant_blocks.push(ContentBlock::ToolUse {
-                        id: id.clone(),
-                        name: name.clone(),
-                        input: input.clone(),
-                        summary: tool_summary,
-                    });
-
-                    // Queue for authorization after MessageEnd.
-                    pending_auths.push((id, name, input));
-                }
-
-                MessageEnd {
-                    usage: u,
-                    stop_reason: sr,
-                } => {
-                    usage = u;
-                    stop_reason = sr;
-                    got_message_end = true;
-                    break;
-                }
-
-                Error { message, retryable } => {
-                    return Err(AgentError {
-                        message,
-                        retryable,
-                        detail: None,
-                        permission_denied: false,
-                    });
-                }
-            }
-        }
-
-        // ── Stream-drop recovery ──────────────────────────────────────────
+        // Stream-drop recovery (needs continue/return).
         if !got_message_end {
-            if submission_order.is_empty() {
+            if ctx.submission_order.is_empty() {
                 tracing::warn!(s.iterations, "stream ended without MessageEnd — retrying");
                 continue;
             }
@@ -702,286 +993,26 @@ async fn run_loop(
             ));
         }
 
-        // ── Authorize and dispatch all tools ──────────────────────────────────
-        //
-        // Authorization runs after MessageEnd — the LLM has finished speaking
-        // before the user is prompted. Multiple tools are authorized concurrently
-        // via a JoinSet; each tool starts executing the moment its auth resolves.
-        {
-            let mut auth_tasks: tokio::task::JoinSet<AuthOutcome> = tokio::task::JoinSet::new();
+        authorize_and_dispatch(&mut ctx, &config, &registry, &mut executor, &s.messages, tx).await;
+        let stop_reason = ctx.stop_reason.clone();
+        let usage = ctx.usage.clone();
+        run_post_hooks(&mut ctx, executor, &config, &mut s.messages, tx).await;
+        assemble_history(ctx, &mut s, &config, tx).await;
 
-            for (id, name, input) in pending_auths {
-                let config_c = Arc::clone(&config);
-                let registry_c = Arc::clone(&active_registry);
-                let tx_c = tx.clone();
-                auth_tasks.spawn(async move {
-                    let (result, injections) = auth::authorize_tool(
-                        &config_c,
-                        &registry_c,
-                        id.clone(),
-                        name.clone(),
-                        input,
-                        &tx_c,
-                    )
-                    .await;
-                    match result {
-                        Ok(effective_input) => AuthOutcome::Allowed {
-                            id,
-                            name,
-                            input: effective_input,
-                            injections,
-                        },
-                        Err(denied) => AuthOutcome::Denied {
-                            tool: denied,
-                            injections,
-                        },
-                    }
-                });
-            }
+        // ── Stop evaluation (handle_stop! needs continue/return) ─────────
 
-            while let Some(outcome) = auth_tasks.join_next().await {
-                let outcome = match outcome {
-                    Ok(o) => o,
-                    Err(e) => {
-                        tracing::error!(error = %e, "auth task panicked — skipping tool");
-                        continue;
-                    }
-                };
-                match outcome {
-                    AuthOutcome::Allowed {
-                        id,
-                        name,
-                        input,
-                        injections,
-                    } => {
-                        auth_injections.extend(injections);
-                        let history_snap = Arc::from(s.messages.as_slice());
-                        tracing::debug!(tool = %name, "tool dispatched");
-                        tx.send(AgentEvent::ToolStart {
-                            id: id.clone(),
-                            name: name.clone(),
-                            input: input.clone(),
-                        })
-                        .await
-                        .ok();
-                        executor.submit(PendingTool {
-                            id,
-                            name,
-                            input,
-                            messages: history_snap,
-                        });
-                    }
-                    AuthOutcome::Denied { tool, injections } => {
-                        auth_injections.extend(injections);
-                        emission_guard.first_time(&tool.id);
-                        emit_tool_event(&tool, tx).await;
-                        completed_map.insert(tool.id.clone(), tool);
-                    }
-                }
-            }
-        }
-
-        // ── Collect remaining tools ────────────────────────────────────────────
-        // No events emitted here — hooks may mutate outputs. Events are emitted
-        // after the hook pass below, once the final content is settled.
-        for done in executor.collect_remaining().await {
-            completed_map.insert(done.id.clone(), done);
-        }
-
-        // ── Post-tool hooks ────────────────────────────────────────────────────
-        //
-        // Successful tools → PostToolUse. Failed tools → PostToolFailure.
-        // The two paths are separate so hooks can specialise cleanly:
-        // audit-on-failure, transform-on-success, without filtering inside
-        // a single handler.
-        //
-        // A Block decision injects a system notice so the LLM knows to
-        // disregard the tool's output on the next turn.
-        for id in &submission_order {
-            // Extract name and error flag before borrowing mutably below.
-            let Some(done) = completed_map.get(id) else {
-                continue;
-            };
-            let tool_name = done.name.clone();
-            let is_error = done.output.is_error();
-
-            let decision = if is_error {
-                // Recover the original input from the assistant blocks
-                // we built earlier this iteration (they're still in scope).
-                let input = assistant_blocks.iter().find_map(|b| {
-                    if let ContentBlock::ToolUse { id: bid, input, .. } = b {
-                        (bid == id).then_some(input)
-                    } else {
-                        None
-                    }
-                });
-                let input = input.unwrap_or(&serde_json::Value::Null);
-                config
-                    .hooks
-                    .post_tool_failure(&tool_name, input, &done.output)
-                    .await
-            } else {
-                config.hooks.post_tool_use(&tool_name, &done.output).await
-            };
-
-            match decision {
-                HookDecision::Block { reason } => {
-                    tracing::debug!(tool = %tool_name, %reason, "post-tool hook blocked output");
-                    s.messages.push(system_reminder_msg(&format!(
-                        "The output of tool '{tool_name}' was blocked by policy: {reason}. \
-                         Do not use this output.",
-                    )));
-                }
-                HookDecision::MutateOutput { content } => {
-                    tracing::debug!(tool = %tool_name, "post-tool hook mutated output");
-                    if let Some(done_mut) = completed_map.get_mut(id) {
-                        done_mut.output.content = content;
-                    }
-                }
-                _ => {}
-            }
-
-            // Emit the tool event now — after any mutation — unless it was
-            // already emitted as an instant failure (malformed JSON / denied).
-            if emission_guard.first_time(id) {
-                if let Some(done) = completed_map.get(id) {
-                    emit_tool_event(done, tx).await;
-                }
-            }
-        }
-
-        // ── Apply auth injections ─────────────────────────────────────────
-        s.messages.extend(auth_injections);
-
-        // ── Build assistant message ────────────────────────────────────────────
-        // Thinking first (so the LLM can reference its reasoning), then text,
-        // then tool calls — matching the order providers expect.
-        //
-        // Insert in reverse order so earlier items end up at lower indices:
-        // text inserted at 0 → [Text, ...tools]
-        // thinking inserted at 0 → [Thinking, Text, ...tools] ✓
-        if !text_buf.is_empty() {
-            assistant_blocks.insert(0, ContentBlock::Text { text: text_buf });
-        }
-        if !thinking_buf.is_empty() {
-            assistant_blocks.insert(0, ContentBlock::Thinking { text: thinking_buf });
-        }
-        if !assistant_blocks.is_empty() {
-            s.messages.push(Message::assistant(assistant_blocks));
-        }
-
-        // ── Append tool results in submission order ────────────────────────────
-        //
-        // Results MUST appear in the same order as the ToolUse blocks in the
-        // preceding assistant message. Providers validate this; a mismatch
-        // causes an API error. We reconstruct submission order from
-        // `submission_order` + `completed_map` regardless of completion order.
-        if !submission_order.is_empty() {
-            let done_tools: Vec<CompletedTool> = submission_order
-                .iter()
-                .filter_map(|id| completed_map.remove(id))
-                .collect();
-
-            for done in &done_tools {
-                for tool in &done.output.expose_tools {
-                    s.dynamic_tools
-                        .insert(tool.name().to_string(), Arc::clone(tool));
-                }
-            }
-
-            // Emit artifacts before ToolResult so callers receive them
-            // while the tool result is still being processed.
-            for done in &done_tools {
-                for artifact in &done.output.artifacts {
-                    tx.send(AgentEvent::Artifact {
-                        tool_id: done.id.clone(),
-                        tool_name: done.name.clone(),
-                        artifact: artifact.clone(),
-                    })
-                    .await
-                    .ok();
-                }
-            }
-
-            let result_blocks: Vec<ContentBlock> = done_tools
-                .iter()
-                .map(|done| ContentBlock::ToolResult {
-                    tool_use_id: done.id.clone(),
-                    content: done.output.content.clone(),
-                    is_error: done.output.is_error(),
-                })
-                .collect();
-
-            if !result_blocks.is_empty() {
-                s.messages.push(Message::with_id(
-                    uuid::Uuid::new_v4().to_string(),
-                    Role::User,
-                    result_blocks,
-                ));
-            }
-
-            for done in &done_tools {
-                for injection in &done.output.injections {
-                    s.messages.push(system_reminder_msg(&injection.text));
-                }
-            }
-        }
-
-        tracing::debug!(
-            stop_reason    = ?stop_reason,
-            input_tokens   = usage.input_tokens,
-            output_tokens  = usage.output_tokens,
-            cache_read     = usage.cache_read_tokens,
-            cache_write    = usage.cache_write_tokens,
-            "llm call complete"
-        );
-
-        s.total_usage += usage.clone();
-        s.iterations += 1;
-
-        // ── Checkpoint save (only after tool-use iterations) ──────────────
-        if !submission_order.is_empty() {
-            if let (Some(store), Some(run_id)) =
-                (&config.checkpoint_store, &config.checkpoint_run_id)
-            {
-                let cp = RunCheckpoint {
-                    run_id: run_id.clone(),
-                    messages: s.messages.clone(),
-                    iteration: s.iterations,
-                    total_usage: s.total_usage.clone(),
-                };
-                if let Err(e) = store.save(run_id, &cp).await {
-                    tracing::warn!(run_id, error = %e, "checkpoint save failed");
-                }
-            }
-        }
-
-        // ── Token budget ──────────────────────────────────────────────────
         if let Some(budget) = config.token_budget {
-            let spent = s.total_usage.input_tokens as u64 + s.total_usage.output_tokens as u64;
-            if spent >= budget {
+            if s.total_usage.input_tokens as u64 + s.total_usage.output_tokens as u64 >= budget {
                 handle_stop! {
-                    hooks        = config.hooks,
-                    messages     = s.messages,
-                    iterations   = s.iterations,
-                    total_usage  = s.total_usage,
-                    stop_active  = s.stop_hook_active,
-                    reason       = RunStopReason::BudgetExhausted,
-                    extra_on_block = {},
-                    on_mutate    = |_content| {},
+                    hooks = config.hooks, messages = s.messages,
+                    iterations = s.iterations, total_usage = s.total_usage,
+                    stop_active = s.stop_hook_active,
+                    reason = RunStopReason::BudgetExhausted,
+                    extra_on_block = {}, on_mutate = |_content| {},
                 };
             }
         }
 
-        // ── Stop condition ─────────────────────────────────────────────────────
-
-        // ── MaxTokens escalation ───────────────────────────────────────────────
-        //
-        // When the LLM hits max_tokens mid-response, we try two recovery steps
-        // before giving up:
-        //   1. Escalate max_tokens (×TOKEN_ESCALATION_FACTOR) and retry.
-        //   2. Inject a continuation prompt so the LLM picks up where it left off.
-        //   3. If both fail, return MaxTokensExhausted.
         if stop_reason == StopReason::MaxTokens {
             s.token_escalations += 1;
             if s.token_escalations == 1 {
@@ -996,17 +1027,15 @@ async fn run_loop(
                 continue;
             } else {
                 handle_stop! {
-                    hooks        = config.hooks,
-                    messages     = s.messages,
-                    iterations   = s.iterations,
-                    total_usage  = s.total_usage,
-                    stop_active  = s.stop_hook_active,
-                    reason       = RunStopReason::MaxTokensExhausted,
+                    hooks = config.hooks, messages = s.messages,
+                    iterations = s.iterations, total_usage = s.total_usage,
+                    stop_active = s.stop_hook_active,
+                    reason = RunStopReason::MaxTokensExhausted,
                     extra_on_block = {
                         s.token_escalations = 0;
                         s.effective_max_tokens = config.max_tokens;
                     },
-                    on_mutate    = |_content| {},
+                    on_mutate = |_content| {},
                 };
             }
         }
@@ -1014,15 +1043,6 @@ async fn run_loop(
         s.token_escalations = 0;
         s.effective_max_tokens = config.max_tokens;
 
-        // ── Diminishing returns ────────────────────────────────────────────────
-        //
-        // Stop if the model has produced negligible output for too many turns in
-        // a row. This catches runaway loops where the agent is technically alive
-        // but not doing useful work.
-        //
-        // Tool-use turns are always treated as productive (the tool itself is the
-        // work). We skip the streak increment — but still reset, so a streak that
-        // began before a tool call doesn't persist through the tool-using turn.
         if !config.ignore_diminishing_returns {
             if stop_reason == StopReason::ToolUse || usage.output_tokens >= MIN_USEFUL_OUTPUT_TOKENS
             {
@@ -1031,14 +1051,12 @@ async fn run_loop(
                 s.low_output_streak += 1;
                 if s.low_output_streak >= MAX_LOW_OUTPUT_TURNS {
                     handle_stop! {
-                        hooks        = config.hooks,
-                        messages     = s.messages,
-                        iterations   = s.iterations,
-                        total_usage  = s.total_usage,
-                        stop_active  = s.stop_hook_active,
-                        reason       = RunStopReason::DiminishingReturns,
+                        hooks = config.hooks, messages = s.messages,
+                        iterations = s.iterations, total_usage = s.total_usage,
+                        stop_active = s.stop_hook_active,
+                        reason = RunStopReason::DiminishingReturns,
                         extra_on_block = { s.low_output_streak = 0; },
-                        on_mutate    = |_content| {},
+                        on_mutate = |_content| {},
                     };
                 }
             }
@@ -1046,20 +1064,17 @@ async fn run_loop(
 
         if stop_reason == StopReason::EndTurn {
             handle_stop! {
-                hooks        = config.hooks,
-                messages     = s.messages,
-                iterations   = s.iterations,
-                total_usage  = s.total_usage,
-                stop_active  = s.stop_hook_active,
-                reason       = RunStopReason::Completed,
+                hooks = config.hooks, messages = s.messages,
+                iterations = s.iterations, total_usage = s.total_usage,
+                stop_active = s.stop_hook_active,
+                reason = RunStopReason::Completed,
                 extra_on_block = {},
-                on_mutate    = |content| {
+                on_mutate = |content| {
                     replace_last_assistant_text(&mut s.messages, content);
                 },
             };
         }
 
-        // ToolUse → loop continues. Reset stop-hook flag.
         s.stop_hook_active = false;
     }
 }
