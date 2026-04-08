@@ -1,9 +1,11 @@
+pub(crate) mod auth;
 pub(crate) mod checkpoint;
 pub(crate) mod executor;
 pub(crate) mod hooks;
 pub(crate) mod permission;
 pub(crate) mod registry;
 pub(crate) mod run;
+pub(crate) mod run_helpers;
 pub(crate) mod session_store;
 pub(crate) mod tool_search;
 

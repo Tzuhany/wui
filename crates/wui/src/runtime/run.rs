@@ -52,57 +52,15 @@
 // prompt entirely, matching the recorded decision automatically.
 // ============================================================================
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-// ── Framework-internal ToolOutput constructors ────────────────────────────────
-//
-// HookBlocked and PermissionDenied are failure kinds produced exclusively by
-// the framework's hook and permission systems — never by tool implementations.
-// Keeping the constructors here (rather than on the public `ToolOutput` API in
-// wui-core) makes that boundary explicit: tool authors cannot accidentally call
-// them, and they don't appear in the public documentation.
-
-fn output_hook_blocked(reason: impl Into<String>) -> wui_core::tool::ToolOutput {
-    wui_core::tool::ToolOutput {
-        content: reason.into(),
-        failure: Some(wui_core::tool::FailureKind::HookBlocked),
-        ..Default::default()
-    }
-}
-
-fn output_permission_denied(reason: impl Into<String>) -> wui_core::tool::ToolOutput {
-    wui_core::tool::ToolOutput {
-        content: reason.into(),
-        failure: Some(wui_core::tool::FailureKind::PermissionDenied),
-        ..Default::default()
-    }
-}
-
-// ── EmissionGuard ─────────────────────────────────────────────────────────────
-
-/// Guards against double-emission of tool events.
-///
-/// Tools that fail instantly (malformed JSON, denied) are emitted immediately
-/// and recorded here. The post-tool-hook pass skips any ID already present.
-struct EmissionGuard {
-    emitted: HashSet<String>,
-}
-
-impl EmissionGuard {
-    fn new() -> Self {
-        Self {
-            emitted: HashSet::new(),
-        }
-    }
-
-    /// Mark `id` as emitted. Returns `true` if this is the first time — i.e.,
-    /// the caller **should** emit the event. Returns `false` if already emitted.
-    fn first_time(&mut self, id: &str) -> bool {
-        self.emitted.insert(id.to_owned())
-    }
-}
+use super::auth::{self, AuthOutcome};
+use super::run_helpers::{
+    augment_system, instant_failure, is_prompt_too_long, last_assistant_text,
+    replace_last_assistant_text, system_reminder_msg, EmissionGuard,
+};
 
 // ── handle_stop! ──────────────────────────────────────────────────────────────
 //
@@ -163,10 +121,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument as _;
 
-use wui_core::event::{
-    AgentError, AgentEvent, ControlDecision, ControlHandle, ControlKind, ControlRequest,
-    ControlResponse, RunStopReason, RunSummary, StopReason, TokenUsage,
-};
+use wui_core::event::{AgentError, AgentEvent, RunStopReason, RunSummary, StopReason, TokenUsage};
 use wui_core::hook::HookDecision;
 use wui_core::message::{ContentBlock, Message, Role};
 use wui_core::provider::{ChatRequest, Provider, ProviderError};
@@ -182,9 +137,7 @@ use crate::compress::{CompressResult, CompressStrategy};
 use super::checkpoint::{CheckpointStore, RunCheckpoint};
 use super::executor::{CompletedTool, PendingTool, ToolExecutor};
 use super::hooks::HookRunner;
-use super::permission::{
-    self, PermissionMode, PermissionOutcome, PermissionRules, PermissionVerdict, SessionPermissions,
-};
+use super::permission::{PermissionMode, PermissionRules, SessionPermissions};
 use super::registry::ToolRegistry;
 
 /// Maximum number of events buffered between the loop and the caller.
@@ -762,7 +715,7 @@ async fn run_loop(
                 let registry_c = Arc::clone(&active_registry);
                 let tx_c = tx.clone();
                 auth_tasks.spawn(async move {
-                    let (result, injections) = authorize_tool(
+                    let (result, injections) = auth::authorize_tool(
                         &config_c,
                         &registry_c,
                         id.clone(),
@@ -1290,304 +1243,7 @@ async fn emit_tool_event(done: &CompletedTool, tx: &mpsc::Sender<AgentEvent>) {
     tx.send(event).await.ok();
 }
 
-/// Create an immediately-completed failed tool (no execution, no timer).
-fn instant_failure(
-    id: ToolCallId,
-    name: String,
-    output: wui_core::tool::ToolOutput,
-) -> CompletedTool {
-    CompletedTool {
-        id,
-        name,
-        output,
-        ms: 0,
-        attempts: 1,
-    }
-}
-
-/// Detect whether an `AgentError` indicates a prompt-too-long rejection.
-///
-/// Providers signal this differently — Anthropic returns a 400 with
-/// "prompt is too long", OpenAI returns "maximum context length exceeded".
-/// This check is intentionally broad to catch variations.
-fn is_prompt_too_long(e: &AgentError) -> bool {
-    let msg = e.message.to_lowercase();
-    msg.contains("prompt is too long")
-        || msg.contains("too long")
-        || msg.contains("maximum context length")
-        || msg.contains("context_length_exceeded")
-}
-
-/// Build a system-reminder `Message` from plain text.
-///
-/// Used to inject framework-level notices into the conversation so the LLM
-/// can see them without mistaking them for user input.
-fn system_reminder_msg(text: &str) -> Message {
-    Message {
-        id: uuid::Uuid::new_v4().to_string(),
-        role: Role::System,
-        content: vec![ContentBlock::Text {
-            text: wui_core::fmt::system_reminder(text),
-        }],
-    }
-}
-
-/// Outcome of a concurrent authorization task.
-///
-/// Both variants carry `injections` — system messages produced by the HITL
-/// flow (e.g., "tool X was approved"). These are collected and applied to
-/// `messages` before the assistant turn is committed.
-enum AuthOutcome {
-    Allowed {
-        id: ToolCallId,
-        name: String,
-        input: serde_json::Value,
-        injections: Vec<Message>,
-    },
-    Denied {
-        tool: CompletedTool,
-        injections: Vec<Message>,
-    },
-}
-
-/// Verify that a tool call is permitted to run.
-///
-/// Checks in this order — first match wins:
-///   1. Pre-tool hook (may block or mutate input).
-///   2. Static deny rules — hard constraint, no override possible.
-///   3. Session always-denied — user's runtime decision to block.
-///   4. Static allow rules — developer pre-approval, skips prompting.
-///   5. Session always-allowed — user's runtime decision to allow.
-///   6. Mode-based check (Auto → allow, Readonly → check is_readonly, Ask → HITL).
-///
-/// Returns `(Ok(effective_input), injections)` when cleared. The input may
-/// differ from the original if a `PreToolUse` hook mutated it. `injections`
-/// contains HITL system messages to be applied to the conversation history.
-/// Returns `(Err(CompletedTool), injections)` when blocked or denied.
-async fn authorize_tool(
-    config: &RunConfig,
-    registry: &ToolRegistry,
-    id: ToolCallId,
-    name: String,
-    input: serde_json::Value,
-    tx: &mpsc::Sender<AgentEvent>,
-) -> (Result<serde_json::Value, CompletedTool>, Vec<Message>) {
-    // 1. Pre-tool hook — may allow, mutate, or block.
-    let input = match config.hooks.pre_tool_use(&name, &input).await {
-        HookDecision::Block { reason } => {
-            return (
-                Err(instant_failure(id, name, output_hook_blocked(reason))),
-                vec![],
-            )
-        }
-        HookDecision::Mutate { input: new } => new,
-        // MutateOutput is not meaningful for PreToolUse — treat as Allow.
-        HookDecision::Allow | HookDecision::MutateOutput { .. } => input,
-    };
-
-    // Compute per-invocation tool metadata once — reused across checks below.
-    let tool_impl = registry.get(&name);
-    let tool_meta = tool_impl
-        .as_deref()
-        .map(|t| t.meta(&input))
-        .unwrap_or_default();
-    let perm_key = tool_meta.permission_key.clone();
-    let perm_key_ref = perm_key.as_deref();
-    let is_destructive = tool_meta.destructive;
-    let tool_is_readonly = tool_meta.readonly;
-    let needs_interaction = tool_meta.requires_interaction;
-
-    // Prepare a tool-specific permission matcher for wildcard rules.
-    let perm_matcher = tool_impl
-        .as_deref()
-        .and_then(|t| t.permission_matcher(&input));
-    let matcher_ref: Option<&(dyn Fn(&str) -> bool + Send + Sync)> =
-        perm_matcher.as_ref().map(|b| b.as_ref() as _);
-
-    // Steps 2–6: unified permission verdict (structural check → static rules →
-    // session memory → mode-based decision). The PreToolUse hook (step 1) runs
-    // above; HITL approval (step 7) runs below when NeedsApproval is returned.
-    let check = permission::PermissionCheck {
-        tool_name: &name,
-        permission_key: perm_key_ref,
-        is_readonly: tool_is_readonly,
-        requires_interaction: needs_interaction,
-        matcher: matcher_ref,
-    };
-    let verdict = config
-        .rules
-        .verdict(&config.session_perms, &config.permission, &check)
-        .await;
-
-    match verdict {
-        PermissionVerdict::Allowed { source } => {
-            tracing::debug!(tool = %name, ?source, "permission granted");
-            return (Ok(input), vec![]);
-        }
-        PermissionVerdict::Denied { reason, source } => {
-            tracing::debug!(tool = %name, ?source, %reason, "permission denied");
-            return (
-                Err(instant_failure(id, name, output_permission_denied(reason))),
-                vec![],
-            );
-        }
-        // NeedsApproval: fall through to mode-based check below.
-        // The verdict returns NeedsApproval for both Ask and Callback modes;
-        // the existing `permission::check` call handles the Callback distinction.
-        PermissionVerdict::NeedsApproval => {}
-    }
-
-    // 7. Mode-based permission check.
-    //    Enrich the description with key suffix and destructive flag so the
-    //    human sees enough context to make a meaningful decision.
-    let description = {
-        let base = match perm_key_ref {
-            Some(key) => format!("call {name}({key})"),
-            None => format!("call {name}"),
-        };
-        if is_destructive {
-            format!("{base} [destructive — cannot be undone]")
-        } else {
-            base
-        }
-    };
-    let ctrl_req = ControlRequest {
-        id: uuid::Uuid::new_v4().to_string(),
-        kind: ControlKind::PermissionRequest {
-            tool_name: name.clone(),
-            description,
-        },
-    };
-
-    match permission::check(&config.permission, &ctrl_req, tool_is_readonly, &input) {
-        PermissionOutcome::Allowed => (Ok(input), vec![]),
-        PermissionOutcome::Denied { reason } => (
-            Err(instant_failure(id, name, output_permission_denied(reason))),
-            vec![],
-        ),
-        PermissionOutcome::NeedsApproval => {
-            await_approval(config, id, name, input, ctrl_req, tx).await
-        }
-    }
-}
-
-/// Emit a `ControlHandle`, wait for the human's decision, and return the
-/// outcome along with any injection messages produced by the exchange.
-///
-/// Extracted from `authorize_tool` so each function has a single clear job.
-/// The returned `Vec<Message>` contains the HITL permission system message
-/// to be applied to conversation history after all tool auth tasks settle.
-async fn await_approval(
-    config: &RunConfig,
-    id: ToolCallId,
-    name: String,
-    input: serde_json::Value,
-    ctrl_req: ControlRequest,
-    tx: &mpsc::Sender<AgentEvent>,
-) -> (Result<serde_json::Value, CompletedTool>, Vec<Message>) {
-    let request_id = ctrl_req.id.clone();
-    let (handle, rx) = ControlHandle::new(ctrl_req);
-    tx.send(AgentEvent::Control(handle)).await.ok();
-
-    let response = rx.await.unwrap_or_else(|_| {
-        ControlResponse::deny(
-            request_id,
-            "control handle dropped before response was sent",
-        )
-    });
-
-    // Collect the human's decision as a system message. It will be injected
-    // into `messages` once all auth tasks for this turn have settled, placing
-    // it before the assistant message so the LLM sees it on the next call.
-    let injection = Message::system(permission::response_to_system_message(&response));
-
-    let result = match response.decision {
-        ControlDecision::Deny { reason } => {
-            Err(instant_failure(id, name, output_permission_denied(reason)))
-        }
-
-        ControlDecision::DenyAlways { reason } => {
-            config.session_perms.set_always_deny(name.clone()).await;
-            Err(instant_failure(id, name, output_permission_denied(reason)))
-        }
-
-        ControlDecision::ApproveAlways => {
-            config.session_perms.set_always_allow(name).await;
-            Ok(input)
-        }
-
-        // The modification note (if any) is already in the system message above.
-        ControlDecision::Approve { .. } => Ok(input),
-    };
-
-    (result, vec![injection])
-}
-
-/// Extract the text content of the most recent assistant message.
-fn last_assistant_text(messages: &[Message]) -> &str {
-    messages
-        .iter()
-        .rev()
-        .find_map(|m| {
-            if m.role != Role::Assistant {
-                return None;
-            }
-            m.content.iter().find_map(|b| {
-                if let ContentBlock::Text { text } = b {
-                    Some(text.as_str())
-                } else {
-                    None
-                }
-            })
-        })
-        .unwrap_or("")
-}
-
-/// Replace the text content of the most recent assistant message.
-///
-/// Called when a `PreStop` hook returns `MutateOutput` — the hook has
-/// rewritten the response, and the message history must reflect the mutation
-/// before the run completes.
-fn replace_last_assistant_text(messages: &mut [Message], new_text: String) {
-    for msg in messages.iter_mut().rev() {
-        if msg.role != Role::Assistant {
-            continue;
-        }
-        for block in msg.content.iter_mut() {
-            if let ContentBlock::Text { text } = block {
-                *text = new_text;
-                return;
-            }
-        }
-    }
-}
-
-/// Append a deferred-tools listing to the system prompt when needed.
-///
-/// If the registry has no deferred tools, returns the base unchanged.
-/// Otherwise appends an "## Additional tools" section so the LLM knows
-/// these tools exist and should call ToolSearch to get their schemas.
-fn augment_system(base: &str, registry: &ToolRegistry) -> String {
-    let deferred = registry.deferred_entries();
-    if deferred.is_empty() {
-        return base.to_string();
-    }
-
-    let listing = deferred
-        .iter()
-        .map(|e| format!("- **{}**: {}", e.name, e.description))
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    let section = format!(
-        "## Additional tools\n\
-        These tools are available but require loading. \
-        Call `ToolSearch` with the tool name or a keyword before using them:\n\n\
-        {listing}"
-    );
-
-    format!("{base}\n\n{}", wui_core::fmt::system_reminder(&section))
-}
+// Auth, helpers, and small utilities live in auth.rs and run_helpers.rs.
 
 #[cfg(test)]
 mod tests {
