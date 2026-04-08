@@ -102,12 +102,34 @@ pub struct TokenUsage {
 impl TokenUsage {
     /// Total non-cache tokens consumed.
     pub fn total(&self) -> u32 {
-        self.input_tokens + self.output_tokens
+        self.input_tokens.saturating_add(self.output_tokens)
     }
 
     /// All tokens consumed including cache activity.
     pub fn total_with_cache(&self) -> u32 {
-        self.total() + self.cache_read_tokens + self.cache_write_tokens
+        self.total()
+            .saturating_add(self.cache_read_tokens)
+            .saturating_add(self.cache_write_tokens)
+    }
+}
+
+impl std::ops::Add for TokenUsage {
+    type Output = Self;
+    fn add(self, rhs: Self) -> Self {
+        Self {
+            input_tokens: self.input_tokens.saturating_add(rhs.input_tokens),
+            output_tokens: self.output_tokens.saturating_add(rhs.output_tokens),
+            cache_read_tokens: self.cache_read_tokens.saturating_add(rhs.cache_read_tokens),
+            cache_write_tokens: self
+                .cache_write_tokens
+                .saturating_add(rhs.cache_write_tokens),
+        }
+    }
+}
+
+impl std::ops::AddAssign for TokenUsage {
+    fn add_assign(&mut self, rhs: Self) {
+        *self = self.clone() + rhs;
     }
 }
 

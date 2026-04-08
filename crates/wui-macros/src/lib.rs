@@ -166,8 +166,6 @@ fn expand_tool_input(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream
         quote! { ::serde_json::json!([ #(#required_fields),* ]) }
     };
 
-    let struct_name_str = name.to_string();
-
     let expanded = quote! {
         impl #name {
             /// Returns a JSON Schema object describing this tool's input parameters.
@@ -186,7 +184,6 @@ fn expand_tool_input(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream
             /// Returns `Ok(Self)` on success, or `Err(String)` naming the
             /// struct and the missing or invalid field.
             pub fn from_value(value: &::serde_json::Value) -> Result<Self, String> {
-                let _ = #struct_name_str; // ensure the name is accessible for diagnostics
                 Ok(Self {
                     #(#from_value_fields),*
                 })

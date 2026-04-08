@@ -264,13 +264,13 @@ impl MemoryTools {
     pub fn build(self) -> Vec<Arc<dyn Tool>> {
         let mut tools: Vec<Arc<dyn Tool>> = Vec::new();
         if let Some(b) = self.recall {
-            tools.push(Arc::new(RecallTool { backend: b }));
+            tools.push(Arc::new(RecallTool::new(b)));
         }
         if let Some(b) = self.remember {
-            tools.push(Arc::new(RememberTool { backend: b }));
+            tools.push(Arc::new(RememberTool::new(b)));
         }
         if let Some(b) = self.forget {
-            tools.push(Arc::new(ForgetTool { backend: b }));
+            tools.push(Arc::new(ForgetTool::new(b)));
         }
         tools
     }
@@ -302,13 +302,6 @@ pub fn all_memory_tools(store: Arc<InMemoryStore>) -> Vec<Arc<dyn Tool>> {
 
 // ── Tools ─────────────────────────────────────────────────────────────────────
 
-/// Generates the boilerplate struct + constructor for a single-backend memory tool.
-///
-/// Usage: `memory_tool!(StructName, BackendTrait);`
-///
-/// This expands to a `struct StructName { backend: Arc<dyn BackendTrait> }` with
-/// a `pub(crate) fn new(b: Arc<dyn BackendTrait>) -> Self` constructor.
-/// Implement the `Tool` trait body (name, description, input_schema, call) manually.
 macro_rules! memory_tool {
     ($name:ident, $backend:ident) => {
         struct $name {
@@ -316,7 +309,6 @@ macro_rules! memory_tool {
         }
 
         impl $name {
-            #[allow(dead_code)]
             pub(crate) fn new(b: Arc<dyn $backend>) -> Self {
                 Self { backend: b }
             }
