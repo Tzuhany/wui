@@ -52,6 +52,9 @@ use syn::{parse_macro_input, Data, DeriveInput, Field, Fields, Lit, Meta, Type};
 /// | `u8`…`u64`, `usize`   | `"integer"`      |
 /// | `i8`…`i64`, `isize`   | `"integer"`      |
 /// | `f32`, `f64`          | `"number"`       |
+/// | `Vec`                 | `"array"`        |
+/// | `HashMap` / `BTreeMap` / `IndexMap` | `"object"` |
+/// | `Value` (serde_json)  | `"object"`       |
 /// | anything else         | `"string"` (fallback) |
 ///
 /// # Prerequisites
@@ -245,6 +248,9 @@ fn rust_type_to_json_type(ty: &Type) -> &'static str {
                 "u8" | "u16" | "u32" | "u64" | "u128" | "usize" | "i8" | "i16" | "i32" | "i64"
                 | "i128" | "isize" => "integer",
                 "f32" | "f64" => "number",
+                "Vec" => "array",
+                "HashMap" | "BTreeMap" | "IndexMap" => "object",
+                "Value" => "object", // serde_json::Value
                 _ => "string",
             };
         }

@@ -595,11 +595,10 @@ async fn run_loop(
                     method: Some(method),
                     freed,
                     messages: new_msgs,
-                    fallback_used,
                 }) => {
                     tracing::debug!(method = ?method, freed_tokens = freed, "context compressed");
                     messages = new_msgs;
-                    if fallback_used {
+                    if method == wui_core::event::CompressMethod::L3Failed {
                         tx.send(AgentEvent::CompressFallback { freed }).await.ok();
                     }
                     tx.send(AgentEvent::Compressed { method, freed }).await.ok();

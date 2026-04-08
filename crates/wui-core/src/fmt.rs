@@ -82,6 +82,7 @@ pub fn extract_tag<'a>(content: &'a str, tag: &str) -> Option<&'a str> {
 ///
 /// Scans `content` for `<tag>...</tag>` patterns and returns a map from tag
 /// name to trimmed inner content. Duplicate tags return the last occurrence.
+/// Uses a single linear pass over the string.
 ///
 /// ```rust
 /// # use wui_core::fmt::extract_tags;
@@ -90,39 +91,33 @@ pub fn extract_tag<'a>(content: &'a str, tag: &str) -> Option<&'a str> {
 /// assert_eq!(tags.get("name").map(String::as_str), Some("Alice"));
 /// assert_eq!(tags.get("score").map(String::as_str), Some("99"));
 /// ```
-pub fn extract_tags(content: &str) -> std::collections::HashMap<String, String> {
-    let mut map = std::collections::HashMap::new();
-    let mut rest = content;
+pub fn extract_tags(text: &str) -> std::collections::HashMap<String, String> {
+    let mut result = std::collections::HashMap::new();
+    let mut rest = text;
     while let Some(open_start) = rest.find('<') {
         let after_open = &rest[open_start + 1..];
-        // Must be an opening tag (not a closing tag).
-        if after_open.starts_with('/') {
-            // Skip past this '<' and continue.
-            rest = &rest[open_start + 1..];
-            continue;
-        }
-        // Find the end of the tag name (space, '>', or '/' for self-closing).
-        let tag_end = after_open.find(['>', '/', ' ']).unwrap_or(after_open.len());
+        // Find tag name end (space or >)
+        let tag_end = after_open.find(['>', ' ', '/']);
+        let Some(tag_end) = tag_end else { break };
         let tag_name = &after_open[..tag_end];
-        if tag_name.is_empty() {
+        if tag_name.is_empty() || tag_name.starts_with('/') {
             rest = &rest[open_start + 1..];
             continue;
         }
-        let open_tag = format!("<{tag_name}>");
         let close_tag = format!("</{tag_name}>");
-        if let Some(inner_start) = rest.find(&open_tag) {
-            let content_start = inner_start + open_tag.len();
-            if let Some(close_pos) = rest[content_start..].find(&close_tag) {
-                let inner = rest[content_start..content_start + close_pos].trim();
-                map.insert(tag_name.to_string(), inner.to_string());
-                // Advance past the closing tag.
-                rest = &rest[content_start + close_pos + close_tag.len()..];
-                continue;
-            }
+        let content_start = match after_open[tag_end..].find('>') {
+            Some(i) => open_start + 1 + tag_end + i + 1,
+            None => break,
+        };
+        if let Some(close_pos) = rest[content_start..].find(&close_tag) {
+            let content = rest[content_start..content_start + close_pos].trim();
+            result.insert(tag_name.to_string(), content.to_string());
+            rest = &rest[content_start + close_pos + close_tag.len()..];
+        } else {
+            rest = &rest[open_start + 1..];
         }
-        rest = &rest[open_start + 1..];
     }
-    map
+    result
 }
 
 #[cfg(test)]
@@ -144,5 +139,30 @@ mod tests {
     #[test]
     fn kv_formats_correctly() {
         assert_eq!(kv("depth", "2"), "<depth>2</depth>");
+    }
+
+    #[test]
+    fn extract_tags_multiple() {
+        let text = "<name>Alice</name><score>99</score><city>Paris</city>";
+        let tags = extract_tags(text);
+        assert_eq!(tags.get("name").map(String::as_str), Some("Alice"));
+        assert_eq!(tags.get("score").map(String::as_str), Some("99"));
+        assert_eq!(tags.get("city").map(String::as_str), Some("Paris"));
+    }
+
+    #[test]
+    fn extract_tags_with_surrounding_text() {
+        let text = "some text <answer>42</answer> more text <reason>because</reason> end";
+        let tags = extract_tags(text);
+        assert_eq!(tags.get("answer").map(String::as_str), Some("42"));
+        assert_eq!(tags.get("reason").map(String::as_str), Some("because"));
+    }
+
+    #[test]
+    fn extract_tags_skips_closing_tags() {
+        let text = "</broken><valid>yes</valid>";
+        let tags = extract_tags(text);
+        assert_eq!(tags.get("valid").map(String::as_str), Some("yes"));
+        assert!(!tags.contains_key("broken"));
     }
 }

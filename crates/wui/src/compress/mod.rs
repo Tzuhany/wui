@@ -76,9 +76,6 @@ pub struct CompressResult {
     pub freed: usize,
     /// Which compression method was applied, if any.
     pub method: Option<CompressMethod>,
-    /// `true` when L3 summarisation was attempted but failed and the pipeline
-    /// fell back to L2 collapse.
-    pub fallback_used: bool,
 }
 
 /// Configuration for the compression pipeline.
@@ -468,20 +465,15 @@ impl CompressStrategy for CompressPipeline {
             .maybe_compress(&messages, provider.as_ref(), model)
             .await
         {
-            Some((msgs, method, freed)) => {
-                let fallback_used = method == CompressMethod::L3Failed;
-                Ok(CompressResult {
-                    messages: msgs,
-                    freed,
-                    method: Some(method),
-                    fallback_used,
-                })
-            }
+            Some((msgs, method, freed)) => Ok(CompressResult {
+                messages: msgs,
+                freed,
+                method: Some(method),
+            }),
             None => Ok(CompressResult {
                 messages,
                 freed: 0,
                 method: None,
-                fallback_used: false,
             }),
         }
     }
@@ -582,7 +574,6 @@ impl SummarizingCompressor {
                 messages,
                 freed: 0,
                 method: None,
-                fallback_used: false,
             });
         }
 
@@ -595,7 +586,6 @@ impl SummarizingCompressor {
                 messages,
                 freed: 0,
                 method: None,
-                fallback_used: false,
             });
         }
 
@@ -613,7 +603,6 @@ impl SummarizingCompressor {
                 messages,
                 freed: 0,
                 method: None,
-                fallback_used: false,
             });
         }
 
@@ -644,7 +633,6 @@ impl SummarizingCompressor {
                 messages,
                 freed: 0,
                 method: None,
-                fallback_used: false,
             });
         }
 
@@ -666,7 +654,6 @@ impl SummarizingCompressor {
             messages: result,
             freed,
             method: Some(wui_core::event::CompressMethod::Summarize),
-            fallback_used: false,
         })
     }
 }

@@ -143,7 +143,7 @@ impl Tool for SkillTool {
 
     async fn call(&self, _input: Value, _ctx: &ToolCtx) -> ToolOutput {
         ToolOutput::success(format!("Skill '{}' loaded into context.", self.skill_name))
-            .inject(ContextInjection::system(self.content.clone()))
+            .inject(ContextInjection::new(self.content.clone()))
     }
 }
 

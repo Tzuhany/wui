@@ -240,6 +240,7 @@ pub(crate) fn build_run_config(
             &config.tools,
             &config.deferred_tools,
             &config.catalogs,
+            config.catalog_limit,
         )),
         hooks: Arc::new(HookRunner::new(config.hooks.clone())),
         compress: config.compress.clone(),
@@ -272,6 +273,7 @@ pub(crate) fn build_registry(
     resident: &[Arc<dyn wui_core::tool::Tool>],
     deferred: &[Arc<dyn wui_core::tool::Tool>],
     catalogs: &[Arc<dyn crate::catalog::ToolCatalog>],
+    catalog_limit: usize,
 ) -> ToolRegistry {
     let has_deferred = !deferred.is_empty();
     let has_catalogs = !catalogs.is_empty();
@@ -280,7 +282,9 @@ pub(crate) fn build_registry(
         return ToolRegistry::new(resident.to_vec(), vec![]);
     }
 
-    let tool_search = Arc::new(ToolSearch::new(deferred.to_vec(), catalogs.to_vec()));
+    let tool_search = Arc::new(
+        ToolSearch::new(deferred.to_vec(), catalogs.to_vec()).with_catalog_limit(catalog_limit),
+    );
     let mut all_resident = resident.to_vec();
     all_resident.push(tool_search);
     ToolRegistry::new(all_resident, deferred.to_vec())
