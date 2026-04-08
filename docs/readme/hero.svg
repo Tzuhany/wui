@@ -27,29 +27,29 @@
   <circle cx="1240" cy="210" r="170" fill="url(#accentB)" filter="url(#blur)"/>
 
   <rect x="112" y="98" width="164" height="34" rx="17" fill="#0F766E"/>
-  <text x="194" y="120" text-anchor="middle" fill="#F8FAFC" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="16" font-weight="700" letter-spacing="0.10em">EXECUTOR FIRST</text>
+  <text x="194" y="120" text-anchor="middle" fill="#F8FAFC" font-family="Arial, Helvetica, sans-serif" font-size="16" font-weight="700" letter-spacing="0.10em">EXECUTOR FIRST</text>
 
-  <text x="112" y="258" fill="#F8FAFC" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="124" font-weight="800" letter-spacing="-0.05em">Wui</text>
+  <text x="112" y="258" fill="#F8FAFC" font-family="Arial, Helvetica, sans-serif" font-size="124" font-weight="800" letter-spacing="-0.05em">Wui</text>
 
-  <text x="112" y="334" fill="#CBD5E1" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="32" font-weight="500">
+  <text x="112" y="334" fill="#CBD5E1" font-family="Arial, Helvetica, sans-serif" font-size="32" font-weight="500">
     An honest Rust runtime for LLM agents.
   </text>
-  <text x="112" y="382" fill="#94A3B8" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="26">
+  <text x="112" y="382" fill="#94A3B8" font-family="Arial, Helvetica, sans-serif" font-size="26">
     Stream text, run tools, pause for humans, compress context, and keep
   </text>
-  <text x="112" y="420" fill="#94A3B8" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="26">
+  <text x="112" y="420" fill="#94A3B8" font-family="Arial, Helvetica, sans-serif" font-size="26">
     execution semantics explicit.
   </text>
 
   <g opacity="0.95">
     <rect x="112" y="506" width="188" height="50" rx="25" fill="#111827" stroke="#1E293B"/>
-    <text x="206" y="538" text-anchor="middle" fill="#E2E8F0" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="18" font-weight="600">streaming tools</text>
+    <text x="206" y="538" text-anchor="middle" fill="#E2E8F0" font-family="Arial, Helvetica, sans-serif" font-size="18" font-weight="600">streaming tools</text>
 
     <rect x="320" y="506" width="156" height="50" rx="25" fill="#111827" stroke="#1E293B"/>
-    <text x="398" y="538" text-anchor="middle" fill="#E2E8F0" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="18" font-weight="600">native HITL</text>
+    <text x="398" y="538" text-anchor="middle" fill="#E2E8F0" font-family="Arial, Helvetica, sans-serif" font-size="18" font-weight="600">native HITL</text>
 
     <rect x="496" y="506" width="214" height="50" rx="25" fill="#111827" stroke="#1E293B"/>
-    <text x="603" y="538" text-anchor="middle" fill="#E2E8F0" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="18" font-weight="600">optional extensions</text>
+    <text x="603" y="538" text-anchor="middle" fill="#E2E8F0" font-family="Arial, Helvetica, sans-serif" font-size="18" font-weight="600">optional extensions</text>
   </g>
 
   <g transform="translate(980 126)">
@@ -58,34 +58,34 @@
     <circle cx="58" cy="55" r="7" fill="#14B8A6"/>
     <circle cx="82" cy="55" r="7" fill="#0EA5E9"/>
     <circle cx="106" cy="55" r="7" fill="#F59E0B"/>
-    <text x="138" y="61" fill="#E2E8F0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="18">runtime loop</text>
+    <text x="138" y="61" fill="#E2E8F0" font-family="'Courier New', Courier, monospace" font-size="18">runtime loop</text>
 
     <rect x="28" y="118" width="188" height="104" rx="20" fill="#0F172A" stroke="#164E63"/>
-    <text x="54" y="156" fill="#F8FAFC" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="22" font-weight="700">provider stream</text>
-    <text x="54" y="188" fill="#93C5FD" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="18">TextDelta</text>
-    <text x="54" y="212" fill="#93C5FD" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="18">ToolUseEnd</text>
+    <text x="54" y="156" fill="#F8FAFC" font-family="Arial, Helvetica, sans-serif" font-size="22" font-weight="700">provider stream</text>
+    <text x="54" y="188" fill="#93C5FD" font-family="'Courier New', Courier, monospace" font-size="18">TextDelta</text>
+    <text x="54" y="212" fill="#93C5FD" font-family="'Courier New', Courier, monospace" font-size="18">ToolUseEnd</text>
 
     <rect x="258" y="118" width="188" height="104" rx="20" fill="#0F172A" stroke="#115E59"/>
-    <text x="284" y="156" fill="#F8FAFC" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="22" font-weight="700">authorize</text>
-    <text x="284" y="188" fill="#99F6E4" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="18">readonly</text>
-    <text x="284" y="212" fill="#99F6E4" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="18">HITL / allow / deny</text>
+    <text x="284" y="156" fill="#F8FAFC" font-family="Arial, Helvetica, sans-serif" font-size="22" font-weight="700">authorize</text>
+    <text x="284" y="188" fill="#99F6E4" font-family="'Courier New', Courier, monospace" font-size="18">readonly</text>
+    <text x="284" y="212" fill="#99F6E4" font-family="'Courier New', Courier, monospace" font-size="15">HITL / allow / deny</text>
 
     <rect x="28" y="258" width="188" height="104" rx="20" fill="#0F172A" stroke="#1D4ED8"/>
-    <text x="54" y="296" fill="#F8FAFC" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="22" font-weight="700">dispatch tools</text>
-    <text x="54" y="328" fill="#BFDBFE" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="18">concurrent</text>
-    <text x="54" y="352" fill="#BFDBFE" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="18">per invocation</text>
+    <text x="54" y="296" fill="#F8FAFC" font-family="Arial, Helvetica, sans-serif" font-size="22" font-weight="700">dispatch tools</text>
+    <text x="54" y="328" fill="#BFDBFE" font-family="'Courier New', Courier, monospace" font-size="18">concurrent</text>
+    <text x="54" y="352" fill="#BFDBFE" font-family="'Courier New', Courier, monospace" font-size="18">per invocation</text>
 
     <rect x="258" y="258" width="188" height="104" rx="20" fill="#0F172A" stroke="#9A3412"/>
-    <text x="284" y="296" fill="#F8FAFC" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="22" font-weight="700">compress</text>
-    <text x="284" y="328" fill="#FDE68A" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="18">trim</text>
-    <text x="284" y="352" fill="#FDE68A" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="18">collapse -> summarize</text>
+    <text x="284" y="296" fill="#F8FAFC" font-family="Arial, Helvetica, sans-serif" font-size="22" font-weight="700">compress</text>
+    <text x="284" y="328" fill="#FDE68A" font-family="'Courier New', Courier, monospace" font-size="18">trim</text>
+    <text x="284" y="352" fill="#FDE68A" font-family="'Courier New', Courier, monospace" font-size="15">collapse → summarize</text>
 
     <path d="M216 170H250" stroke="#475569" stroke-width="2.5" stroke-linecap="round"/>
     <path d="M446 170H458C468 170 476 178 476 188V310C476 320 468 328 458 328H446" stroke="#475569" stroke-width="2.5" stroke-linecap="round"/>
     <path d="M216 310H250" stroke="#475569" stroke-width="2.5" stroke-linecap="round"/>
     <path d="M122 362V394C122 404 130 412 140 412H334C344 412 352 420 352 430V438" stroke="#475569" stroke-width="2.5" stroke-linecap="round"/>
 
-    <rect x="108" y="398" width="258" height="40" rx="20" fill="#111827" stroke="#1F2937"/>
-    <text x="237" y="424" text-anchor="middle" fill="#CBD5E1" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="17">repeat until StopReason::EndTurn</text>
+    <rect x="108" y="398" width="280" height="40" rx="20" fill="#111827" stroke="#1F2937"/>
+    <text x="248" y="424" text-anchor="middle" fill="#CBD5E1" font-family="'Courier New', Courier, monospace" font-size="14">repeat until StopReason::EndTurn</text>
   </g>
 </svg>

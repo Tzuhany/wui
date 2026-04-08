@@ -13,8 +13,8 @@
   <rect width="1600" height="540" rx="28" fill="url(#panel)"/>
   <rect x="48" y="48" width="1504" height="444" rx="24" stroke="#E2E8F0"/>
 
-  <text x="96" y="112" fill="#0F172A" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="34" font-weight="800">The runtime loop, at a glance</text>
-  <text x="96" y="148" fill="#475569" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="20">
+  <text x="96" y="112" fill="#0F172A" font-family="Arial, Helvetica, sans-serif" font-size="34" font-weight="800">The runtime loop, at a glance</text>
+  <text x="96" y="148" fill="#475569" font-family="Arial, Helvetica, sans-serif" font-size="20">
     Streaming provider events become explicit execution steps with clear safety and ordering boundaries.
   </text>
 
@@ -22,38 +22,36 @@
 
   <g>
     <rect x="112" y="216" width="220" height="116" rx="24" fill="#0F172A"/>
-    <text x="144" y="260" fill="#F8FAFC" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="24" font-weight="700">1. stream</text>
-    <text x="144" y="292" fill="#94A3B8" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="18">text, thinking, tool calls</text>
+    <text x="144" y="260" fill="#F8FAFC" font-family="Arial, Helvetica, sans-serif" font-size="24" font-weight="700">1. stream</text>
+    <text x="144" y="292" fill="#94A3B8" font-family="Arial, Helvetica, sans-serif" font-size="18">text, thinking, tool calls</text>
   </g>
 
   <g>
     <rect x="386" y="184" width="220" height="116" rx="24" fill="#ECFEFF" stroke="#99F6E4"/>
-    <text x="418" y="228" fill="#134E4A" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="24" font-weight="700">2. parse</text>
-    <text x="418" y="260" fill="#0F766E" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="18">build assistant blocks</text>
+    <text x="418" y="228" fill="#134E4A" font-family="Arial, Helvetica, sans-serif" font-size="24" font-weight="700">2. parse</text>
+    <text x="418" y="260" fill="#0F766E" font-family="Arial, Helvetica, sans-serif" font-size="18">build assistant blocks</text>
   </g>
 
   <g>
     <rect x="660" y="216" width="220" height="116" rx="24" fill="#FFF7ED" stroke="#FDBA74"/>
-    <text x="692" y="260" fill="#9A3412" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="24" font-weight="700">3. authorize</text>
-    <text x="692" y="292" fill="#C2410C" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="18">allow, deny, or HITL</text>
+    <text x="692" y="260" fill="#9A3412" font-family="Arial, Helvetica, sans-serif" font-size="24" font-weight="700">3. authorize</text>
+    <text x="692" y="292" fill="#C2410C" font-family="Arial, Helvetica, sans-serif" font-size="18">allow, deny, or HITL</text>
   </g>
 
   <g>
     <rect x="934" y="184" width="220" height="116" rx="24" fill="#EFF6FF" stroke="#93C5FD"/>
-    <text x="966" y="228" fill="#1D4ED8" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="24" font-weight="700">4. dispatch</text>
-    <text x="966" y="260" fill="#2563EB" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="18">concurrent where safe</text>
+    <text x="966" y="228" fill="#1D4ED8" font-family="Arial, Helvetica, sans-serif" font-size="24" font-weight="700">4. dispatch</text>
+    <text x="966" y="260" fill="#2563EB" font-family="Arial, Helvetica, sans-serif" font-size="18">concurrent where safe</text>
   </g>
 
   <g>
     <rect x="1208" y="216" width="220" height="116" rx="24" fill="#F0FDF4" stroke="#86EFAC"/>
-    <text x="1240" y="260" fill="#166534" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="24" font-weight="700">5. continue</text>
-    <text x="1240" y="292" fill="#15803D" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="18">append results and loop</text>
+    <text x="1240" y="260" fill="#166534" font-family="Arial, Helvetica, sans-serif" font-size="24" font-weight="700">5. continue</text>
+    <text x="1240" y="292" fill="#15803D" font-family="Arial, Helvetica, sans-serif" font-size="18">append results and loop</text>
   </g>
 
   <g>
-    <rect x="530" y="386" width="540" height="70" rx="22" fill="#111827"/>
-    <text x="800" y="428" text-anchor="middle" fill="#E2E8F0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="19">
-      compression, retries, checkpoints, hooks, and permissions stay inside the runtime
-    </text>
+    <rect x="380" y="386" width="840" height="60" rx="22" fill="#111827"/>
+    <text x="800" y="423" text-anchor="middle" fill="#E2E8F0" font-family="'Courier New', Courier, monospace" font-size="16">compression, retries, checkpoints, hooks, and permissions stay inside the runtime</text>
   </g>
 </svg>
