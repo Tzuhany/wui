@@ -264,6 +264,10 @@ pub enum CompressMethod {
 pub struct ControlHandle {
     /// The details of what the agent is requesting.
     pub request: ControlRequest,
+    // Arc<Mutex<Option<...>>> ensures ControlHandle is cheaply Clone-able (e.g.
+    // for storage in multiple UI components) while guaranteeing that only the
+    // *first* response call (approve/deny/etc.) wins. Subsequent calls are
+    // silent no-ops because `take()` consumes the inner sender.
     tx: Arc<Mutex<Option<tokio::sync::oneshot::Sender<ControlResponse>>>>,
 }
 

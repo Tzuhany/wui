@@ -339,6 +339,7 @@ fn apply_output_limit(mut output: ToolOutput, limit: Option<usize>) -> ToolOutpu
     output.content.push_str(&format!(
         "\n[output truncated: exceeded {max} character limit declared by this tool]"
     ));
+    output.truncated = true;
     output
 }
 

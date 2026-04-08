@@ -9,7 +9,7 @@
 
 use std::sync::Arc;
 
-use crate::compress::{CompactionStrategy, CompressPipeline};
+use crate::compress::{CompressPipeline, CompressStrategy};
 use crate::runtime::{CheckpointStore, PermissionMode, PermissionRules, RetryPolicy, SessionStore};
 use wui_core::hook::Hook;
 use wui_core::provider::Provider;
@@ -68,7 +68,7 @@ pub struct AgentConfig {
     pub tools: Vec<Arc<dyn Tool>>,
     pub hooks: Vec<Arc<dyn Hook>>,
     pub session_store: Option<Arc<dyn SessionStore>>,
-    pub compress: Arc<dyn CompactionStrategy>,
+    pub compress: Arc<dyn CompressStrategy>,
     pub permission: PermissionMode,
     /// Static allow/deny rules applied before the permission mode check.
     pub rules: PermissionRules,
@@ -290,12 +290,18 @@ impl AgentBuilder {
     ///
     /// ```rust,ignore
     /// Agent::builder(provider)
-    ///     .compaction(MyStrategy::new())
+    ///     .compress(MyStrategy::new())
     ///     .build()
     /// ```
-    pub fn compaction(mut self, strategy: impl CompactionStrategy + 'static) -> Self {
+    pub fn compress(mut self, strategy: impl CompressStrategy + 'static) -> Self {
         self.config.compress = Arc::new(strategy);
         self
+    }
+
+    /// Deprecated — use [`compress`](Self::compress) instead.
+    #[deprecated(since = "0.2.0", note = "use compress() instead")]
+    pub fn compaction(self, s: impl CompressStrategy + 'static) -> Self {
+        self.compress(s)
     }
 
     /// Add a `ToolCatalog` — a lazily-loaded, searchable tool source.

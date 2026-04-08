@@ -29,7 +29,7 @@ use wui_core::event::CompressMethod;
 use wui_core::message::{ContentBlock, Message, Role};
 use wui_core::provider::Provider;
 
-// ── CompactionStrategy ────────────────────────────────────────────────────────
+// ── CompressStrategy ──────────────────────────────────────────────────────────
 
 /// Pluggable context compression strategy.
 ///
@@ -41,11 +41,11 @@ use wui_core::provider::Provider;
 ///
 /// ```rust,ignore
 /// Agent::builder(provider)
-///     .compaction(MyStrategy::new())
+///     .compress(MyStrategy::new())
 ///     .build()
 /// ```
 #[async_trait]
-pub trait CompactionStrategy: Send + Sync + 'static {
+pub trait CompressStrategy: Send + Sync + 'static {
     /// Compress `messages` if needed, returning the (possibly shorter) list.
     ///
     /// The implementation may call the provider's LLM for summarisation.
@@ -185,6 +185,12 @@ impl CompressPipeline {
         self.total_tokens(messages) >= self.window_tokens
     }
 
+    /// Returns `true` when the context pressure meets or exceeds the
+    /// compression threshold and compression should run.
+    fn should_compress(&self, messages: &[Message]) -> bool {
+        self.pressure(messages) >= self.compact_threshold
+    }
+
     /// How many recent messages to keep during L2/L3 compression.
     fn keep_count(&self, message_count: usize) -> usize {
         ((message_count as f64 * self.collapse_keep_fraction) as usize).max(self.collapse_keep_min)
@@ -204,7 +210,7 @@ impl CompressPipeline {
         let after_l1 = self.total_tokens(&trimmed);
         let l1_reduced = after_l1 < before;
 
-        if l1_reduced && self.pressure(&trimmed) < self.compact_threshold {
+        if l1_reduced && !self.should_compress(&trimmed) {
             let freed = before.saturating_sub(after_l1);
             return Some((trimmed, CompressMethod::BudgetTrim, freed));
         }
@@ -215,13 +221,13 @@ impl CompressPipeline {
             messages.to_vec()
         };
 
-        if self.pressure(&working) < self.compact_threshold {
+        if !self.should_compress(&working) {
             return None; // No pressure.
         }
 
         // L2: collapse old messages into a placeholder.
         let collapsed = self.l2_collapse(&working);
-        if self.pressure(&collapsed) < self.compact_threshold {
+        if !self.should_compress(&collapsed) {
             let freed = before.saturating_sub(self.total_tokens(&collapsed));
             return Some((collapsed, CompressMethod::Collapse, freed));
         }
@@ -442,10 +448,10 @@ impl CompressPipeline {
     }
 }
 
-// ── CompactionStrategy impl for CompressPipeline ─────────────────────────────
+// ── CompressStrategy impl for CompressPipeline ───────────────────────────────
 
 #[async_trait]
-impl CompactionStrategy for CompressPipeline {
+impl CompressStrategy for CompressPipeline {
     async fn compress(
         &self,
         messages: Vec<wui_core::message::Message>,
@@ -498,7 +504,7 @@ impl CompactionStrategy for CompressPipeline {
 ///
 /// ```rust,ignore
 /// Agent::builder(provider)
-///     .compaction(SummarizingCompressor::default())
+///     .compress(SummarizingCompressor::default())
 ///     .build()
 /// ```
 #[derive(Debug, Clone)]
@@ -660,7 +666,7 @@ impl SummarizingCompressor {
 }
 
 #[async_trait]
-impl CompactionStrategy for SummarizingCompressor {
+impl CompressStrategy for SummarizingCompressor {
     async fn compress(
         &self,
         messages: Vec<wui_core::message::Message>,
