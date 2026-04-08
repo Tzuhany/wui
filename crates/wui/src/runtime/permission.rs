@@ -261,6 +261,104 @@ pub enum PermissionOutcome {
     NeedsApproval,
 }
 
+/// The verdict returned by the unified permission pipeline.
+///
+/// Combines static rules, session memory, and mode-based decisions into a
+/// single value. The `PreToolUse` hook and HITL approval flow are handled
+/// separately in `run.rs` — they are not part of this verdict.
+#[derive(Debug)]
+pub enum PermissionVerdict {
+    /// The tool call is unconditionally allowed; execute immediately.
+    Allowed,
+    /// The tool call is unconditionally denied; do not execute.
+    Denied { reason: String },
+    /// Human approval is required before executing (or a Callback must be
+    /// invoked with the actual input value — handled in `run.rs`).
+    NeedsApproval,
+}
+
+impl PermissionRules {
+    /// Full permission check combining static rules, session memory, and mode.
+    ///
+    /// Implements steps 2–7 of `authorize_tool` (the steps that follow the
+    /// `PreToolUse` hook). The hook itself stays in `run.rs` because it can
+    /// mutate the input before any permission decision is made.
+    ///
+    /// **Evaluation order** (first match wins):
+    /// 1. Structural check — tools requiring interaction are denied in Auto mode.
+    /// 2. Static deny rules — hard developer constraint.
+    /// 3. Session always-denied — user's runtime decision.
+    /// 4. Static allow rules — developer pre-approval.
+    /// 5. Session always-allowed — user's runtime decision.
+    /// 6. Mode-based check (Auto → allow, Readonly → check flag, Ask/Callback → NeedsApproval).
+    pub async fn verdict(
+        &self,
+        session: &SessionPermissions,
+        mode: &PermissionMode,
+        tool_name: &str,
+        permission_key: Option<&str>,
+        is_readonly: bool,
+        requires_interaction: bool,
+    ) -> PermissionVerdict {
+        // 1. Structural check: tools that require user interaction cannot run
+        //    headlessly in Auto mode.
+        if requires_interaction && matches!(mode, PermissionMode::Auto) {
+            return PermissionVerdict::Denied {
+                reason: format!(
+                    "tool '{tool_name}' requires user interaction and cannot run in Auto mode; \
+                     switch to PermissionMode::Ask or disable this tool for headless runs"
+                ),
+            };
+        }
+
+        // Evaluate static rules once — used at steps 2 and 4 below.
+        let static_rule = self.evaluate(tool_name, permission_key);
+
+        // 2. Static deny rules — developer hard constraint.
+        if static_rule == Some(false) {
+            return PermissionVerdict::Denied {
+                reason: format!("tool '{tool_name}' is in the configured deny list"),
+            };
+        }
+
+        // 3. Session always-denied — user's runtime decision (strengthens security).
+        if session.is_always_denied(tool_name).await {
+            return PermissionVerdict::Denied {
+                reason: format!("tool '{tool_name}' was previously denied for this session"),
+            };
+        }
+
+        // 4. Static allow rules — developer pre-approval (bypasses prompting).
+        if static_rule == Some(true) {
+            return PermissionVerdict::Allowed;
+        }
+
+        // 5. Session always-allowed — user's runtime decision to allow.
+        if session.is_always_allowed(tool_name).await {
+            return PermissionVerdict::Allowed;
+        }
+
+        // 6. Mode-based check.
+        match mode {
+            PermissionMode::Auto => PermissionVerdict::Allowed,
+            PermissionMode::Readonly => {
+                if is_readonly {
+                    PermissionVerdict::Allowed
+                } else {
+                    PermissionVerdict::Denied {
+                        reason: format!(
+                            "tool '{tool_name}' has side effects and is not permitted in read-only mode"
+                        ),
+                    }
+                }
+            }
+            // Callback mode: we return NeedsApproval so that run.rs can invoke
+            // the callback with the actual input Value (not available here).
+            PermissionMode::Ask | PermissionMode::Callback(_) => PermissionVerdict::NeedsApproval,
+        }
+    }
+}
+
 /// Evaluate a tool call against the current permission mode.
 ///
 /// `tool_is_readonly` is the result of `Tool::is_readonly()` and is relevant

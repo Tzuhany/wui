@@ -18,6 +18,8 @@ pub mod message;
 pub mod provider;
 pub mod tool;
 
+pub use wui_macros::ToolInput;
+
 // ── Prelude ───────────────────────────────────────────────────────────────────
 //
 // The types and traits you reach for every time you work with Wui.
@@ -33,7 +35,7 @@ pub mod prelude {
     pub use crate::message::{ContentBlock, DocumentSource, ImageSource, Message, Role};
     pub use crate::provider::{ChatRequest, Provider, ProviderError, ToolDef};
     pub use crate::tool::{
-        Artifact, ArtifactContent, ContextInjection, FailureKind, Tool, ToolCtx, ToolInput,
-        ToolOutput,
+        Artifact, ArtifactContent, ArtifactKind, ContextInjection, FailureKind, Tool, ToolCtx,
+        ToolInput, ToolOutput,
     };
 }

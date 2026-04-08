@@ -75,8 +75,6 @@ pub struct CompletedTool {
     ///
     /// `1` means the first attempt succeeded. `2` means the tool was retried
     /// once, etc. See `Tool::max_retries()`.
-    // Exposed as public API for hooks and test harnesses; not read internally.
-    #[allow(dead_code)]
     pub attempts: u32,
 }
 
@@ -257,8 +255,8 @@ impl ToolExecutor {
 /// Run a tool with automatic retries.
 ///
 /// Executes `run_tool_safely` up to `1 + max_retries` times. A retry is
-/// attempted when the output is an error and retries remain. A 50 ms fixed
-/// delay is inserted between attempts.
+/// attempted when the output is an error and retries remain. An exponential
+/// backoff delay is inserted between attempts: 50 ms, 100 ms, 200 ms, etc.
 ///
 /// Returns the final `ToolOutput` and the number of attempts made.
 async fn run_with_retries(
@@ -280,13 +278,15 @@ async fn run_with_retries(
         if retries_left == 0 || !out.is_error() {
             return (out, attempt);
         }
+        let delay_ms = 50u64 * (1u64 << attempt.saturating_sub(1));
         tracing::debug!(
             tool     = %impl_.name(),
             attempt,
             max      = 1 + max_retries,
-            "tool output retryable — waiting 50 ms before retry"
+            delay_ms,
+            "tool output retryable — waiting before retry"
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
     }
 }
 
