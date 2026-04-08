@@ -10,7 +10,7 @@ use super::{CompressResult, CompressStrategy};
 /// A simple compressor that keeps the most-recent turns verbatim and replaces
 /// older turns with a single LLM-generated summary.
 ///
-/// Unlike [`CompressPipeline`]'s multi-tier approach, `SummarizingCompressor`
+/// Unlike [`super::CompressPipeline`]'s multi-tier approach, `SummarizingCompressor`
 /// is intentionally simple: one threshold, one LLM call, one summary. Choose
 /// it when you want predictable behaviour and a single compression knob.
 ///

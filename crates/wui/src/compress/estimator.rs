@@ -56,7 +56,7 @@ impl TokenEstimator for CharRatioEstimator {
 
 /// Token usage breakdown by category.
 ///
-/// Produced by [`CompressPipeline::breakdown`]. Exposes where tokens are
+/// Produced by [`super::CompressPipeline::breakdown`]. Exposes where tokens are
 /// being spent so callers (dashboards, CLI tools, tests) can diagnose
 /// context pressure without guessing.
 #[derive(Debug, Clone, Default)]
