@@ -127,6 +127,8 @@ pub struct ToolExecutor {
     default_timeout: Option<Duration>,
     /// Optional store for persisting large tool results before truncation.
     result_store: Option<Arc<dyn ResultStore>>,
+    /// Sub-agent nesting depth propagated to `ToolCtx`.
+    spawn_depth: u32,
     pending: JoinSet<CompletedTool>,
     sequential: VecDeque<QueuedTool>,
 }
@@ -138,6 +140,7 @@ impl ToolExecutor {
         tx: mpsc::Sender<AgentEvent>,
         default_timeout: Option<Duration>,
         result_store: Option<Arc<dyn ResultStore>>,
+        spawn_depth: u32,
     ) -> Self {
         let sibling_cancel = cancel.child_token();
         Self {
@@ -147,6 +150,7 @@ impl ToolExecutor {
             tx,
             default_timeout,
             result_store,
+            spawn_depth,
             pending: JoinSet::new(),
             sequential: VecDeque::new(),
         }
@@ -272,6 +276,7 @@ impl ToolExecutor {
             tx,
             default_timeout: self.default_timeout,
             result_store,
+            spawn_depth: self.spawn_depth,
         };
         let queued = QueuedTool {
             id,
@@ -301,6 +306,7 @@ impl ToolExecutor {
                 tx,
                 default_timeout: self.default_timeout,
                 result_store: self.result_store.clone(),
+                spawn_depth: self.spawn_depth,
             },
         )
         .await
@@ -315,6 +321,7 @@ struct ExecutionConfig {
     tx: mpsc::Sender<AgentEvent>,
     default_timeout: Option<Duration>,
     result_store: Option<Arc<dyn ResultStore>>,
+    spawn_depth: u32,
 }
 
 /// Per-invocation output-handling context for retries and truncation.
@@ -336,7 +343,14 @@ async fn execute_tool_call(tool: QueuedTool, config: ExecutionConfig) -> Complet
     let start = Instant::now();
     let hints = impl_.executor_hints(&input);
     let timeout = hints.timeout.or(config.default_timeout);
-    let ctx = make_ctx(config.cancel, messages, config.tx, id.clone(), name.clone());
+    let ctx = make_ctx(
+        config.cancel,
+        messages,
+        config.tx,
+        id.clone(),
+        name.clone(),
+        config.spawn_depth,
+    );
     let out_cfg = OutputConfig {
         tool_id: &id,
         max_chars: hints.max_output_chars,
@@ -506,6 +520,7 @@ fn make_ctx(
     tx: mpsc::Sender<AgentEvent>,
     tool_id: ToolCallId,
     tool_name: String,
+    spawn_depth: u32,
 ) -> ToolCtx {
     // Clone once here so the closure captures owned values rather than
     // cloning on every ctx.report() call.
@@ -514,6 +529,7 @@ fn make_ctx(
     ToolCtx {
         cancel,
         messages,
+        spawn_depth,
         on_progress: Box::new(move |text: String| {
             tracing::debug!(tool = %name_cap, progress = %text);
             // Non-blocking send — a full channel drops the event rather than

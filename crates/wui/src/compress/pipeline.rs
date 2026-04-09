@@ -539,6 +539,7 @@ impl CompressPipeline {
             messages: vec![Message::user(old_text)],
             tools: vec![],
             thinking_budget: None,
+            cache_boundary: None,
         };
 
         let stream = provider.stream(summary_req).await.ok()?;

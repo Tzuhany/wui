@@ -75,6 +75,26 @@ pub trait CompressStrategy: Send + Sync + 'static {
 
     /// Whether the context is critically full (at or beyond window).
     fn is_critically_full(&self, messages: &[wui_core::message::Message]) -> bool;
+
+    /// Classify current context pressure into a discrete level.
+    ///
+    /// Uses `pressure()` and `threshold()` to determine the level:
+    /// - `Normal` — below 75% of the threshold
+    /// - `Elevated` — 75%–100% of the threshold
+    /// - `Critical` — at or above the threshold
+    fn pressure_level(
+        &self,
+        messages: &[wui_core::message::Message],
+    ) -> wui_core::event::ContextPressure {
+        let p = self.pressure(messages);
+        if p >= self.threshold() {
+            wui_core::event::ContextPressure::Critical
+        } else if p >= self.threshold() * 0.75 {
+            wui_core::event::ContextPressure::Elevated
+        } else {
+            wui_core::event::ContextPressure::Normal
+        }
+    }
 }
 
 /// Result of a compression pass.

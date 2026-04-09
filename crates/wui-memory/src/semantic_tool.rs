@@ -169,6 +169,7 @@ mod tests {
         ToolCtx {
             cancel: tokio_util::sync::CancellationToken::new(),
             messages: Arc::from(vec![]),
+            spawn_depth: 0,
             on_progress: Box::new(|_| {}),
         }
     }

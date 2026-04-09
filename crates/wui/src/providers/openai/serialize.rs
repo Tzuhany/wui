@@ -376,6 +376,7 @@ mod tests {
                 input_schema: serde_json::json!({"type": "object", "properties": {"q": {"type": "string"}}}),
             }],
             thinking_budget: None,
+            cache_boundary: None,
         };
 
         let body = build_request_body(&req, "gpt-4");

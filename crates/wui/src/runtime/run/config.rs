@@ -66,4 +66,20 @@ pub(crate) struct RunConfig {
 
     /// Optional store for persisting large tool results before truncation.
     pub(crate) result_store: Option<Arc<dyn ResultStore>>,
+
+    /// Byte index in `system` where the cache boundary falls.
+    ///
+    /// Everything before this index is the stable prefix; the provider may
+    /// use this to optimize caching. `None` means no boundary.
+    pub(crate) cache_boundary: Option<usize>,
+
+    /// Maximum sub-agent nesting depth. Default: 5.
+    pub(crate) max_spawn_depth: u32,
+
+    /// Current sub-agent nesting depth for this run.
+    pub(crate) spawn_depth: u32,
+
+    /// Optional predicate that filters which tools are sent to the provider.
+    pub(crate) tool_filter:
+        Option<Arc<dyn Fn(&str, &wui_core::tool::ToolMeta) -> bool + Send + Sync>>,
 }

@@ -12,6 +12,87 @@ use super::RunConfig;
 use crate::runtime::executor::CompletedTool;
 use crate::runtime::registry::ToolRegistry;
 
+// ── MaxTokensAction ─────────────────────────────────────────────────────────
+
+/// What to do when the LLM stops with `MaxTokens`.
+pub(super) enum MaxTokensAction {
+    /// Bump `max_tokens` to `new_max` and retry immediately.
+    Escalate { new_max: u32 },
+    /// Inject a "continue where you left off" message.
+    InjectContinuation,
+    /// All escalation and continuation attempts are exhausted.
+    Exhausted,
+}
+
+// ── RecoveryState ───────────────────────────────────────────────────────────
+
+/// Cross-iteration error recovery state.
+///
+/// Tracks escalation counters and heuristic signals that the run loop
+/// uses to decide whether to continue, escalate, or stop.
+pub(super) struct RecoveryState {
+    /// How many times max_tokens has been bumped after MaxTokens stops.
+    pub(super) token_escalations: u32,
+    /// Consecutive turns below MIN_USEFUL_OUTPUT_TOKENS.
+    pub(super) low_output_streak: u32,
+    /// Effective max_tokens for the current call; may be escalated mid-run.
+    pub(super) effective_max_tokens: u32,
+    /// True when a PreStop hook already blocked — prevents infinite loops.
+    pub(super) stop_hook_active: bool,
+}
+
+impl RecoveryState {
+    /// Create a new recovery state with the given base max_tokens.
+    pub(super) fn new(base_max_tokens: u32) -> Self {
+        Self {
+            token_escalations: 0,
+            low_output_streak: 0,
+            effective_max_tokens: base_max_tokens,
+            stop_hook_active: false,
+        }
+    }
+
+    /// Handle a `MaxTokens` stop reason. Returns the action the run loop
+    /// should take.
+    pub(super) fn on_max_tokens(
+        &mut self,
+        escalation_factor: u32,
+        max_escalations: u32,
+    ) -> MaxTokensAction {
+        self.token_escalations += 1;
+        if self.token_escalations == 1 {
+            self.effective_max_tokens =
+                (self.effective_max_tokens * escalation_factor).min(131_072);
+            return MaxTokensAction::Escalate {
+                new_max: self.effective_max_tokens,
+            };
+        }
+        if self.token_escalations <= max_escalations {
+            return MaxTokensAction::InjectContinuation;
+        }
+        MaxTokensAction::Exhausted
+    }
+
+    /// Record a productive turn — resets the low-output streak and
+    /// token escalation state.
+    pub(super) fn on_productive_turn(&mut self, base_max_tokens: u32) {
+        self.token_escalations = 0;
+        self.effective_max_tokens = base_max_tokens;
+    }
+
+    /// Record a low-output turn. Returns `true` if the streak has reached
+    /// the given `threshold` and the run should stop.
+    pub(super) fn on_low_output(&mut self, threshold: u32) -> bool {
+        self.low_output_streak += 1;
+        self.low_output_streak >= threshold
+    }
+
+    /// Reset the stop-hook guard so the next stop reason can be blocked.
+    pub(super) fn reset_stop_hook(&mut self) {
+        self.stop_hook_active = false;
+    }
+}
+
 // ── RunState ────────────────────────────────────────────────────────────────
 
 /// Mutable state carried across iterations of the run loop.
@@ -21,18 +102,15 @@ pub(super) struct RunState {
     pub(super) iterations: u32,
     /// Augmented system prompt (base + deferred tool listings).
     pub(super) system: String,
-    /// How many times max_tokens has been bumped after MaxTokens stops.
-    pub(super) token_escalations: u32,
-    /// Consecutive turns below MIN_USEFUL_OUTPUT_TOKENS.
-    pub(super) low_output_streak: u32,
-    /// Effective max_tokens for the current call; may be escalated mid-run.
-    pub(super) effective_max_tokens: u32,
-    /// True when a PreStop hook already blocked — prevents infinite loops.
-    pub(super) stop_hook_active: bool,
+    /// Cross-iteration error recovery state.
+    pub(super) recovery: RecoveryState,
     /// Tools injected at runtime by ToolOutput::expose (e.g., via tool_search).
     pub(super) dynamic_tools: HashMap<String, Arc<dyn wui_core::tool::Tool>>,
     /// True once provider capability preflight has run (first iteration only).
     pub(super) preflight_done: bool,
+    /// Byte index in `system` where the cache boundary falls.
+    /// Passed through to `ChatRequest` so providers can optimize caching.
+    pub(super) cache_boundary: Option<usize>,
 }
 
 /// Result of checking max-iterations at the top of each loop iteration.
@@ -60,7 +138,7 @@ impl RunState {
         if self.iterations < config.max_iter {
             return IterGuard::Proceed;
         }
-        if !self.stop_hook_active {
+        if !self.recovery.stop_hook_active {
             if let HookDecision::Block { reason } = config
                 .hooks
                 .pre_stop(
@@ -71,7 +149,7 @@ impl RunState {
                 .await
             {
                 self.messages.push(system_reminder_msg(&reason));
-                self.stop_hook_active = true;
+                self.recovery.stop_hook_active = true;
                 return IterGuard::Blocked;
             }
         }
@@ -151,12 +229,10 @@ impl RunState {
             system: augment_system(&config.system, &config.tools),
             total_usage: TokenUsage::default(),
             iterations: 0,
-            token_escalations: 0,
-            low_output_streak: 0,
-            effective_max_tokens: config.max_tokens,
-            stop_hook_active: false,
+            recovery: RecoveryState::new(config.max_tokens),
             dynamic_tools: HashMap::new(),
             preflight_done: false,
+            cache_boundary: config.cache_boundary,
             messages,
         };
 

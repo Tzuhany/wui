@@ -34,6 +34,25 @@ use serde::{Deserialize, Serialize};
 use crate::message::Message;
 use crate::tool::{Artifact, FailureKind, ToolCallId};
 
+// ── Context Pressure ─────────────────────────────────────────────────────────
+
+/// Context window pressure level.
+///
+/// Describes how close the conversation is to exhausting the provider's
+/// context window. Used by the compression pipeline and surfaced to callers
+/// so they can adapt behaviour (e.g. warn the user, trigger early
+/// summarisation, switch strategies).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextPressure {
+    /// Below 60% of the compression threshold — no action needed.
+    Normal,
+    /// 60%–100% of the threshold — approaching compression trigger.
+    Elevated,
+    /// At or above the threshold — compression should trigger.
+    Critical,
+}
+
 // ── Token Usage ──────────────────────────────────────────────────────────────
 
 /// Token consumption for a single LLM call.

@@ -75,6 +75,11 @@ pub struct AgentConfig {
     /// Static allow/deny rules applied before the permission mode check.
     pub(crate) rules: PermissionRules,
     pub(crate) system: String,
+    /// Stable system prompt sections (cached by the provider across turns).
+    /// These are concatenated and placed before the cache boundary.
+    pub(crate) system_stable: Vec<String>,
+    /// Dynamic system prompt sections (change per turn, placed after cache boundary).
+    pub(crate) system_dynamic: Vec<String>,
     pub(crate) model: Option<String>,
     pub(crate) max_tokens: u32,
     pub(crate) temperature: Option<f32>,
@@ -106,6 +111,11 @@ pub struct AgentConfig {
     pub(crate) catalog_limit: usize,
     /// Optional store for persisting large tool results before truncation.
     pub(crate) result_store: Option<Arc<dyn ResultStore>>,
+    /// Maximum sub-agent nesting depth. Default: 5.
+    pub(crate) max_spawn_depth: u32,
+    /// Optional predicate that filters which tools are sent to the provider.
+    pub(crate) tool_filter:
+        Option<Arc<dyn Fn(&str, &wui_core::tool::ToolMeta) -> bool + Send + Sync>>,
 }
 
 /// Fluent builder for `Agent`.
@@ -129,6 +139,8 @@ impl AgentBuilder {
                 permission: PermissionMode::Ask,
                 rules: PermissionRules::default(),
                 system: String::new(),
+                system_stable: Vec::new(),
+                system_dynamic: Vec::new(),
                 model: None,
                 max_tokens: 8192,
                 temperature: None,
@@ -145,6 +157,8 @@ impl AgentBuilder {
                 checkpoint_run_id: None,
                 catalog_limit: 5,
                 result_store: None,
+                max_spawn_depth: 5,
+                tool_filter: None,
             },
         }
     }
@@ -207,9 +221,29 @@ impl AgentBuilder {
         self
     }
 
-    /// Set the system prompt.
+    /// Set the system prompt (placed in the stable/cached section).
     pub fn system(mut self, system: impl Into<String>) -> Self {
         self.config.system = system.into();
+        self
+    }
+
+    /// Append a section to the stable (cached) portion of the system prompt.
+    ///
+    /// Stable sections should not change between turns. When a provider
+    /// supports prompt caching, everything in the stable portion is placed
+    /// before the cache boundary so it can be reused across requests.
+    pub fn system_stable(mut self, section: impl Into<String>) -> Self {
+        self.config.system_stable.push(section.into());
+        self
+    }
+
+    /// Append a section to the dynamic portion of the system prompt.
+    ///
+    /// Dynamic sections are placed after the cache boundary and may change
+    /// every turn. Content here does not invalidate the cache for the stable
+    /// prefix.
+    pub fn system_dynamic(mut self, section: impl Into<String>) -> Self {
+        self.config.system_dynamic.push(section.into());
         self
     }
 
@@ -453,6 +487,21 @@ impl AgentBuilder {
     /// Without a store, large results are simply truncated.
     pub fn result_store(mut self, store: impl ResultStore) -> Self {
         self.config.result_store = Some(Arc::new(store));
+        self
+    }
+
+    /// Set the maximum sub-agent nesting depth. Default: 5.
+    pub fn max_spawn_depth(mut self, n: u32) -> Self {
+        self.config.max_spawn_depth = n;
+        self
+    }
+
+    /// Set a filter predicate for tools sent to the provider.
+    pub fn tool_filter(
+        mut self,
+        f: impl Fn(&str, &wui_core::tool::ToolMeta) -> bool + Send + Sync + 'static,
+    ) -> Self {
+        self.config.tool_filter = Some(Arc::new(f));
         self
     }
 

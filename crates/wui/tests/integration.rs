@@ -1295,6 +1295,7 @@ async fn subagent_hooks_receive_end_event_when_cancelled() {
     let ctx = ToolCtx {
         cancel: cancel.clone(),
         messages: Arc::from(Vec::<wui::Message>::new()),
+        spawn_depth: 0,
         on_progress: Box::new(|_| {}),
     };
 

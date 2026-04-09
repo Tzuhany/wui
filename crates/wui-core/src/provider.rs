@@ -168,6 +168,12 @@ pub struct ChatRequest {
     /// Request-level thinking budget (tokens). Overrides any provider-level
     /// default when set. `None` defers to the provider's own configuration.
     pub thinking_budget: Option<u32>,
+    /// Byte index in `system` where the cache boundary falls.
+    ///
+    /// Everything before this index is stable across turns; the provider
+    /// may use this to split the system prompt into a cached prefix and a
+    /// dynamic suffix. `None` means no boundary (single block).
+    pub cache_boundary: Option<usize>,
 }
 
 /// A tool definition as sent to the LLM.

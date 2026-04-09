@@ -72,7 +72,7 @@ pub use stream::RunStream;
 // Re-export state types at `super::` level so sibling submodules
 // (`compression`, `history`, `parsing`, `tool_batch`, etc.) can still
 // write `super::RunState`, `super::IterationCtx`, etc.
-use state::{preflight_check, IterGuard, IterationCtx, RunState};
+use state::{preflight_check, IterGuard, IterationCtx, MaxTokensAction, RunState};
 
 use std::sync::Arc;
 
@@ -225,12 +225,17 @@ fn active_registry(config: &RunConfig, s: &RunState) -> Arc<ToolRegistry> {
 fn build_chat_request(config: &RunConfig, s: &RunState, registry: &ToolRegistry) -> ChatRequest {
     ChatRequest {
         model: config.model.clone(),
-        max_tokens: s.effective_max_tokens,
+        max_tokens: s.recovery.effective_max_tokens,
         temperature: config.temperature,
         system: s.system.clone(),
         messages: s.messages.clone(),
-        tools: registry.tool_defs(),
+        tools: if let Some(ref f) = config.tool_filter {
+            registry.filtered_tool_defs(&**f)
+        } else {
+            registry.tool_defs()
+        },
         thinking_budget: config.thinking_budget,
+        cache_boundary: s.cache_boundary,
     }
 }
 
@@ -260,6 +265,7 @@ async fn execute_iteration(
         tx.clone(),
         config.tool_timeout,
         config.result_store.clone(),
+        config.spawn_depth,
     );
     let mut ctx = IterationCtx::new();
     futures::pin_mut!(stream);
@@ -321,7 +327,7 @@ async fn evaluate_stop_conditions(
         .await;
     }
 
-    s.stop_hook_active = false;
+    s.recovery.reset_stop_hook();
     LoopControl::Continue
 }
 
@@ -337,38 +343,33 @@ async fn handle_max_tokens(
     stop_reason: StopReason,
 ) -> Option<LoopControl> {
     if stop_reason != StopReason::MaxTokens {
-        s.token_escalations = 0;
-        s.effective_max_tokens = config.max_tokens;
+        s.recovery.on_productive_turn(config.max_tokens);
         return None;
     }
 
-    s.token_escalations += 1;
-    if s.token_escalations == 1 {
-        s.effective_max_tokens = (s.effective_max_tokens * TOKEN_ESCALATION_FACTOR).min(131_072);
-        return Some(LoopControl::Continue);
+    match s
+        .recovery
+        .on_max_tokens(TOKEN_ESCALATION_FACTOR, MAX_TOKEN_ESCALATIONS)
+    {
+        MaxTokensAction::Escalate { .. } => Some(LoopControl::Continue),
+        MaxTokensAction::InjectContinuation => {
+            s.messages.push(Message::user(
+                "Your previous response was truncated due to length limits. \
+                 Continue exactly where you left off. Do not repeat what you already said.",
+            ));
+            Some(LoopControl::Continue)
+        }
+        MaxTokensAction::Exhausted => Some(
+            stop_with_hooks(
+                config,
+                s,
+                RunStopReason::MaxTokensExhausted,
+                |state| state.recovery.on_productive_turn(config.max_tokens),
+                |_, _| {},
+            )
+            .await,
+        ),
     }
-
-    if s.token_escalations <= MAX_TOKEN_ESCALATIONS {
-        s.messages.push(Message::user(
-            "Your previous response was truncated due to length limits. \
-             Continue exactly where you left off. Do not repeat what you already said.",
-        ));
-        return Some(LoopControl::Continue);
-    }
-
-    Some(
-        stop_with_hooks(
-            config,
-            s,
-            RunStopReason::MaxTokensExhausted,
-            |state| {
-                state.token_escalations = 0;
-                state.effective_max_tokens = config.max_tokens;
-            },
-            |_, _| {},
-        )
-        .await,
-    )
 }
 
 async fn handle_diminishing_returns(
@@ -383,12 +384,11 @@ async fn handle_diminishing_returns(
     if outcome.stop_reason == StopReason::ToolUse
         || outcome.usage.output_tokens >= MIN_USEFUL_OUTPUT_TOKENS
     {
-        s.low_output_streak = 0;
+        s.recovery.low_output_streak = 0;
         return None;
     }
 
-    s.low_output_streak += 1;
-    if s.low_output_streak < MAX_LOW_OUTPUT_TURNS {
+    if !s.recovery.on_low_output(MAX_LOW_OUTPUT_TURNS) {
         return None;
     }
 
@@ -397,7 +397,7 @@ async fn handle_diminishing_returns(
             config,
             s,
             RunStopReason::DiminishingReturns,
-            |state| state.low_output_streak = 0,
+            |state| state.recovery.low_output_streak = 0,
             |_, _| {},
         )
         .await,
@@ -420,13 +420,13 @@ where
         .pre_stop(
             last_assistant_text(&s.messages),
             stop_reason.clone(),
-            s.stop_hook_active,
+            s.recovery.stop_hook_active,
         )
         .await
     {
-        HookDecision::Block { reason } if !s.stop_hook_active => {
+        HookDecision::Block { reason } if !s.recovery.stop_hook_active => {
             s.messages.push(system_reminder_msg(&reason));
-            s.stop_hook_active = true;
+            s.recovery.stop_hook_active = true;
             on_block(s);
             LoopControl::Continue
         }
@@ -568,6 +568,10 @@ mod tests {
             checkpoint_store: None,
             checkpoint_run_id: None,
             result_store: None,
+            cache_boundary: None,
+            max_spawn_depth: 5,
+            spawn_depth: 0,
+            tool_filter: None,
         })
     }
 

@@ -18,7 +18,7 @@ pub(crate) fn build_request_body(
     let mut body = json!({
         "model":      req.model.clone().unwrap_or_else(|| default_model.to_string()),
         "max_tokens": req.max_tokens,
-        "system":     system_to_json(&req.system, cache_enabled),
+        "system":     system_to_json(&req.system, cache_enabled, req.cache_boundary),
         "messages":   messages_to_json(&req.messages),
         "tools":      tools_to_json(&req.tools, cache_enabled),
         "stream":     true,
@@ -45,10 +45,30 @@ pub(crate) fn build_request_body(
 /// system prompt. Anthropic caches everything up to (and including) the last
 /// marked block; subsequent turns that send the same system text get a cache
 /// hit and are billed at the reduced cache-read rate.
-fn system_to_json(system: &str, cache_enabled: bool) -> Value {
+fn system_to_json(system: &str, cache_enabled: bool, cache_boundary: Option<usize>) -> Value {
     if !cache_enabled || system.is_empty() {
         return json!(system);
     }
+
+    // When a boundary is set, split into stable (cached) + dynamic (uncached).
+    if let Some(idx) = cache_boundary {
+        let stable = &system[..idx];
+        let dynamic = system[idx..].trim_start();
+        let mut blocks = vec![json!({
+            "type":          "text",
+            "text":          stable,
+            "cache_control": { "type": "ephemeral" },
+        })];
+        if !dynamic.is_empty() {
+            blocks.push(json!({
+                "type": "text",
+                "text": dynamic,
+            }));
+        }
+        return Value::Array(blocks);
+    }
+
+    // No boundary — single block with cache_control on the whole thing.
     json!([{
         "type":          "text",
         "text":          system,

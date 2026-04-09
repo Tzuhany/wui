@@ -78,6 +78,29 @@ impl ToolRegistry {
         defs
     }
 
+    /// `ToolDef`s for resident tools that pass the given filter, sorted by name.
+    ///
+    /// Like `tool_defs()` but excludes tools where `filter(name, meta)` returns
+    /// `false`. The default `Value::Null` is passed to `meta()` since filtering
+    /// happens before any specific invocation.
+    pub fn filtered_tool_defs(
+        &self,
+        filter: &dyn Fn(&str, &wui_core::tool::ToolMeta) -> bool,
+    ) -> Vec<ToolDef> {
+        let mut defs: Vec<ToolDef> = self
+            .tools
+            .iter()
+            .filter(|(name, _)| !self.deferred_names.contains(*name))
+            .filter(|(name, tool)| {
+                let meta = tool.meta(&serde_json::Value::Null);
+                filter(name.as_str(), &meta)
+            })
+            .map(|(_, t)| ToolDef::from_tool(t.as_ref()))
+            .collect();
+        defs.sort_by(|a, b| a.name.cmp(&b.name));
+        defs
+    }
+
     /// Brief entries for all deferred tools, sorted by name.
     ///
     /// Used to build the "Additional tools" section of the system prompt so

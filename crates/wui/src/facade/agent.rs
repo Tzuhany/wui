@@ -203,6 +203,17 @@ impl Agent {
 
     // ── Internal ──────────────────────────────────────────────────────────────
 
+    pub(crate) fn stream_with_spawn_depth(
+        &self,
+        prompt: impl Into<String>,
+        spawn_depth: u32,
+    ) -> RunStream {
+        let messages = vec![Message::user(prompt.into())];
+        let mut config = self.make_run_config();
+        config.spawn_depth = spawn_depth;
+        run(Arc::new(config), messages)
+    }
+
     fn make_run_config(&self) -> RunConfig {
         build_run_config(&self.config, Arc::new(SessionPermissions::new()))
     }
@@ -234,6 +245,39 @@ pub(crate) fn build_run_config(
     config: &AgentConfig,
     session_perms: Arc<SessionPermissions>,
 ) -> RunConfig {
+    // Assemble the combined system prompt from sections.
+    //
+    // Layout: [system] [stable sections...] | cache boundary | [dynamic sections...]
+    //
+    // The `system` field (from `.system()`) is always part of the stable prefix.
+    // If dynamic sections exist, we record the byte offset where they begin so
+    // providers can insert a cache boundary marker.
+    let mut stable_parts: Vec<&str> = Vec::new();
+    if !config.system.is_empty() {
+        stable_parts.push(&config.system);
+    }
+    for s in &config.system_stable {
+        if !s.is_empty() {
+            stable_parts.push(s);
+        }
+    }
+    let stable = stable_parts.join("\n\n");
+
+    let dynamic_parts: Vec<&str> = config
+        .system_dynamic
+        .iter()
+        .filter(|s| !s.is_empty())
+        .map(|s| s.as_str())
+        .collect();
+    let dynamic = dynamic_parts.join("\n\n");
+
+    let (system, cache_boundary) = if dynamic.is_empty() {
+        (stable, None)
+    } else {
+        let boundary = stable.len();
+        (format!("{stable}\n\n{dynamic}"), Some(boundary))
+    };
+
     RunConfig {
         provider: config.provider.clone(),
         tools: Arc::new(build_registry(
@@ -247,7 +291,7 @@ pub(crate) fn build_run_config(
         permission: config.permission.clone(),
         rules: config.rules.clone(),
         session_perms,
-        system: config.system.clone(),
+        system,
         model: config.model.clone(),
         max_tokens: config.max_tokens,
         temperature: config.temperature,
@@ -260,6 +304,10 @@ pub(crate) fn build_run_config(
         checkpoint_store: config.checkpoint_store.clone(),
         checkpoint_run_id: config.checkpoint_run_id.clone(),
         result_store: config.result_store.clone(),
+        cache_boundary,
+        max_spawn_depth: config.max_spawn_depth,
+        spawn_depth: 0,
+        tool_filter: config.tool_filter.clone(),
     }
 }
 

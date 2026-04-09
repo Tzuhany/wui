@@ -296,6 +296,10 @@ pub struct ToolCtx {
     /// `Arc<[Message]>` — shared across concurrent tools without copying.
     pub messages: Arc<[Message]>,
 
+    /// Current sub-agent nesting depth. Starts at 0 for the top-level agent.
+    /// Incremented each time a `SubAgent` tool spawns an inner agent run.
+    pub spawn_depth: u32,
+
     /// Report incremental progress to the stream.
     pub on_progress: Box<dyn Fn(String) + Send + Sync>,
 }
@@ -1018,6 +1022,7 @@ mod tests {
         ToolCtx {
             cancel: tokio_util::sync::CancellationToken::new(),
             messages: Arc::from(vec![]),
+            spawn_depth: 0,
             on_progress: Box::new(|_| {}),
         }
     }

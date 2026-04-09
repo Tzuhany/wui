@@ -27,9 +27,9 @@ pub use wui_macros::ToolInput;
 
 pub mod prelude {
     pub use crate::event::{
-        AgentError, AgentEvent, CompressMethod, ControlDecision, ControlHandle, ControlKind,
-        ControlRequest, ControlResponse, RunStopReason, RunSummary, StopReason, StreamEvent,
-        TokenUsage,
+        AgentError, AgentEvent, CompressMethod, ContextPressure, ControlDecision, ControlHandle,
+        ControlKind, ControlRequest, ControlResponse, RunStopReason, RunSummary, StopReason,
+        StreamEvent, TokenUsage,
     };
     pub use crate::hook::SessionId;
     pub use crate::hook::{DenyList, Hook, HookDecision, HookEvent};

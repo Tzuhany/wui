@@ -127,6 +127,7 @@ impl SummarizingCompressor {
             messages: vec![wui_core::message::Message::user(transcript)],
             tools: vec![],
             thinking_budget: None,
+            cache_boundary: None,
         };
 
         let stream = provider.stream(req).await?;

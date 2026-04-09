@@ -153,6 +153,13 @@ impl Tool for SubAgent {
             Ok(v) => v,
             Err(e) => return ToolOutput::invalid_input(e),
         };
+
+        // Enforce sub-agent nesting depth limit.
+        let max = self.agent.config.max_spawn_depth;
+        if ctx.spawn_depth >= max {
+            return ToolOutput::error(format!("sub-agent spawn depth limit reached (max: {max})"));
+        }
+
         let hooks = HookRunner::new(self.agent.config.hooks.clone());
         hooks.notify_subagent_start(&self.tool_name, prompt).await;
 
@@ -162,7 +169,9 @@ impl Tool for SubAgent {
         //   1. Forward cancellation from the outer ctx.
         //   2. Report inner tool calls as ToolProgress for outer observability.
         //   3. Collect the full RunSummary for structured output.
-        let mut stream = self.agent.stream(prompt);
+        let mut stream = self
+            .agent
+            .stream_with_spawn_depth(prompt, ctx.spawn_depth + 1);
 
         let mut final_text = String::new();
         let mut tool_calls = Vec::<SubAgentToolCall>::new();

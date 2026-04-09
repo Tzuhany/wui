@@ -281,6 +281,7 @@ mod tests {
         let ctx = ToolCtx {
             cancel: CancellationToken::new(),
             messages: Arc::<[wui_core::message::Message]>::from(Vec::new()),
+            spawn_depth: 0,
             on_progress: Box::new(|_| {}),
         };
 
