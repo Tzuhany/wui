@@ -157,7 +157,7 @@ mod tests {
 
             // Spread the hash bits into a 4-dimensional vector.
             vec![
-                ((h >> 0) & 0xFFFF) as f32,
+                (h & 0xFFFF) as f32,
                 ((h >> 16) & 0xFFFF) as f32,
                 ((h >> 32) & 0xFFFF) as f32,
                 ((h >> 48) & 0xFFFF) as f32,
