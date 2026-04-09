@@ -1063,7 +1063,7 @@ mod tests {
                     Role::User,
                     vec![ContentBlock::ToolResult {
                         tool_use_id: wui_core::tool::ToolCallId::from(format!("tu_{i}").as_str()),
-                        content: format!("{}", "x".repeat(10)),
+                        content: "x".repeat(10),
                         is_error: false,
                     }],
                 )
