@@ -32,64 +32,9 @@ use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
 
 use crate::message::Message;
-use crate::tool::FailureKind;
-use crate::types::ToolCallId;
+use crate::tool::{Artifact, FailureKind, ToolCallId};
 
-// ── Internal: LLM → Engine ───────────────────────────────────────────────────
-
-/// Raw events emitted by a Provider's stream.
-///
-/// The engine consumes these directly. They should never appear in user code.
-#[derive(Debug, Clone)]
-pub enum StreamEvent {
-    TextDelta {
-        text: String,
-    },
-    ThinkingDelta {
-        text: String,
-    },
-
-    /// The LLM has started describing a tool call.
-    ToolUseStart {
-        id: ToolCallId,
-        name: String,
-    },
-
-    /// A chunk of JSON input for an in-progress tool call.
-    ToolInputDelta {
-        id: ToolCallId,
-        chunk: String,
-    },
-
-    /// The LLM has finished describing the tool call. The engine submits it
-    /// to the executor immediately upon receiving this event.
-    ToolUseEnd {
-        id: ToolCallId,
-    },
-
-    MessageEnd {
-        usage: TokenUsage,
-        stop_reason: StopReason,
-    },
-
-    /// A retryable or fatal error from the provider.
-    Error {
-        message: String,
-        retryable: bool,
-    },
-}
-
-/// Why the LLM stopped generating.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum StopReason {
-    /// Natural completion.
-    EndTurn,
-    /// The LLM emitted one or more tool calls.
-    ToolUse,
-    /// Output was truncated at `max_tokens`.
-    MaxTokens,
-}
+// ── Token Usage ──────────────────────────────────────────────────────────────
 
 /// Token consumption for a single LLM call.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -134,7 +79,184 @@ impl std::ops::AddAssign for TokenUsage {
     }
 }
 
-// ── External: Engine → User ──────────────────────────────────────────────────
+// ── Stop Reason ──────────────────────────────────────────────────────────────
+
+/// Why the LLM stopped generating.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StopReason {
+    /// Natural completion.
+    EndTurn,
+    /// The LLM emitted one or more tool calls.
+    ToolUse,
+    /// Output was truncated at `max_tokens`.
+    MaxTokens,
+}
+
+// ── StreamEvent (internal: LLM -> Engine) ────────────────────────────────────
+
+/// Raw events emitted by a Provider's stream.
+///
+/// The engine consumes these directly. They should never appear in user code.
+#[derive(Debug, Clone)]
+pub enum StreamEvent {
+    TextDelta {
+        text: String,
+    },
+    ThinkingDelta {
+        text: String,
+    },
+
+    /// The LLM has started describing a tool call.
+    ToolUseStart {
+        id: ToolCallId,
+        name: String,
+    },
+
+    /// A chunk of JSON input for an in-progress tool call.
+    ToolInputDelta {
+        id: ToolCallId,
+        chunk: String,
+    },
+
+    /// The LLM has finished describing the tool call. The engine submits it
+    /// to the executor immediately upon receiving this event.
+    ToolUseEnd {
+        id: ToolCallId,
+    },
+
+    MessageEnd {
+        usage: TokenUsage,
+        stop_reason: StopReason,
+    },
+
+    /// A retryable or fatal error from the provider.
+    Error {
+        message: String,
+        retryable: bool,
+    },
+}
+
+// ── Run Summary + Stop Reasons ───────────────────────────────────────────────
+
+/// Summary emitted when a run completes successfully.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunSummary {
+    pub stop_reason: RunStopReason,
+    pub iterations: u32,
+    pub usage: TokenUsage,
+    /// The full conversation at the time the run ended (user + assistant turns).
+    pub messages: Vec<Message>,
+}
+
+/// Why the run ended.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RunStopReason {
+    /// The LLM returned `EndTurn` with no tool calls.
+    Completed,
+    /// The run was cancelled by the caller.
+    Cancelled,
+    /// The maximum iteration limit was reached.
+    MaxIterations,
+    /// Context pressure could not be relieved even with full compression.
+    ContextOverflow,
+    /// Output tokens per turn fell below the useful threshold for too many
+    /// consecutive turns. The agent is no longer making progress.
+    DiminishingReturns,
+    /// Output was truncated at `max_tokens` even after escalation and
+    /// continuation injection.
+    MaxTokensExhausted,
+    /// The cumulative token budget set via `AgentBuilder::token_budget` was
+    /// exhausted. The run stopped before `max_iter` to stay within cost limits.
+    BudgetExhausted,
+}
+
+// ── AgentError ───────────────────────────────────────────────────────────────
+
+/// A terminal error emitted as the last event in the stream.
+///
+/// `message` is the user-facing description — safe to surface in any UI.
+///
+/// `detail` carries developer-facing context (stack traces, internal state,
+/// raw provider responses) that may contain file paths, code fragments, or
+/// other information not appropriate for end-user display. Log it; do not
+/// show it verbatim to end users.
+#[derive(Debug, Clone, thiserror::Error)]
+#[error("{message}")]
+pub struct AgentError {
+    pub message: String,
+    pub retryable: bool,
+    /// Developer-facing technical context. May contain paths, code, or
+    /// raw provider output — not for end-user display.
+    pub detail: Option<String>,
+    /// True when the run stopped because a tool required interactive human
+    /// approval that this calling context cannot provide.
+    ///
+    /// Callers that do not support `AgentEvent::Control` (e.g. `Agent::run()`
+    /// or `SubAgent`) set this flag so callers higher up can detect the
+    /// misconfiguration and provide an actionable error rather than a generic
+    /// failure message.
+    pub permission_denied: bool,
+}
+
+impl AgentError {
+    /// A non-retryable terminal error.
+    pub fn fatal(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            retryable: false,
+            detail: None,
+            permission_denied: false,
+        }
+    }
+
+    /// A retryable error — the caller may restart the run.
+    pub fn retryable(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            retryable: true,
+            detail: None,
+            permission_denied: false,
+        }
+    }
+
+    /// The run stopped because a tool required interactive approval that the
+    /// current calling context cannot provide.
+    ///
+    /// `tool_name` is the name of the tool that triggered the approval request,
+    /// or `None` if it could not be determined.
+    pub fn permission_required(tool_name: Option<&str>) -> Self {
+        let message = match tool_name {
+            Some(name) => format!(
+                "tool '{name}' requires interactive approval; \
+                 configure the agent with PermissionMode::Auto or add \
+                 an allow rule for this tool to use it in a headless context"
+            ),
+            None => "a tool requires interactive approval; \
+                     configure the agent with PermissionMode::Auto for headless use"
+                .to_string(),
+        };
+        Self {
+            message,
+            retryable: false,
+            detail: None,
+            permission_denied: true,
+        }
+    }
+
+    /// Attach developer-facing technical context to any error.
+    ///
+    /// The detail string may contain file paths, raw API responses, or other
+    /// information that is useful for debugging but should not be shown
+    /// verbatim to end users.
+    pub fn with_detail(mut self, detail: impl Into<String>) -> Self {
+        self.detail = Some(detail.into());
+        self
+    }
+}
+
+// ── AgentEvent (external: Engine -> User) ────────────────────────────────────
 
 /// Events emitted to the caller's stream.
 ///
@@ -193,7 +315,7 @@ pub enum AgentEvent {
         /// ID of the tool call that produced this artifact.
         tool_id: ToolCallId,
         tool_name: String,
-        artifact: crate::tool::Artifact,
+        artifact: Artifact,
     },
 
     // ── Tool progress ─────────────────────────────────────────────────
@@ -266,7 +388,7 @@ pub enum CompressMethod {
     L3Failed,
 }
 
-// ── ControlHandle ─────────────────────────────────────────────────────────────
+// ── ControlHandle ────────────────────────────────────────────────────────────
 
 /// A pause point bundled with the capability to resume it.
 ///
@@ -367,7 +489,7 @@ impl fmt::Debug for ControlHandle {
     }
 }
 
-// ── Control request / response ────────────────────────────────────────────────
+// ── Control Request / Response ───────────────────────────────────────────────
 
 /// A pause point where the human must respond before the agent continues.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -443,121 +565,4 @@ pub enum ControlDecision {
     Deny { reason: String },
     /// Deny this tool for all future invocations in this session.
     DenyAlways { reason: String },
-}
-
-// ── Run summary ───────────────────────────────────────────────────────────────
-
-/// Summary emitted when a run completes successfully.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RunSummary {
-    pub stop_reason: RunStopReason,
-    pub iterations: u32,
-    pub usage: TokenUsage,
-    /// The full conversation at the time the run ended (user + assistant turns).
-    pub messages: Vec<Message>,
-}
-
-/// Why the run ended.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RunStopReason {
-    /// The LLM returned `EndTurn` with no tool calls.
-    Completed,
-    /// The run was cancelled by the caller.
-    Cancelled,
-    /// The maximum iteration limit was reached.
-    MaxIterations,
-    /// Context pressure could not be relieved even with full compression.
-    ContextOverflow,
-    /// Output tokens per turn fell below the useful threshold for too many
-    /// consecutive turns. The agent is no longer making progress.
-    DiminishingReturns,
-    /// Output was truncated at `max_tokens` even after escalation and
-    /// continuation injection.
-    MaxTokensExhausted,
-    /// The cumulative token budget set via `AgentBuilder::token_budget` was
-    /// exhausted. The run stopped before `max_iter` to stay within cost limits.
-    BudgetExhausted,
-}
-
-/// A terminal error emitted as the last event in the stream.
-///
-/// `message` is the user-facing description — safe to surface in any UI.
-///
-/// `detail` carries developer-facing context (stack traces, internal state,
-/// raw provider responses) that may contain file paths, code fragments, or
-/// other information not appropriate for end-user display. Log it; do not
-/// show it verbatim to end users.
-#[derive(Debug, Clone, thiserror::Error)]
-#[error("{message}")]
-pub struct AgentError {
-    pub message: String,
-    pub retryable: bool,
-    /// Developer-facing technical context. May contain paths, code, or
-    /// raw provider output — not for end-user display.
-    pub detail: Option<String>,
-    /// True when the run stopped because a tool required interactive human
-    /// approval that this calling context cannot provide.
-    ///
-    /// Callers that do not support `AgentEvent::Control` (e.g. `Agent::run()`
-    /// or `SubAgent`) set this flag so callers higher up can detect the
-    /// misconfiguration and provide an actionable error rather than a generic
-    /// failure message.
-    pub permission_denied: bool,
-}
-
-impl AgentError {
-    /// A non-retryable terminal error.
-    pub fn fatal(message: impl Into<String>) -> Self {
-        Self {
-            message: message.into(),
-            retryable: false,
-            detail: None,
-            permission_denied: false,
-        }
-    }
-
-    /// A retryable error — the caller may restart the run.
-    pub fn retryable(message: impl Into<String>) -> Self {
-        Self {
-            message: message.into(),
-            retryable: true,
-            detail: None,
-            permission_denied: false,
-        }
-    }
-
-    /// The run stopped because a tool required interactive approval that the
-    /// current calling context cannot provide.
-    ///
-    /// `tool_name` is the name of the tool that triggered the approval request,
-    /// or `None` if it could not be determined.
-    pub fn permission_required(tool_name: Option<&str>) -> Self {
-        let message = match tool_name {
-            Some(name) => format!(
-                "tool '{name}' requires interactive approval; \
-                 configure the agent with PermissionMode::Auto or add \
-                 an allow rule for this tool to use it in a headless context"
-            ),
-            None => "a tool requires interactive approval; \
-                     configure the agent with PermissionMode::Auto for headless use"
-                .to_string(),
-        };
-        Self {
-            message,
-            retryable: false,
-            detail: None,
-            permission_denied: true,
-        }
-    }
-
-    /// Attach developer-facing technical context to any error.
-    ///
-    /// The detail string may contain file paths, raw API responses, or other
-    /// information that is useful for debugging but should not be shown
-    /// verbatim to end users.
-    pub fn with_detail(mut self, detail: impl Into<String>) -> Self {
-        self.detail = Some(detail.into());
-        self
-    }
 }

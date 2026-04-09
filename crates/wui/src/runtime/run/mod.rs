@@ -53,9 +53,11 @@
 // ============================================================================
 
 mod compression;
+mod config;
 mod history;
 mod parsing;
 mod provider;
+mod state;
 mod stream;
 mod tool_batch;
 
@@ -63,41 +65,38 @@ mod tool_batch;
 // existing import paths (`super::run::run`, `super::run::RunConfig`, etc.)
 // continue to resolve unchanged.
 pub use provider::RetryPolicy;
+pub(crate) use config::RunConfig;
 pub(crate) use stream::run;
 pub use stream::RunStream;
 
-use std::collections::HashMap;
+// Re-export state types at `super::` level so sibling submodules
+// (`compression`, `history`, `parsing`, `tool_batch`, etc.) can still
+// write `super::RunState`, `super::IterationCtx`, etc.
+use state::{preflight_check, IterGuard, IterationCtx, RunState};
+
 use std::sync::Arc;
-use std::time::Duration;
 
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use wui_core::event::{AgentError, AgentEvent, RunStopReason, RunSummary, StopReason, TokenUsage};
+use wui_core::event::{AgentError, AgentEvent, RunStopReason, RunSummary, StopReason};
 use wui_core::hook::HookDecision;
-use wui_core::message::{ContentBlock, Message};
+use wui_core::message::Message;
 use wui_core::provider::ChatRequest;
-use wui_core::types::ToolCallId;
-
-use crate::compress::CompressStrategy;
 
 // ── Sibling runtime modules used by submodules ──────────────────────────────
 // Re-export at `super::` level so submodules can write `super::auth` etc.
 use super::auth;
-use super::checkpoint::{self, CheckpointStore};
+use super::checkpoint;
 use super::executor::{CompletedTool, PendingTool, ToolExecutor};
-use super::hooks::HookRunner;
-use super::permission::{PermissionMode, PermissionRules, SessionPermissions};
 use super::registry::{self, ToolRegistry};
 
 // ── Submodule imports used in this file ─────────────────────────────────────
 use compression::{emergency_compress, maybe_compress};
-use history::{
-    augment_system, last_assistant_text, replace_last_assistant_text, system_reminder_msg,
-};
+use history::{last_assistant_text, replace_last_assistant_text, system_reminder_msg};
 use parsing::parse_stream;
 use provider::{call_with_retry, is_prompt_too_long};
-use tool_batch::{authorize_and_dispatch, run_post_hooks, EmissionGuard};
+use tool_batch::{authorize_and_dispatch, run_post_hooks};
 
 // ── handle_stop! ──────────────────────────────────────────────────────────────
 //
@@ -174,200 +173,6 @@ const MAX_TOKEN_ESCALATIONS: u32 = 2;
 /// Multiplier applied on the first escalation (e.g. 16 384 → 65 536).
 const TOKEN_ESCALATION_FACTOR: u32 = 4;
 
-// ── Run Config ────────────────────────────────────────────────────────────────
-
-/// Static configuration for one run. `Arc`-wrapped so it is cheap to share
-/// across the spawned task and helper services.
-pub(crate) struct RunConfig {
-    pub(crate) provider: Arc<dyn wui_core::provider::Provider>,
-    pub(crate) tools: Arc<ToolRegistry>,
-    pub(crate) hooks: Arc<HookRunner>,
-    pub(crate) compress: Arc<dyn CompressStrategy>,
-    pub(crate) permission: PermissionMode,
-    /// Static allow/deny rules evaluated before the permission mode.
-    /// Deny rules are hard constraints; allow rules bypass user prompting.
-    pub(crate) rules: PermissionRules,
-    pub(crate) session_perms: Arc<SessionPermissions>,
-    pub(crate) system: String,
-    pub(crate) model: Option<String>,
-    pub(crate) max_tokens: u32,
-    pub(crate) temperature: Option<f32>,
-    pub(crate) max_iter: u32,
-
-    /// Back-off policy for transient provider errors.
-    pub(crate) retry: provider::RetryPolicy,
-
-    /// Default execution timeout applied to every tool that doesn't declare
-    /// its own `Tool::timeout()`. `None` means tools may run indefinitely.
-    pub(crate) tool_timeout: Option<Duration>,
-
-    /// Disable the diminishing-returns auto-stop heuristic.
-    ///
-    /// When `false` (default), the engine stops a run after
-    /// `MAX_LOW_OUTPUT_TURNS` consecutive turns with fewer than
-    /// `MIN_USEFUL_OUTPUT_TOKENS` output tokens. Set this to `true` for
-    /// long-running tasks where many short intermediate steps are expected
-    /// before a large final result (e.g. research tasks, file-heavy writes).
-    pub(crate) ignore_diminishing_returns: bool,
-
-    /// Hard ceiling on cumulative tokens (input + output) for this run.
-    ///
-    /// When the total crosses this budget, the run stops immediately with
-    /// `RunStopReason::BudgetExhausted`. More predictable than `max_iter`
-    /// for cost control: you know exactly how many tokens you'll spend.
-    ///
-    /// `None` means no budget limit (default).
-    pub(crate) token_budget: Option<u64>,
-
-    /// Extended thinking budget (tokens) forwarded to the provider on every
-    /// LLM call. `None` = no thinking (provider default).
-    pub(crate) thinking_budget: Option<u32>,
-
-    /// Checkpoint store for save/resume. `None` disables checkpointing.
-    pub(crate) checkpoint_store: Option<Arc<dyn CheckpointStore>>,
-    /// The run ID used to save/load checkpoints.
-    pub(crate) checkpoint_run_id: Option<String>,
-
-    /// Optional store for persisting large tool results before truncation.
-    pub(crate) result_store: Option<Arc<dyn super::executor::ResultStore>>,
-}
-
-// ── RunState ────────────────────────────────────────────────────────────────
-
-/// Mutable state carried across iterations of the run loop.
-struct RunState {
-    messages: Vec<Message>,
-    total_usage: TokenUsage,
-    iterations: u32,
-    /// Augmented system prompt (base + deferred tool listings).
-    system: String,
-    /// How many times max_tokens has been bumped after MaxTokens stops.
-    token_escalations: u32,
-    /// Consecutive turns below MIN_USEFUL_OUTPUT_TOKENS.
-    low_output_streak: u32,
-    /// Effective max_tokens for the current call; may be escalated mid-run.
-    effective_max_tokens: u32,
-    /// True when a PreStop hook already blocked — prevents infinite loops.
-    stop_hook_active: bool,
-    /// Tools injected at runtime by ToolOutput::expose (e.g., via tool_search).
-    dynamic_tools: HashMap<String, Arc<dyn wui_core::tool::Tool>>,
-}
-
-/// Result of checking max-iterations at the top of each loop iteration.
-enum IterGuard {
-    /// Below the limit — proceed normally.
-    Proceed,
-    /// At the limit, hook blocked — the loop should `continue`.
-    Blocked,
-    /// At the limit, no block — return this summary.
-    Stop(RunSummary),
-}
-
-impl RunState {
-    fn summary(&self, stop_reason: RunStopReason) -> RunSummary {
-        RunSummary {
-            stop_reason,
-            iterations: self.iterations,
-            usage: self.total_usage.clone(),
-            messages: self.messages.clone(),
-        }
-    }
-
-    /// Check whether we've hit `max_iter` and consult the PreStop hook.
-    async fn check_max_iter(&mut self, config: &RunConfig) -> IterGuard {
-        if self.iterations < config.max_iter {
-            return IterGuard::Proceed;
-        }
-        if !self.stop_hook_active {
-            if let HookDecision::Block { reason } = config
-                .hooks
-                .pre_stop(
-                    last_assistant_text(&self.messages),
-                    RunStopReason::MaxIterations,
-                    false,
-                )
-                .await
-            {
-                self.messages.push(system_reminder_msg(&reason));
-                self.stop_hook_active = true;
-                return IterGuard::Blocked;
-            }
-        }
-        IterGuard::Stop(self.summary(RunStopReason::MaxIterations))
-    }
-}
-
-// ── Per-iteration mutable state ──────────────────────────────────────────────
-
-/// Bundles all mutable state accumulated during a single loop iteration.
-/// Extracted phases operate on this struct, keeping `run_loop` slim.
-struct IterationCtx {
-    pending_inputs: HashMap<ToolCallId, (String, String)>,
-    assistant_blocks: Vec<ContentBlock>,
-    submission_order: Vec<ToolCallId>,
-    completed_map: HashMap<ToolCallId, CompletedTool>,
-    text_buf: String,
-    thinking_buf: String,
-    stop_reason: StopReason,
-    usage: TokenUsage,
-    pending_auths: Vec<(ToolCallId, String, serde_json::Value)>,
-    emission_guard: EmissionGuard,
-    auth_injections: Vec<Message>,
-}
-
-impl IterationCtx {
-    fn new() -> Self {
-        Self {
-            pending_inputs: HashMap::new(),
-            assistant_blocks: Vec::new(),
-            submission_order: Vec::new(),
-            completed_map: HashMap::new(),
-            text_buf: String::new(),
-            thinking_buf: String::new(),
-            stop_reason: StopReason::EndTurn,
-            usage: TokenUsage::default(),
-            pending_auths: Vec::new(),
-            emission_guard: EmissionGuard::new(),
-            auth_injections: Vec::new(),
-        }
-    }
-}
-
-// ── Initialization helpers ───────────────────────────────────────────────────
-
-/// Create the initial `RunState` and restore any saved checkpoint.
-async fn init_run_state(config: &RunConfig, messages: Vec<Message>) -> RunState {
-    let mut s = RunState {
-        system: augment_system(&config.system, &config.tools),
-        total_usage: TokenUsage::default(),
-        iterations: 0,
-        token_escalations: 0,
-        low_output_streak: 0,
-        effective_max_tokens: config.max_tokens,
-        stop_hook_active: false,
-        dynamic_tools: HashMap::new(),
-        messages,
-    };
-
-    if let (Some(store), Some(run_id)) = (&config.checkpoint_store, &config.checkpoint_run_id) {
-        match store.load(run_id).await {
-            Ok(Some(cp)) => {
-                tracing::info!(
-                    run_id,
-                    iteration = cp.iteration,
-                    "checkpoint found — resuming"
-                );
-                s.messages = cp.messages;
-                s.iterations = cp.iteration;
-                s.total_usage = cp.total_usage;
-            }
-            Ok(None) => tracing::debug!(run_id, "no checkpoint found — starting fresh"),
-            Err(e) => tracing::warn!(run_id, error = %e, "checkpoint load failed — starting fresh"),
-        }
-    }
-    s
-}
-
 // ── Main loop ────────────────────────────────────────────────────────────────
 
 async fn run_loop(
@@ -376,7 +181,7 @@ async fn run_loop(
     cancel: CancellationToken,
     tx: &mpsc::Sender<AgentEvent>,
 ) -> Result<RunSummary, AgentError> {
-    let mut s = init_run_state(&config, messages).await;
+    let mut s = RunState::new(&config, messages).await;
 
     loop {
         if cancel.is_cancelled() {
@@ -388,6 +193,10 @@ async fn run_loop(
             IterGuard::Blocked => continue,
             IterGuard::Proceed => {}
         }
+
+        // Log iteration start as an event (not a span guard) because the loop
+        // body contains multiple await points and EnteredSpan is not Send.
+        tracing::info!(iteration = s.iterations + 1, "wui.iteration.start");
 
         config.hooks.notify_turn_start(&s.messages).await;
         maybe_compress(&config, &mut s.messages, tx).await;
@@ -408,6 +217,10 @@ async fn run_loop(
             tools: registry.tool_defs(),
             thinking_budget: config.thinking_budget,
         };
+        if !s.preflight_done {
+            preflight_check(&config, &req)?;
+            s.preflight_done = true;
+        }
         let stream = match call_with_retry(&config, &req, tx).await {
             Ok(stream) => stream,
             Err(e) if is_prompt_too_long(&e) => {

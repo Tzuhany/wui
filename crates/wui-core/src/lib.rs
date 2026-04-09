@@ -17,7 +17,6 @@ pub mod hook;
 pub mod message;
 pub mod provider;
 pub mod tool;
-pub mod types;
 
 pub use wui_macros::ToolInput;
 
@@ -34,10 +33,13 @@ pub mod prelude {
     };
     pub use crate::hook::{DenyList, Hook, HookDecision, HookEvent};
     pub use crate::message::{ContentBlock, DocumentSource, ImageSource, Message, Role};
-    pub use crate::provider::{ChatRequest, Provider, ProviderError, ToolDef};
-    pub use crate::tool::{
-        Artifact, ArtifactContent, ArtifactKind, ContextInjection, FailureKind, Tool, ToolCtx,
-        ToolInput, ToolOutput,
+    pub use crate::provider::{
+        ChatRequest, Provider, ProviderCapabilities, ProviderError, TokenEstimate, ToolDef,
     };
-    pub use crate::types::{CheckpointRunId, SessionId, ToolCallId};
+    pub use crate::tool::{
+        Artifact, ArtifactContent, ArtifactKind, ContextInjection, FailureKind, Tool, ToolArgs,
+        ToolCtx, ToolInput, ToolInputError, ToolOutput, TypedTool,
+    };
+    pub use crate::hook::SessionId;
+    pub use crate::tool::ToolCallId;
 }

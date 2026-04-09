@@ -23,7 +23,7 @@ use async_trait::async_trait;
 use futures::{Stream, StreamExt as _};
 
 use wui_core::event::StreamEvent;
-use wui_core::provider::{ChatRequest, Provider, ProviderError};
+use wui_core::provider::{ChatRequest, Provider, ProviderCapabilities, ProviderError};
 
 use self::parser::SseParser;
 use self::serialize::build_request_body;
@@ -139,6 +139,17 @@ impl Provider for OpenAi {
             });
 
         Ok(Box::pin(stream))
+    }
+
+    fn capabilities(&self, model: Option<&str>) -> ProviderCapabilities {
+        let model = model.unwrap_or(&self.default_model);
+        let is_vision = model.contains("gpt-4o") || model.contains("gpt-4-turbo");
+        ProviderCapabilities::all()
+            .with_thinking(false)
+            .with_image_input(is_vision)
+            .with_document_input(false)
+            .with_structured_output(true)
+            .with_max_context_window(128_000)
     }
 }
 

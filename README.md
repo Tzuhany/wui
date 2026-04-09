@@ -115,18 +115,21 @@ not plan to do:
 
 ## What Is Stable Today
 
-| Surface | Status | Notes |
+| Crate | Status | Notes |
 |---|---|---|
-| `wui-core` traits: `Tool`, `Hook`, `Provider` | stable | Protected by semver major boundaries |
-| `wui` runtime loop, HITL, compression, permission flow | stable | The core runtime surface |
-| Anthropic provider | stable | Shipping path |
-| OpenAI provider | stable | Shipping path |
-| `wui::Session` | stable | Multi-turn runtime API |
-| `wui::StructuredRun` | stable | Structured extraction helper |
-| Extension crates | beta | Useful and tested, but API may evolve |
+| `wui-core` | stable | Core traits: `Tool`, `Hook`, `Provider`, `TypedTool`. Semver protected. |
+| `wui` | stable | Runtime loop, HITL, compression, permission, providers. |
+| `wui-observe` | stabilizing | Timeline + OTel span emission. Minor API adjustments possible. |
+| `wui-eval` | mixed | `MockProvider` stable; `ScenarioRunner` beta. |
+| `wui-memory` | beta | Useful and tested, API may evolve. |
+| `wui-mcp` | beta | Useful and tested, API may evolve. |
+| `wui-spawn` | beta | In-process + transport-backed delegation. API may evolve. |
+| `wui-skills` | beta | Useful and tested, API may evolve. |
 
-`stable` means pinned versions should not break across patch releases. `beta`
-means the crate is already usable, but some method signatures may still change.
+`stable` means pinned versions will not break across patch releases.
+`stabilizing` means the API is nearly final but minor adjustments are still possible.
+`beta` means the crate is usable but method signatures may change.
+`mixed` means some exports are stable while others are still evolving.
 
 ## Start Small
 
@@ -152,12 +155,12 @@ actually needs them.
 |---|---|---|
 | `wui-core` | Vocabulary: traits, messages, events, tool outputs | stable |
 | `wui` | Runtime executor plus public builder API | stable |
+| `wui-observe` | Timeline capture and OpenTelemetry spans | stabilizing |
+| `wui-eval` | Mock provider and test harnesses | mixed |
 | `wui-mcp` | MCP bridge and lazy tool catalogs | beta |
 | `wui-memory` | Reference memory capabilities | beta |
-| `wui-spawn` | In-process background delegation | beta |
-| `wui-observe` | Timeline capture and OpenTelemetry spans | beta |
+| `wui-spawn` | Agent delegation: in-process + pluggable transport | beta |
 | `wui-skills` | File-based discoverable skill catalogs | beta |
-| `wui-eval` | Mock provider and test harnesses | beta |
 
 ## Provider Features
 

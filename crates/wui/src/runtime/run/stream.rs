@@ -111,7 +111,8 @@ async fn run_task(
     tx: mpsc::Sender<AgentEvent>,
 ) {
     let span = tracing::info_span!(
-        "agent.run",
+        "wui.run",
+        run_id     = %uuid::Uuid::new_v4(),
         model      = %config.model.as_deref().unwrap_or("(provider-default)"),
         max_iter   = config.max_iter,
         tools      = config.tools.len(),

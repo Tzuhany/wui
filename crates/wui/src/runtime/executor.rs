@@ -44,11 +44,12 @@ use futures::FutureExt as _;
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument as _;
 
 use wui_core::event::AgentEvent;
 use wui_core::message::Message;
 use wui_core::tool::{Tool, ToolCtx, ToolOutput};
-use wui_core::types::ToolCallId;
+use wui_core::tool::ToolCallId;
 
 pub use wui_core::tool::ExecutorHints;
 
@@ -229,6 +230,12 @@ impl ToolExecutor {
     async fn run_sequential(&mut self) -> Vec<CompletedTool> {
         let mut results = Vec::new();
         while let Some(tool) = self.sequential.pop_front() {
+            tracing::info!(
+                tool.id = %tool.id,
+                tool.name = %tool.name,
+                tool.concurrent = false,
+                "wui.tool.exec.start"
+            );
             let start = Instant::now();
             let hints = tool.impl_.executor_hints(&tool.input);
             let timeout = hints.timeout.or(self.default_timeout);
@@ -272,6 +279,12 @@ impl ToolExecutor {
         let hints = impl_.executor_hints(&input);
         let timeout = hints.timeout.or(self.default_timeout);
         let result_store = self.result_store.clone();
+        let span = tracing::info_span!(
+            "wui.tool.exec",
+            tool.id = %id,
+            tool.name = %name,
+            tool.concurrent = true,
+        );
         self.pending.spawn(async move {
             let start = Instant::now();
             let ctx = make_ctx(cancel, messages, tx, id.clone(), name.clone());
@@ -284,7 +297,7 @@ impl ToolExecutor {
             let (out, attempts) = run_with_retries(impl_, input, &ctx, timeout, &out_cfg).await;
             let ms = start.elapsed().as_millis() as u64;
             (id, name, out, ms, attempts)
-        });
+        }.instrument(span));
     }
 }
 

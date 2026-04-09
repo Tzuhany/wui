@@ -27,15 +27,89 @@
 // stops at the first Block decision. Register multiple hooks freely.
 // ============================================================================
 
+use std::borrow::Borrow;
 use std::collections::HashSet;
+use std::fmt;
 
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::event::{RunStopReason, RunSummary};
 use crate::message::Message;
 use crate::tool::ToolOutput;
-use crate::types::SessionId;
+
+// ── SessionId ────────────────────────────────────────────────────────────────
+
+/// A unique identifier for a multi-turn session.
+///
+/// Used to load/save session state from a `SessionStore`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct SessionId(String);
+
+impl SessionId {
+    pub fn new(s: impl Into<String>) -> Self {
+        Self(s.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn into_inner(self) -> String {
+        self.0
+    }
+}
+
+impl std::ops::Deref for SessionId {
+    type Target = str;
+    fn deref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for SessionId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl From<String> for SessionId {
+    fn from(s: String) -> Self {
+        Self(s)
+    }
+}
+
+impl From<&str> for SessionId {
+    fn from(s: &str) -> Self {
+        Self(s.to_owned())
+    }
+}
+
+impl PartialEq<str> for SessionId {
+    fn eq(&self, other: &str) -> bool {
+        self.0 == other
+    }
+}
+
+impl PartialEq<String> for SessionId {
+    fn eq(&self, other: &String) -> bool {
+        self.0 == *other
+    }
+}
+
+impl PartialEq<&str> for SessionId {
+    fn eq(&self, other: &&str) -> bool {
+        self.0 == *other
+    }
+}
+
+impl Borrow<str> for SessionId {
+    fn borrow(&self) -> &str {
+        &self.0
+    }
+}
 
 /// A hook that intercepts the agent loop at key moments.
 ///

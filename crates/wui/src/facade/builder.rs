@@ -17,9 +17,9 @@ use wui_core::hook::Hook;
 use wui_core::provider::Provider;
 use wui_core::tool::Tool;
 
-use crate::session::SessionHooks;
-use crate::sub_agent::SubAgent;
-use crate::Agent;
+use super::agent::Agent;
+use super::session::SessionHooks;
+use super::sub_agent::SubAgent;
 
 // ── Effort ────────────────────────────────────────────────────────────────────
 
@@ -111,11 +111,14 @@ pub struct AgentConfig {
 #[must_use = "AgentBuilder does nothing until you call .build()"]
 pub struct AgentBuilder {
     config: AgentConfig,
+    /// `true` when the user explicitly called `.compress()`.
+    compress_explicitly_set: bool,
 }
 
 impl AgentBuilder {
     pub(crate) fn new(provider: Arc<dyn Provider>) -> Self {
         Self {
+            compress_explicitly_set: false,
             config: AgentConfig {
                 provider,
                 tools: Vec::new(),
@@ -305,6 +308,7 @@ impl AgentBuilder {
     /// ```
     pub fn compress(mut self, strategy: impl CompressStrategy + 'static) -> Self {
         self.config.compress = Arc::new(strategy);
+        self.compress_explicitly_set = true;
         self
     }
 
@@ -450,7 +454,19 @@ impl AgentBuilder {
     }
 
     /// Finalise the builder and return a ready-to-run `Agent`.
-    pub fn build(self) -> Agent {
+    pub fn build(mut self) -> Agent {
+        // Auto-calibrate the compression window from provider capabilities
+        // when the user hasn't explicitly set a custom strategy.
+        if !self.compress_explicitly_set {
+            let caps = self.config.provider.capabilities(self.config.model.as_deref());
+            if let Some(window) = caps.max_context_window {
+                self.config.compress = Arc::new(CompressPipeline {
+                    window_tokens: window,
+                    ..CompressPipeline::default()
+                });
+            }
+        }
+
         Agent {
             config: Arc::new(self.config),
         }

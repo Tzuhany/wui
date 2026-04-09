@@ -15,7 +15,7 @@ use async_trait::async_trait;
 use futures::{Stream, StreamExt};
 
 use wui_core::event::StreamEvent;
-use wui_core::provider::{ChatRequest, Provider, ProviderError};
+use wui_core::provider::{ChatRequest, Provider, ProviderCapabilities, ProviderError};
 
 use self::serialize::build_request_body;
 use self::sse::SseParser;
@@ -183,6 +183,12 @@ impl Provider for Anthropic {
             });
 
         Ok(Box::pin(stream))
+    }
+
+    fn capabilities(&self, _model: Option<&str>) -> ProviderCapabilities {
+        ProviderCapabilities::all()
+            .with_structured_output(false)
+            .with_max_context_window(200_000)
     }
 }
 

@@ -56,7 +56,7 @@ use serde_json::{json, Value};
 use wui_core::event::{AgentEvent, RunStopReason, TokenUsage};
 use wui_core::tool::{Tool, ToolCtx, ToolInput, ToolMeta, ToolOutput};
 
-use crate::Agent;
+use super::agent::Agent;
 
 // ── SubAgentSummary ───────────────────────────────────────────────────────────
 

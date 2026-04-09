@@ -8,7 +8,6 @@ use wui_core::event::AgentEvent;
 use wui_core::message::{ContentBlock, Message, Role};
 
 use super::checkpoint::RunCheckpoint;
-use super::registry::ToolRegistry;
 use super::{CompletedTool, IterationCtx, RunConfig, RunState};
 
 /// Build the assistant message and tool results, append them to history,
@@ -162,25 +161,3 @@ pub(super) fn replace_last_assistant_text(messages: &mut [Message], new_text: St
     }
 }
 
-/// Append a deferred-tools listing to the system prompt when needed.
-pub(super) fn augment_system(base: &str, registry: &ToolRegistry) -> String {
-    let deferred = registry.deferred_entries();
-    if deferred.is_empty() {
-        return base.to_string();
-    }
-
-    let listing = deferred
-        .iter()
-        .map(|e| format!("- **{}**: {}", e.name, e.description))
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    let section = format!(
-        "## Additional tools\n\
-        These tools are available but require loading. \
-        Call `ToolSearch` with the tool name or a keyword before using them:\n\n\
-        {listing}"
-    );
-
-    format!("{base}\n\n{}", wui_core::fmt::system_reminder(&section))
-}

@@ -31,6 +31,7 @@ pub(super) async fn maybe_compress(
         return;
     }
 
+    let messages_before = messages.len();
     let pressure_before = config.compress.pressure(messages);
     let result = config
         .compress
@@ -47,6 +48,15 @@ pub(super) async fn maybe_compress(
             messages: new_msgs,
         }) => {
             let pressure_after = config.compress.pressure(&new_msgs);
+            tracing::info!(
+                method = ?method,
+                messages_before,
+                messages_after = new_msgs.len(),
+                tokens_freed = freed,
+                %pressure_before,
+                %pressure_after,
+                "wui.compress"
+            );
             tracing::debug!(?method, freed, %pressure_before, %pressure_after, "context compressed");
             *messages = new_msgs;
             if method == wui_core::event::CompressMethod::L3Failed {
@@ -76,7 +86,7 @@ pub(super) async fn emergency_compress(
     messages: &mut Vec<Message>,
     tx: &mpsc::Sender<AgentEvent>,
 ) -> bool {
-    tracing::warn!("provider rejected prompt as too long — attempting emergency compression");
+    tracing::warn!(messages_before = messages.len(), "wui.compress.emergency — provider rejected prompt as too long");
     let pressure_before = config.compress.pressure(messages);
     let result = config
         .compress

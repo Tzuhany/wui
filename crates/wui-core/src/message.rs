@@ -23,88 +23,9 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::types::ToolCallId;
+use crate::tool::ToolCallId;
 
-/// A single turn in the conversation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Message {
-    pub id: String,
-    pub role: Role,
-    pub content: Vec<ContentBlock>,
-}
-
-impl Message {
-    pub fn user(text: impl Into<String>) -> Self {
-        Self {
-            id: uuid::Uuid::new_v4().to_string(),
-            role: Role::User,
-            content: vec![ContentBlock::Text { text: text.into() }],
-        }
-    }
-
-    /// Construct a user message with both a text prompt and an image.
-    ///
-    /// The image is included as a second content block, immediately after the
-    /// text. This is the idiomatic way to send multi-modal prompts to vision
-    /// models (Anthropic Claude, GPT-4o, etc.).
-    ///
-    /// ```rust,ignore
-    /// let msg = Message::user_with_image(
-    ///     "What is in this image?",
-    ///     ImageSource::Url("https://example.com/photo.jpg".to_string()),
-    /// );
-    /// ```
-    pub fn user_with_image(text: impl Into<String>, source: ImageSource) -> Self {
-        Self {
-            id: uuid::Uuid::new_v4().to_string(),
-            role: Role::User,
-            content: vec![
-                ContentBlock::Text { text: text.into() },
-                ContentBlock::Image { source },
-            ],
-        }
-    }
-
-    pub fn assistant(blocks: Vec<ContentBlock>) -> Self {
-        Self {
-            id: uuid::Uuid::new_v4().to_string(),
-            role: Role::Assistant,
-            content: blocks,
-        }
-    }
-
-    pub fn system(text: impl Into<String>) -> Self {
-        Self {
-            id: uuid::Uuid::new_v4().to_string(),
-            role: Role::System,
-            content: vec![ContentBlock::Text { text: text.into() }],
-        }
-    }
-
-    /// Construct a message with an explicit id.
-    ///
-    /// Use when reconstructing messages from storage (checkpoints, databases)
-    /// where the original id must be preserved for continuity or auditing.
-    /// For new messages, prefer the role-specific constructors.
-    pub fn with_id(id: impl Into<String>, role: Role, content: Vec<ContentBlock>) -> Self {
-        Self {
-            id: id.into(),
-            role,
-            content,
-        }
-    }
-}
-
-/// Who produced this message.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Role {
-    User,
-    Assistant,
-    System,
-}
-
-// ── Image / Document source types ─────────────────────────────────────────────
+// ── Media Sources ────────────────────────────────────────────────────────────
 
 /// The source of an image content block.
 ///
@@ -135,6 +56,8 @@ pub enum DocumentSource {
     /// A publicly accessible document URL.
     Url(String),
 }
+
+// ── ContentBlock ─────────────────────────────────────────────────────────────
 
 /// A piece of content within a message.
 ///
@@ -213,4 +136,85 @@ pub enum ContentBlock {
     /// **Irreversible**: the original messages are gone from context.
     /// The LLM reads this summary and calibrates its behaviour accordingly.
     CompactBoundary { summary: String },
+}
+
+// ── Message + Role ───────────────────────────────────────────────────────────
+
+/// A single turn in the conversation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Message {
+    pub id: String,
+    pub role: Role,
+    pub content: Vec<ContentBlock>,
+}
+
+impl Message {
+    pub fn user(text: impl Into<String>) -> Self {
+        Self {
+            id: uuid::Uuid::new_v4().to_string(),
+            role: Role::User,
+            content: vec![ContentBlock::Text { text: text.into() }],
+        }
+    }
+
+    /// Construct a user message with both a text prompt and an image.
+    ///
+    /// The image is included as a second content block, immediately after the
+    /// text. This is the idiomatic way to send multi-modal prompts to vision
+    /// models (Anthropic Claude, GPT-4o, etc.).
+    ///
+    /// ```rust,ignore
+    /// let msg = Message::user_with_image(
+    ///     "What is in this image?",
+    ///     ImageSource::Url("https://example.com/photo.jpg".to_string()),
+    /// );
+    /// ```
+    pub fn user_with_image(text: impl Into<String>, source: ImageSource) -> Self {
+        Self {
+            id: uuid::Uuid::new_v4().to_string(),
+            role: Role::User,
+            content: vec![
+                ContentBlock::Text { text: text.into() },
+                ContentBlock::Image { source },
+            ],
+        }
+    }
+
+    pub fn assistant(blocks: Vec<ContentBlock>) -> Self {
+        Self {
+            id: uuid::Uuid::new_v4().to_string(),
+            role: Role::Assistant,
+            content: blocks,
+        }
+    }
+
+    pub fn system(text: impl Into<String>) -> Self {
+        Self {
+            id: uuid::Uuid::new_v4().to_string(),
+            role: Role::System,
+            content: vec![ContentBlock::Text { text: text.into() }],
+        }
+    }
+
+    /// Construct a message with an explicit id.
+    ///
+    /// Use when reconstructing messages from storage (checkpoints, databases)
+    /// where the original id must be preserved for continuity or auditing.
+    /// For new messages, prefer the role-specific constructors.
+    pub fn with_id(id: impl Into<String>, role: Role, content: Vec<ContentBlock>) -> Self {
+        Self {
+            id: id.into(),
+            role,
+            content,
+        }
+    }
+}
+
+/// Who produced this message.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Role {
+    User,
+    Assistant,
+    System,
 }

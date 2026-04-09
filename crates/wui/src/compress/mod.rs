@@ -85,6 +85,3 @@ pub struct CompressResult {
     /// Which compression method was applied, if any.
     pub method: Option<CompressMethod>,
 }
-
-#[cfg(test)]
-mod tests;

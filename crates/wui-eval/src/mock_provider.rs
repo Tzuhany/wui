@@ -7,7 +7,7 @@ use futures::Stream;
 use serde_json::Value;
 use wui_core::event::{StopReason, StreamEvent, TokenUsage};
 use wui_core::provider::{ChatRequest, Provider, ProviderError};
-use wui_core::types::ToolCallId;
+use wui_core::tool::ToolCallId;
 
 // ── MockProvider ──────────────────────────────────────────────────────────────
 

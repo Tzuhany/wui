@@ -7,7 +7,7 @@ use wui_core::event::{RunStopReason, RunSummary};
 use wui_core::hook::{Hook, HookDecision, HookEvent};
 use wui_core::message::Message;
 use wui_core::tool::ToolOutput;
-use wui_core::types::SessionId;
+use wui_core::hook::SessionId;
 
 pub struct HookRunner {
     hooks: Vec<Arc<dyn Hook>>,

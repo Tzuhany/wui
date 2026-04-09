@@ -24,6 +24,8 @@ pub(super) async fn parse_stream(
 ) -> Result<bool, AgentError> {
     use wui_core::event::StreamEvent::*;
 
+    let mut text_chunk_count: u32 = 0;
+
     while let Some(event) = stream.next().await {
         let event = match event {
             Ok(e) => e,
@@ -37,6 +39,7 @@ pub(super) async fn parse_stream(
 
         match event {
             TextDelta { text } => {
+                text_chunk_count += 1;
                 ctx.text_buf.push_str(&text);
                 tx.send(AgentEvent::TextDelta(text)).await.ok();
             }
@@ -110,6 +113,9 @@ pub(super) async fn parse_stream(
             } => {
                 ctx.usage = u;
                 ctx.stop_reason = sr;
+                let span = tracing::Span::current();
+                span.record("text_chunks_count", text_chunk_count);
+                span.record("total_text_len", ctx.text_buf.len() as u64);
                 return Ok(true);
             }
 

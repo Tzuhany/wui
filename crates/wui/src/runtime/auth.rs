@@ -1,14 +1,11 @@
 // ============================================================================
 // Tool authorization — permission checks and HITL approval.
 //
-// Extracted from run.rs for readability. The authorization pipeline:
+// The authorization pipeline:
 //   1. Pre-tool hook (may block or mutate input).
-//   2. Static deny rules.
-//   3. Session always-denied.
-//   4. Static allow rules.
-//   5. Session always-allowed.
-//   6. Mode-based check (Auto/Readonly/Ask/Callback).
-//   7. HITL approval via ControlHandle (Ask mode only).
+//   2. Compute per-invocation metadata (ToolMeta, permission matcher).
+//   3. Evaluate verdict (static rules → session → mode).
+//   4. HITL approval via ControlHandle (Ask mode only).
 // ============================================================================
 
 use tokio::sync::mpsc;
@@ -18,7 +15,7 @@ use wui_core::event::{
 };
 use wui_core::hook::HookDecision;
 use wui_core::message::Message;
-use wui_core::types::ToolCallId;
+use wui_core::tool::ToolCallId;
 
 use super::executor::CompletedTool;
 use super::permission::{self, PermissionOutcome, PermissionVerdict};
@@ -64,15 +61,13 @@ pub(super) async fn authorize_tool(
     input: serde_json::Value,
     tx: &mpsc::Sender<AgentEvent>,
 ) -> (Result<serde_json::Value, CompletedTool>, Vec<Message>) {
+    tracing::info!(tool.id = %id, tool.name = %name, "wui.tool.auth.start");
+
     // 1. Pre-tool hook — may allow, mutate, or block.
     let input = match config.hooks.pre_tool_use(&name, &input).await {
         HookDecision::Block { reason } => {
             return (
-                Err(CompletedTool::immediate(
-                    id,
-                    name,
-                    output_hook_blocked(reason),
-                )),
+                Err(CompletedTool::immediate(id, name, output_hook_blocked(reason))),
                 vec![],
             )
         }
@@ -80,35 +75,9 @@ pub(super) async fn authorize_tool(
         HookDecision::Allow | HookDecision::MutateOutput { .. } => input,
     };
 
-    // Compute per-invocation tool metadata.
-    let tool_impl = registry.get(&name);
-    let tool_meta = tool_impl
-        .as_deref()
-        .map(|t| t.meta(&input))
-        .unwrap_or_default();
-    let perm_key = tool_meta.permission_key.clone();
-    let perm_key_ref = perm_key.as_deref();
-    let is_destructive = tool_meta.destructive;
-    let tool_is_readonly = tool_meta.readonly;
-    let needs_interaction = tool_meta.requires_interaction;
-
-    let perm_matcher = tool_impl
-        .as_deref()
-        .and_then(|t| t.permission_matcher(&input));
-    let matcher_ref: Option<&(dyn Fn(&str) -> bool + Send + Sync)> =
-        perm_matcher.as_ref().map(|b| b.as_ref() as _);
-
-    let check = permission::PermissionCheck {
-        tool_name: &name,
-        permission_key: perm_key_ref,
-        is_readonly: tool_is_readonly,
-        requires_interaction: needs_interaction,
-        matcher: matcher_ref,
-    };
-    let verdict = config
-        .rules
-        .verdict(&config.session_perms, &config.permission, &check)
-        .await;
+    // 2. Gather metadata and evaluate verdict.
+    let (verdict, is_destructive, tool_is_readonly, perm_key) =
+        evaluate_permission(config, registry, &name, &input).await;
 
     match verdict {
         PermissionVerdict::Allowed { source } => {
@@ -118,50 +87,90 @@ pub(super) async fn authorize_tool(
         PermissionVerdict::Denied { reason, source } => {
             tracing::debug!(tool = %name, ?source, %reason, "permission denied");
             return (
-                Err(CompletedTool::immediate(
-                    id,
-                    name,
-                    output_permission_denied(reason),
-                )),
+                Err(CompletedTool::immediate(id, name, output_permission_denied(reason))),
                 vec![],
             );
         }
         PermissionVerdict::NeedsApproval => {}
     }
 
-    // 7. HITL approval.
-    let description = {
-        let base = match perm_key_ref {
-            Some(key) => format!("call {name}({key})"),
-            None => format!("call {name}"),
-        };
-        if is_destructive {
-            format!("{base} [destructive — cannot be undone]")
-        } else {
-            base
-        }
-    };
-    let ctrl_req = ControlRequest {
-        id: uuid::Uuid::new_v4().to_string(),
-        kind: ControlKind::PermissionRequest {
-            tool_name: name.clone(),
-            description,
-        },
-    };
+    // 3. HITL approval.
+    let ctrl_req = build_control_request(&name, perm_key.as_deref(), is_destructive);
 
     match permission::check(&config.permission, &ctrl_req, tool_is_readonly, &input) {
         PermissionOutcome::Allowed => (Ok(input), vec![]),
         PermissionOutcome::Denied { reason } => (
-            Err(CompletedTool::immediate(
-                id,
-                name,
-                output_permission_denied(reason),
-            )),
+            Err(CompletedTool::immediate(id, name, output_permission_denied(reason))),
             vec![],
         ),
         PermissionOutcome::NeedsApproval => {
             await_approval(config, id, name, input, ctrl_req, tx).await
         }
+    }
+}
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+/// Gather per-invocation tool metadata and run the permission verdict pipeline.
+async fn evaluate_permission(
+    config: &RunConfig,
+    registry: &ToolRegistry,
+    name: &str,
+    input: &serde_json::Value,
+) -> (PermissionVerdict, bool, bool, Option<String>) {
+    let tool_impl = registry.get(name);
+    let tool_meta = tool_impl
+        .as_deref()
+        .map(|t| t.meta(input))
+        .unwrap_or_default();
+
+    let perm_key = tool_meta.permission_key.clone();
+    let is_destructive = tool_meta.destructive;
+    let tool_is_readonly = tool_meta.readonly;
+
+    let perm_matcher = tool_impl
+        .as_deref()
+        .and_then(|t| t.permission_matcher(input));
+    let matcher_ref: Option<&(dyn Fn(&str) -> bool + Send + Sync)> =
+        perm_matcher.as_ref().map(|b| b.as_ref() as _);
+
+    let check = permission::PermissionCheck {
+        tool_name: name,
+        permission_key: perm_key.as_deref(),
+        is_readonly: tool_is_readonly,
+        requires_interaction: tool_meta.requires_interaction,
+        matcher: matcher_ref,
+    };
+
+    let verdict = config
+        .rules
+        .verdict(&config.session_perms, &config.permission, &check)
+        .await;
+
+    (verdict, is_destructive, tool_is_readonly, perm_key)
+}
+
+/// Build the `ControlRequest` for a HITL permission prompt.
+fn build_control_request(
+    name: &str,
+    perm_key: Option<&str>,
+    is_destructive: bool,
+) -> ControlRequest {
+    let base = match perm_key {
+        Some(key) => format!("call {name}({key})"),
+        None => format!("call {name}"),
+    };
+    let description = if is_destructive {
+        format!("{base} [destructive — cannot be undone]")
+    } else {
+        base
+    };
+    ControlRequest {
+        id: uuid::Uuid::new_v4().to_string(),
+        kind: ControlKind::PermissionRequest {
+            tool_name: name.to_string(),
+            description,
+        },
     }
 }
 
@@ -189,16 +198,12 @@ async fn await_approval(
 
     let result = match response.decision {
         ControlDecision::Deny { reason } => Err(CompletedTool::immediate(
-            id,
-            name,
-            output_permission_denied(reason),
+            id, name, output_permission_denied(reason),
         )),
         ControlDecision::DenyAlways { reason } => {
             config.session_perms.set_always_deny(name.clone()).await;
             Err(CompletedTool::immediate(
-                id,
-                name,
-                output_permission_denied(reason),
+                id, name, output_permission_denied(reason),
             ))
         }
         ControlDecision::ApproveAlways => {

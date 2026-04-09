@@ -21,11 +21,7 @@
 // need to implement `Tool`, `Hook`, or `Provider` is re-exported here.
 // ============================================================================
 
-mod agent;
-mod builder;
-mod session;
-mod structured;
-mod sub_agent;
+mod facade;
 
 pub(crate) mod compress;
 pub(crate) mod runtime;
@@ -33,10 +29,10 @@ pub(crate) mod runtime;
 #[cfg(any(feature = "anthropic", feature = "openai"))]
 pub mod providers;
 
-pub use agent::Agent;
-pub use builder::{AgentBuilder, Effort};
-pub use session::Session;
-pub use sub_agent::{SubAgent, SubAgentSummary, SubAgentToolCall};
+pub use facade::agent::Agent;
+pub use facade::builder::{AgentBuilder, Effort};
+pub use facade::session::Session;
+pub use facade::sub_agent::{SubAgent, SubAgentSummary, SubAgentToolCall};
 
 // ── Core types ────────────────────────────────────────────────────────────────
 
@@ -52,9 +48,10 @@ pub use wui_core::tool::{
     Artifact, ArtifactContent, ArtifactKind, ContextInjection, FailureKind, InterruptBehavior,
     Tool, ToolCtx, ToolInput, ToolMeta, ToolOutput,
 };
-pub use wui_core::types::{CheckpointRunId, SessionId, ToolCallId};
+pub use wui_core::hook::SessionId;
+pub use wui_core::tool::ToolCallId;
 
-pub use structured::StructuredRun;
+pub use facade::agent::StructuredRun;
 
 // ── Runtime types ─────────────────────────────────────────────────────────────
 

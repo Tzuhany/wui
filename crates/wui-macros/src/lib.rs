@@ -192,6 +192,18 @@ fn expand_tool_input(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream
                 })
             }
         }
+
+        impl ::wui_core::tool::ToolArgs for #name {
+            fn schema() -> ::serde_json::Value {
+                #name::schema()
+            }
+
+            fn parse(value: ::serde_json::Value) -> Result<Self, ::wui_core::tool::ToolInputError> {
+                #name::from_value(&value).map_err(|msg| {
+                    ::wui_core::tool::ToolInputError::new(msg)
+                })
+            }
+        }
     };
 
     Ok(expanded)

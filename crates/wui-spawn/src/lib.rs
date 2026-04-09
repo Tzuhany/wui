@@ -1,44 +1,46 @@
 // ============================================================================
-// wui-spawn — background agent delegation for Wui supervisors.
+// wui-spawn — agent delegation for Wui supervisors.
 //
-// This crate is a companion, not the product. It provides one specific pattern:
-// a supervisor agent that spawns sub-agents in the background and queries their
-// status across turns. Whether that pattern is right for your application is
-// your decision.
+// This crate provides two delegation patterns:
 //
-// What this crate is:
-//   - A background job registry (AgentRegistry) built on tokio tasks.
-//   - Four delegation tools that surface job control to the LLM.
-//   - A concrete implementation of supervisor/worker agent patterns.
+// 1. **In-process** (direct): spawn sub-agents as background tokio tasks.
+//    Use `AgentRegistry::delegation_tools()` for the simplest setup.
 //
-// What this crate is NOT:
-//   - A general agent orchestration framework.
-//   - A declaration that background delegation is the right model for all agents.
+// 2. **Transport-backed** (pluggable): delegate via an `AgentTransport`
+//    trait. `LocalTransport` wraps AgentRegistry for in-process use;
+//    future transports can use HTTP, message queues, or the A2A protocol
+//    for cross-process / cross-network delegation.
 //
-// Tool surface:
+// In-process tool surface (delegation_tools):
 //
-//   delegate(prompt)          → job_id (spawns sub-agent, returns immediately)
-//   agent_status(job_id)      → "running" | "done: <result>" | "failed: <err>"
-//   agent_await(job_id)       → blocks until done, returns result
-//   agent_cancel(job_id)      → cancels the job
+//   delegate(prompt)          -> job_id
+//   agent_status(job_id)      -> "running" | "done" | "failed" | "not_found"
+//   agent_await(job_id)       -> blocks until done, returns result
+//   agent_cancel(job_id)      -> cancels the job
 //
-// Usage:
+// Transport-backed tool surface (remote_tools):
 //
-//   let registry = AgentRegistry::new();
-//   let tools    = registry.delegation_tools("researcher", "...", researcher_agent);
-//
-//   let supervisor = Agent::builder(provider)
-//       .tools(tools)
-//       .build();
+//   delegate_remote(agent_name, prompt) -> job_id
+//   remote_status(job_id)               -> status
+//   remote_await(job_id)                -> blocks until done
+//   remote_cancel(job_id)               -> cancels
 // ============================================================================
 
 mod registry;
+pub mod remote_tools;
 mod tools;
+pub mod transport;
 
 use std::sync::Arc;
 
 pub use registry::{AgentRegistry, JobStatus};
 pub use tools::{AgentAwait, AgentCancel, AgentStatus, DelegateAgent};
+
+pub use remote_tools::{remote_tools, RemoteAwait, RemoteCancel, RemoteDelegate, RemoteStatus};
+pub use transport::{
+    AgentTransport, LocalTransport, RemoteAgentResult, RemoteAgentStatus, RemoteJobHandle,
+    TransportError,
+};
 
 impl AgentRegistry {
     /// Create a set of four tools for delegating to a named sub-agent.
@@ -66,10 +68,12 @@ impl AgentRegistry {
     }
 }
 
-// ── Smoke tests ───────────────────────────────────────────────────────────────
+// ── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use wui::PermissionMode;
     use wui_eval::MockProvider;
 
@@ -96,5 +100,44 @@ mod tests {
         assert!(names.contains(&"agent_status"), "missing agent_status");
         assert!(names.contains(&"agent_await"), "missing agent_await");
         assert!(names.contains(&"agent_cancel"), "missing agent_cancel");
+    }
+
+    #[test]
+    fn remote_tools_count_and_names() {
+        let transport = Arc::new(LocalTransport::new());
+        let tools = remote_tools("delegate", "Delegate work", transport);
+
+        assert_eq!(tools.len(), 4);
+
+        let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
+        assert!(names.contains(&"delegate"));
+        assert!(names.contains(&"remote_status"));
+        assert!(names.contains(&"remote_await"));
+        assert!(names.contains(&"remote_cancel"));
+    }
+
+    #[tokio::test]
+    async fn local_transport_send_and_await() {
+        let provider = MockProvider::new(vec![MockProvider::text("result from worker")]);
+        let agent = wui::Agent::builder(provider)
+            .permission(PermissionMode::Auto)
+            .build();
+
+        let mut transport = LocalTransport::new();
+        transport.register("worker", agent);
+        let transport = Arc::new(transport);
+
+        let handle = transport.send("worker", "do work".into()).await.unwrap();
+        assert_eq!(handle.agent_name, "worker");
+
+        let result = transport.result(&handle).await.unwrap();
+        assert!(result.output.unwrap().contains("result from worker"));
+    }
+
+    #[tokio::test]
+    async fn local_transport_not_found() {
+        let transport = LocalTransport::new();
+        let result = transport.send("nonexistent", "hello".into()).await;
+        assert!(result.is_err());
     }
 }

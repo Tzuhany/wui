@@ -87,6 +87,11 @@ pub(super) async fn call_with_retry(
 ) -> Result<ProviderStream, AgentError> {
     let mut attempt = 0u32;
     loop {
+        tracing::debug!(
+            model = %req.model.as_deref().unwrap_or("(default)"),
+            attempt = attempt + 1,
+            "wui.provider.request"
+        );
         match config.provider.stream(req.clone()).await {
             Ok(stream) => return Ok(stream),
 
