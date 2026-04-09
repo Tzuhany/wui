@@ -21,6 +21,9 @@ use super::agent::Agent;
 use super::session::SessionHooks;
 use super::sub_agent::SubAgent;
 
+/// Predicate that decides whether a tool should be sent to the provider.
+pub(crate) type ToolFilterFn = Arc<dyn Fn(&str, &wui_core::tool::ToolMeta) -> bool + Send + Sync>;
+
 // ── Effort ────────────────────────────────────────────────────────────────────
 
 /// Reasoning effort level — controls the extended thinking budget sent to the
@@ -114,8 +117,7 @@ pub struct AgentConfig {
     /// Maximum sub-agent nesting depth. Default: 5.
     pub(crate) max_spawn_depth: u32,
     /// Optional predicate that filters which tools are sent to the provider.
-    pub(crate) tool_filter:
-        Option<Arc<dyn Fn(&str, &wui_core::tool::ToolMeta) -> bool + Send + Sync>>,
+    pub(crate) tool_filter: Option<ToolFilterFn>,
 }
 
 /// Fluent builder for `Agent`.

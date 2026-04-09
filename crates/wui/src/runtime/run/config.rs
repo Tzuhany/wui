@@ -2,6 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::compress::CompressStrategy;
+use crate::facade::builder::ToolFilterFn;
 use crate::runtime::checkpoint::CheckpointStore;
 use crate::runtime::executor::ResultStore;
 use crate::runtime::hooks::HookRunner;
@@ -77,6 +78,5 @@ pub(crate) struct RunConfig {
     pub(crate) spawn_depth: u32,
 
     /// Optional predicate that filters which tools are sent to the provider.
-    pub(crate) tool_filter:
-        Option<Arc<dyn Fn(&str, &wui_core::tool::ToolMeta) -> bool + Send + Sync>>,
+    pub(crate) tool_filter: Option<ToolFilterFn>,
 }
