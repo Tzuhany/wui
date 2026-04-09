@@ -38,15 +38,22 @@ async fn test_history(provider: Anthropic) {
             .send("My secret code word is BANANA42. Acknowledge.")
             .await;
         let mut text = String::new();
+        let mut turn_done = None;
         while let Some(event) = stream.next().await {
             match event {
                 AgentEvent::TextDelta(t) => text.push_str(&t),
+                AgentEvent::TurnDone { turn, .. } => turn_done = Some(turn),
                 AgentEvent::Done(_) => break,
                 AgentEvent::Error(e) => panic!("turn1 error: {e}"),
                 _ => {}
             }
         }
         println!("    turn 1 response: {text}");
+        assert_eq!(
+            turn_done,
+            Some(1),
+            "first session turn should emit TurnDone(1)"
+        );
         assert!(!text.is_empty());
     }
 
@@ -54,15 +61,22 @@ async fn test_history(provider: Anthropic) {
     {
         let mut stream = session.send("What was my secret code word?").await;
         let mut text = String::new();
+        let mut turn_done = None;
         while let Some(event) = stream.next().await {
             match event {
                 AgentEvent::TextDelta(t) => text.push_str(&t),
+                AgentEvent::TurnDone { turn, .. } => turn_done = Some(turn),
                 AgentEvent::Done(_) => break,
                 AgentEvent::Error(e) => panic!("turn2 error: {e}"),
                 _ => {}
             }
         }
         println!("    turn 2 response: {text}");
+        assert_eq!(
+            turn_done,
+            Some(2),
+            "second session turn should emit TurnDone(2)"
+        );
         assert!(
             text.contains("BANANA42"),
             "LLM forgot the code word; response: {text}"
@@ -98,13 +112,16 @@ async fn test_session_store(provider: Anthropic) {
     {
         let session = agent_a.session("cp-test").await;
         let mut stream = session.send("Remember: the magic number is 777.").await;
+        let mut turn_done = None;
         while let Some(event) = stream.next().await {
             match event {
+                AgentEvent::TurnDone { turn, .. } => turn_done = Some(turn),
                 AgentEvent::Done(_) => break,
                 AgentEvent::Error(e) => panic!("error: {e}"),
                 _ => {}
             }
         }
+        assert_eq!(turn_done, Some(1));
         println!("    session A: wrote magic number");
     }
 
@@ -130,15 +147,22 @@ async fn test_session_store(provider: Anthropic) {
             .send("What was the magic number I told you about?")
             .await;
         let mut text = String::new();
+        let mut turn_done = None;
         while let Some(event) = stream.next().await {
             match event {
                 AgentEvent::TextDelta(t) => text.push_str(&t),
+                AgentEvent::TurnDone { turn, .. } => turn_done = Some(turn),
                 AgentEvent::Done(_) => break,
                 AgentEvent::Error(e) => panic!("error: {e}"),
                 _ => {}
             }
         }
         println!("    session B response: {text}");
+        assert_eq!(
+            turn_done,
+            Some(2),
+            "resumed session should keep turn numbering"
+        );
         assert!(
             text.contains("777"),
             "resumed session forgot the magic number; got: {text}"

@@ -23,8 +23,9 @@
 //                     exhausted, max iterations, etc.). Block to force a retry;
 //                     use `stop_hook_active` to avoid infinite loops.
 //
-// Hooks are composable: the engine runs all registered hooks in order and
-// stops at the first Block decision. Register multiple hooks freely.
+// Hooks are composable: the engine runs all registered hooks in order.
+// Blocks short-circuit immediately; mutations are threaded forward so later
+// hooks see the updated value. Register multiple hooks freely.
 // ============================================================================
 
 use std::borrow::Borrow;
@@ -316,7 +317,7 @@ impl HookDecision {
         Self::Mutate { input }
     }
 
-    /// Replace the text content in `PostToolUse` or `PreComplete` contexts.
+    /// Replace the text content in `PostToolUse` or `PreStop` contexts.
     pub fn mutate_output(content: impl Into<String>) -> Self {
         Self::MutateOutput {
             content: content.into(),

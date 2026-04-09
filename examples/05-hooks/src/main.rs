@@ -4,7 +4,7 @@
 //!   - DenyList blocks a specific tool by name (FailureKind::HookBlocked)
 //!   - Custom PreToolUse hook can inspect and block based on input
 //!   - Custom PostToolUse hook fires with the tool's output
-//!   - Custom PreComplete hook can block and force LLM to revise
+//!   - Custom PreStop hook can block and force the LLM to revise before stopping
 //!   - Hook::handles() filters events efficiently
 //!
 //!   cargo run --example 05_hooks --features anthropic

@@ -266,10 +266,11 @@ pub(crate) fn build_run_config(
 /// Build the tool registry, automatically injecting `ToolSearch` when
 /// deferred tools or catalogs are present.
 ///
-/// `ToolSearch` is the default strategy for "lazy schema loading": the LLM
-/// sees a compact listing and calls `ToolSearch` to fetch the full schema
-/// before use. It is injected here, not in the registry or core, because it
-/// is a prompt-economy policy — not a fundamental property of the tool system.
+/// The built-in `tool_search` tool is the default strategy for "lazy schema
+/// loading": the LLM sees a compact listing and calls `tool_search` to fetch
+/// the full schema before use. The backing `ToolSearch` implementation is
+/// injected here, not in the registry or core, because it is a prompt-economy
+/// policy — not a fundamental property of the tool system.
 pub(crate) fn build_registry(
     resident: &[Arc<dyn wui_core::tool::Tool>],
     deferred: &[Arc<dyn wui_core::tool::Tool>],

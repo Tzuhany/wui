@@ -85,6 +85,7 @@ impl RunState {
 /// Extracted phases operate on this struct, keeping `run_loop` slim.
 pub(super) struct IterationCtx {
     pub(super) pending_inputs: HashMap<ToolCallId, (String, String)>,
+    pub(super) tool_inputs: HashMap<ToolCallId, serde_json::Value>,
     pub(super) assistant_blocks: Vec<ContentBlock>,
     pub(super) submission_order: Vec<ToolCallId>,
     pub(super) completed_map: HashMap<ToolCallId, CompletedTool>,
@@ -101,6 +102,7 @@ impl IterationCtx {
     pub(super) fn new() -> Self {
         Self {
             pending_inputs: HashMap::new(),
+            tool_inputs: HashMap::new(),
             assistant_blocks: Vec::new(),
             submission_order: Vec::new(),
             completed_map: HashMap::new(),
@@ -112,6 +114,31 @@ impl IterationCtx {
             emission_guard: EmissionGuard::new(),
             auth_injections: Vec::new(),
         }
+    }
+
+    pub(super) fn record_tool_use(
+        &mut self,
+        id: ToolCallId,
+        name: String,
+        input: serde_json::Value,
+        summary: Option<String>,
+    ) {
+        self.submission_order.push(id.clone());
+        self.tool_inputs.insert(id.clone(), input.clone());
+        self.assistant_blocks.push(ContentBlock::ToolUse {
+            id,
+            name,
+            input,
+            summary,
+        });
+    }
+
+    pub(super) fn remember_tool_input(&mut self, id: &ToolCallId, input: serde_json::Value) {
+        self.tool_inputs.insert(id.clone(), input);
+    }
+
+    pub(super) fn tool_input(&self, id: &ToolCallId) -> Option<&serde_json::Value> {
+        self.tool_inputs.get(id)
     }
 }
 
@@ -176,7 +203,7 @@ pub(super) fn augment_system(base: &str, registry: &ToolRegistry) -> String {
     let section = format!(
         "## Additional tools\n\
         These tools are available but require loading. \
-        Call `ToolSearch` with the tool name or a keyword before using them:\n\n\
+        Call `tool_search` with the tool name or a keyword before using them:\n\n\
         {listing}"
     );
 

@@ -4,7 +4,6 @@ use futures::StreamExt;
 use tokio::sync::mpsc;
 
 use wui_core::event::{AgentError, AgentEvent};
-use wui_core::message::ContentBlock;
 use wui_core::provider::ProviderError;
 
 use super::registry::ToolRegistry;
@@ -64,21 +63,16 @@ pub(super) async fn parse_stream(
                     continue;
                 };
 
-                // Record submission order before any early-exit path so the
-                // provider always sees a matching ToolResult regardless of
-                // what happens next.
-                ctx.submission_order.push(id.clone());
-
                 let input: serde_json::Value = match serde_json::from_str(&json) {
                     Ok(v) => v,
                     Err(e) => {
                         tracing::warn!(tool = %name, error = %e, "malformed tool input JSON from provider");
-                        ctx.assistant_blocks.push(ContentBlock::ToolUse {
-                            id: id.clone(),
-                            name: name.clone(),
-                            input: serde_json::Value::Null,
-                            summary: None,
-                        });
+                        ctx.record_tool_use(
+                            id.clone(),
+                            name.clone(),
+                            serde_json::Value::Null,
+                            None,
+                        );
                         let denied = CompletedTool::immediate(
                             id.clone(),
                             name,
@@ -96,12 +90,7 @@ pub(super) async fn parse_stream(
                 let tool_summary = active_registry
                     .get(&name)
                     .and_then(|t| t.executor_hints(&input).summary);
-                ctx.assistant_blocks.push(ContentBlock::ToolUse {
-                    id: id.clone(),
-                    name: name.clone(),
-                    input: input.clone(),
-                    summary: tool_summary,
-                });
+                ctx.record_tool_use(id.clone(), name.clone(), input.clone(), tool_summary);
 
                 // Queue for authorization after MessageEnd.
                 ctx.pending_auths.push((id, name, input));

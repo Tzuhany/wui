@@ -57,6 +57,7 @@ use wui_core::event::{AgentEvent, RunStopReason, TokenUsage};
 use wui_core::tool::{Tool, ToolCtx, ToolInput, ToolMeta, ToolOutput};
 
 use super::agent::Agent;
+use crate::runtime::HookRunner;
 
 // ── SubAgentSummary ───────────────────────────────────────────────────────────
 
@@ -152,6 +153,8 @@ impl Tool for SubAgent {
             Ok(v) => v,
             Err(e) => return ToolOutput::invalid_input(e),
         };
+        let hooks = HookRunner::new(self.agent.config.hooks.clone());
+        hooks.notify_subagent_start(&self.tool_name, prompt).await;
 
         ctx.report(format!("delegating to sub-agent '{}'", self.tool_name));
 
@@ -171,7 +174,11 @@ impl Tool for SubAgent {
                     None    => break,   // stream ended without Done — treat as empty
                 },
                 _ = ctx.cancel.cancelled() => {
-                    return ToolOutput::error("sub-agent cancelled");
+                    let message = "sub-agent cancelled";
+                    hooks
+                        .notify_subagent_end(&self.tool_name, Err(message))
+                        .await;
+                    return ToolOutput::error(message);
                 }
             };
 
@@ -214,22 +221,33 @@ impl Tool for SubAgent {
                         usage: summary.usage,
                         tool_calls,
                     };
+                    hooks
+                        .notify_subagent_end(&self.tool_name, Ok(&final_text))
+                        .await;
                     return ToolOutput::success(final_text)
                         .with_structured(serde_json::to_value(structured).unwrap_or_default());
                 }
 
                 AgentEvent::Error(e) if e.permission_denied => {
-                    return ToolOutput::error(format!(
+                    let message = format!(
                         "sub-agent '{}' stopped because it requires interactive tool approval, \
                          which is not supported in delegation mode. \
                          Build the sub-agent with PermissionMode::Auto or add an allow rule \
                          for the tool that triggered the request. Underlying error: {e}",
                         self.tool_name,
-                    ));
+                    );
+                    hooks
+                        .notify_subagent_end(&self.tool_name, Err(&message))
+                        .await;
+                    return ToolOutput::error(message);
                 }
 
                 AgentEvent::Error(e) => {
-                    return ToolOutput::error(e.to_string());
+                    let message = e.to_string();
+                    hooks
+                        .notify_subagent_end(&self.tool_name, Err(&message))
+                        .await;
+                    return ToolOutput::error(message);
                 }
 
                 _ => {}
@@ -237,6 +255,9 @@ impl Tool for SubAgent {
         }
 
         // Stream ended without AgentEvent::Done — return whatever text we have.
+        hooks
+            .notify_subagent_end(&self.tool_name, Ok(&final_text))
+            .await;
         ToolOutput::success(final_text)
     }
 }

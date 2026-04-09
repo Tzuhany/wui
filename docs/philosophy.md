@@ -293,11 +293,11 @@ The runtime does not think. It executes what the LLM decides.
 
 Neither crate imports from any extension crate. This is enforced structurally — extension crates depend on core, never the reverse.
 
-### 2. Extension layer — `wui-memory`, `wui-workflow`, `wui-skills`, `wui-spawn`, `wui-eval`, etc.
+### 2. Extension layer — `wui-memory`, `wui-skills`, `wui-spawn`, `wui-eval`, `wui-mcp`, etc.
 
 Extensions are product-level components built on the runtime.
 
-They are explicitly allowed to be opinionated. `SummarizingCompressor` makes an LLM call. `SemanticMemoryTool` embeds text before storing it. `SkillsCatalog` reads from the filesystem. `Parallel` in `wui-workflow` cancels sibling tasks on first failure.
+They are explicitly allowed to be opinionated. `SummarizingCompressor` makes an LLM call. `SemanticMemoryTool` embeds text before storing it. `SkillsCatalog` reads from the filesystem. `McpCatalog` lazily connects to external MCP servers.
 
 This is not a violation of the philosophy. Extensions are *expected* to add product-level opinions — that is their job. The constraint is that these opinions live in extension crates, not in the runtime core. An application that does not use memory should not pay for memory's opinions; an application that does not use workflows should not have workflow assumptions baked into its loop.
 
@@ -313,6 +313,6 @@ Concretely:
 - Tool execution, context management, and permission enforcement must work for every agent → they live in the runtime.
 - Remembering facts across sessions is useful for *some* agents, not all → `wui-memory`.
 - Connecting MCP servers is useful for *some* agents, not all → `wui-mcp`.
-- Summarising old messages is one valid compression strategy, not the only one → `SummarizingCompressor` in `wui`, pluggable via `CompactionStrategy`.
+- Summarising old messages is one valid compression strategy, not the only one → `SummarizingCompressor` in `wui`, pluggable via `CompressStrategy`.
 
 The runtime should never import from extension crates. If a concept seems "fundamental enough" to belong in core but only makes sense in the context of a specific product feature, it does not belong in core — it belongs in the extension that owns that feature.

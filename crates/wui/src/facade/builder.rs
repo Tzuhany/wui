@@ -89,7 +89,8 @@ pub struct AgentConfig {
     /// Set via `.effort(Effort::High)` or directly. `None` = no thinking.
     pub(crate) thinking_budget: Option<u32>,
     /// Tools with deferred schemas — listed by name only in the initial prompt.
-    /// The LLM calls `ToolSearch` to load their full schema before use.
+    /// The LLM calls the built-in `tool_search` tool to load their full schema
+    /// before use.
     pub(crate) deferred_tools: Vec<Arc<dyn Tool>>,
     /// Lazily-loaded, searchable tool catalogs.
     pub(crate) catalogs: Vec<Arc<dyn crate::catalog::ToolCatalog>>,
@@ -100,7 +101,7 @@ pub struct AgentConfig {
     /// The run ID under which checkpoints are saved and loaded.
     /// Required when `checkpoint_store` is `Some`.
     pub(crate) checkpoint_run_id: Option<String>,
-    /// Maximum number of results returned by `ToolSearch` from catalog searches.
+    /// Maximum number of results returned by `tool_search` from catalog searches.
     /// Default: 5.
     pub(crate) catalog_limit: usize,
     /// Optional store for persisting large tool results before truncation.
@@ -163,12 +164,13 @@ impl AgentBuilder {
     /// Add a tool with a deferred schema.
     ///
     /// Deferred tools appear only as `name + description` in the initial
-    /// system prompt. The LLM calls `ToolSearch` to retrieve the full schema
-    /// before using them. This saves tokens for large tool libraries where
-    /// listing every schema upfront would bloat the context.
+    /// system prompt. The LLM calls the built-in `tool_search` tool to
+    /// retrieve the full schema before using them. This saves tokens for
+    /// large tool libraries where listing every schema upfront would bloat
+    /// the context.
     ///
-    /// `ToolSearch` is injected automatically when any deferred tools or
-    /// catalogs are registered.
+    /// The backing `ToolSearch` implementation is injected automatically when
+    /// any deferred tools or catalogs are registered.
     pub fn tool_deferred(mut self, tool: impl Tool) -> Self {
         self.config.deferred_tools.push(Arc::new(tool));
         self
@@ -331,7 +333,8 @@ impl AgentBuilder {
 
     /// Set the maximum number of results returned per catalog search.
     ///
-    /// Applies to `ToolSearch` when catalogs are registered via `.catalog()`.
+    /// Applies to the built-in `tool_search` tool when catalogs are
+    /// registered via `.catalog()`.
     /// Default: 5.
     pub fn catalog_limit(mut self, n: usize) -> Self {
         self.config.catalog_limit = n;
@@ -469,6 +472,15 @@ impl AgentBuilder {
                 });
             }
         }
+
+        // Validate the tool set early so duplicate names fail at construction
+        // time instead of surfacing later from inside a running stream.
+        let _ = super::agent::build_registry(
+            &self.config.tools,
+            &self.config.deferred_tools,
+            &self.config.catalogs,
+            self.config.catalog_limit,
+        );
 
         Agent {
             config: Arc::new(self.config),

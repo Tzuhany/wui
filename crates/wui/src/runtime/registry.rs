@@ -4,15 +4,16 @@
 // Resident tools: full schema in the LLM's system prompt. Used for the tools
 // the LLM will call most often. The schema cost is paid upfront.
 //
-// Deferred tools: only name + description in the prompt. The LLM calls
-// ToolSearch to retrieve the full schema before using them. Saves token cost
-// for large tool libraries where 30+ schemas would bloat the context.
+// Deferred tools: only name + description in the prompt. The LLM calls the
+// built-in `tool_search` tool to retrieve the full schema before using them.
+// Saves token cost for large tool libraries where 30+ schemas would bloat the
+// context.
 //
 // All tools (resident + deferred) are stored in the same map for uniform
 // execution lookup. The distinction only matters when building the system prompt.
 // ============================================================================
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{hash_map::Entry, HashMap, HashSet};
 use std::sync::Arc;
 
 use wui_core::provider::ToolDef;
@@ -35,7 +36,7 @@ impl ToolRegistry {
     ///
     /// Resident tools appear in the initial prompt with full schemas.
     /// Deferred tools appear only as name + description; the LLM calls
-    /// `ToolSearch` to fetch the full schema before using them.
+    /// `tool_search` to fetch the full schema before using them.
     ///
     /// Both sets are stored in the same lookup map for execution.
     pub fn new(resident: Vec<Arc<dyn Tool>>, deferred: Vec<Arc<dyn Tool>>) -> Self {
@@ -43,12 +44,12 @@ impl ToolRegistry {
         let mut deferred_names: HashSet<String> = HashSet::new();
 
         for t in resident {
-            map.insert(t.name().to_string(), t);
+            insert_unique(&mut map, t, "resident");
         }
         for t in deferred {
             let name = t.name().to_string();
             deferred_names.insert(name.clone());
-            map.insert(name, t);
+            insert_unique(&mut map, t, "deferred");
         }
 
         Self {
@@ -79,8 +80,9 @@ impl ToolRegistry {
 
     /// Brief entries for all deferred tools, sorted by name.
     ///
-    /// Used to build the "Additional tools" section of the system prompt
-    /// so the LLM knows these tools exist and can call ToolSearch to learn more.
+    /// Used to build the "Additional tools" section of the system prompt so
+    /// the LLM knows these tools exist and can call `tool_search` to learn
+    /// more.
     pub(crate) fn deferred_entries(&self) -> Vec<DeferredEntry> {
         let mut entries: Vec<DeferredEntry> = self
             .deferred_names
@@ -113,14 +115,28 @@ impl ToolRegistry {
             };
         }
         let mut merged = self.tools.clone();
+        let mut deferred_names = self.deferred_names.clone();
         for (name, tool) in extra {
+            deferred_names.remove(name);
             merged
                 .entry(name.clone())
                 .or_insert_with(|| Arc::clone(tool));
         }
         Self {
             tools: merged,
-            deferred_names: self.deferred_names.clone(),
+            deferred_names,
+        }
+    }
+}
+
+fn insert_unique(map: &mut HashMap<String, Arc<dyn Tool>>, tool: Arc<dyn Tool>, source: &str) {
+    let name = tool.name().to_string();
+    match map.entry(name.clone()) {
+        Entry::Vacant(entry) => {
+            entry.insert(tool);
+        }
+        Entry::Occupied(_) => {
+            panic!("duplicate tool name '{name}' encountered while building {source} tools")
         }
     }
 }

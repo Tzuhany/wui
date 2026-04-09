@@ -21,6 +21,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::{Stream, StreamExt as _};
+use tokio::sync::mpsc;
+use tokio_stream::wrappers::ReceiverStream;
 
 use wui_core::event::StreamEvent;
 use wui_core::provider::{ChatRequest, Provider, ProviderCapabilities, ProviderError};
@@ -116,29 +118,42 @@ impl Provider for OpenAi {
             });
         }
 
-        let mut parser = SseParser::default();
+        let (tx, rx) = mpsc::channel::<Result<StreamEvent, ProviderError>>(64);
+        tokio::spawn(async move {
+            let mut parser = SseParser::default();
 
-        use eventsource_stream::Eventsource as _;
-        let stream = response
-            .bytes_stream()
-            .eventsource()
-            .flat_map(move |result| {
-                // One SSE chunk may produce zero, one, or many StreamEvents.
-                // `flat_map` expands the Vec into individual stream items.
+            use eventsource_stream::Eventsource as _;
+            let mut source = response.bytes_stream().eventsource();
+
+            while let Some(result) = source.next().await {
                 let events: Vec<Result<StreamEvent, ProviderError>> = match result {
                     Ok(event) if !event.data.is_empty() && event.data != "[DONE]" => {
                         match parser.parse_all(&event.data) {
-                            Ok(evs) => evs.into_iter().map(Ok).collect(),
+                            Ok(parsed) => parsed.into_iter().map(Ok).collect(),
                             Err(e) => vec![Err(e)],
                         }
                     }
                     Ok(_) => vec![],
                     Err(e) => vec![Err(ProviderError::Stream(e.to_string()))],
                 };
-                futures::stream::iter(events)
-            });
 
-        Ok(Box::pin(stream))
+                for event in events {
+                    let is_err = event.is_err();
+                    if tx.send(event).await.is_err() {
+                        return;
+                    }
+                    if is_err {
+                        return;
+                    }
+                }
+            }
+
+            if let Some(event) = parser.finish() {
+                let _ = tx.send(Ok(event)).await;
+            }
+        });
+
+        Ok(Box::pin(ReceiverStream::new(rx)))
     }
 
     fn capabilities(&self, model: Option<&str>) -> ProviderCapabilities {

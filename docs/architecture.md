@@ -10,7 +10,6 @@ wui/
 │   ├── wui-mcp       # MCP protocol adapter + McpCatalog (lazy tool discovery).
 │   ├── wui-memory    # Optional memory extension (recall/remember/forget/semantic).
 │   ├── wui-observe   # Timeline collection and OpenTelemetry span emission.
-│   ├── wui-workflow  # Deterministic pipeline / branch / parallel primitives.
 │   ├── wui-spawn     # Background agent delegation registry.
 │   ├── wui-skills    # File-based skill discovery (SKILL.md → ToolCatalog).
 │   └── wui-eval      # Testing infrastructure: MockProvider + AgentHarness.
@@ -24,8 +23,7 @@ Dependency flow (strictly one-directional):
 ```
                         ┌─ wui-memory
                         ├─ wui-observe
-wui ←── wui-core  ←──├─ wui-workflow
-                        ├─ wui-mcp
+wui ←── wui-core  ←──├─ wui-mcp
                         ├─ wui-spawn
                         ├─ wui-skills
                         └─ wui-eval
@@ -137,21 +135,23 @@ adapters as private modules. Users import only `wui`.
 ```
 src/
 ├── lib.rs              re-exports + prelude
-├── agent.rs            Agent struct (run / stream / session)
-├── builder.rs          AgentBuilder (fluent API)
-├── session.rs          Session (multi-turn state; HITL via ControlHandle in stream)
+├── facade/
+│   ├── agent.rs        Agent struct (run / stream / session)
+│   ├── builder.rs      AgentBuilder (fluent API)
+│   ├── session.rs      Session (multi-turn state; HITL via ControlHandle in stream)
+│   └── sub_agent.rs    SubAgent synchronous delegation tool
 ├── runtime/
-│   ├── run.rs          the main loop
+│   ├── run/            main loop split into stream/parsing/history/tool-batch phases
 │   ├── executor.rs     concurrent tool executor (JoinSet-based)
-│   ├── permission.rs   PermissionMode + HITL pause/resume
+│   ├── permission/     PermissionMode + static/session decision pipeline
 │   ├── hooks.rs        HookRunner
 │   ├── registry.rs     ToolRegistry
 │   ├── session_store.rs SessionStore trait + InMemorySessionStore
 │   └── tool_search.rs  deferred tool discovery tool
-├── compress/
-│   └── mod.rs          CompressPipeline (L1/L2/L3)
+├── compress/           compression strategies + pipeline
 └── providers/
-    └── anthropic.rs    Anthropic SSE streaming
+    ├── anthropic/      Anthropic SSE streaming + serialization
+    └── openai/         OpenAI-compatible streaming + serialization
 ```
 
 ### The Loop
@@ -176,7 +176,7 @@ loop {
     7. run PostToolUse hooks — may inject system notices for blocked outputs
     8. append tool results to message history (in submission order)
     9. append context injections as <system-reminder> messages
-   10. run PreComplete hook
+   10. run PreStop hook
    11. evaluate stop condition (EndTurn / MaxTokens / ToolUse)
    12. continue or return RunSummary
 }
@@ -345,11 +345,10 @@ lingering calls are immediately visible.
 exposes typed assertions:
 
 ```rust
-let harness = AgentHarness::new(agent);
-let result = harness.run("prompt").await?;
-result.assert_text_contains("expected");
-result.assert_tool_called("my_tool");
-result.assert_no_errors();
+let harness = AgentHarness::run(&agent, "prompt").await;
+harness.assert_text_contains("expected");
+harness.assert_tool_called("my_tool");
+harness.assert_stop_reason(RunStopReason::Completed);
 ```
 
 **`ScenarioRunner`** runs a table of `Scenario` structs and reports failures
@@ -366,10 +365,9 @@ collectively — a lightweight property-test harness for agent behavior.
 | `wui-mcp` | **beta** | Useful and tested; transport API may evolve as MCP spec matures. |
 | `wui-memory` | **beta** | Trait shapes are stable; builder API and `InMemoryStore` helpers may change. |
 | `wui-spawn` | **beta** | Registry and delegation tools work; naming and cancellation API may refine. |
-| `wui-observe` | **beta** | `Timeline` shape and OTel span names may change. |
-| `wui-workflow` | **beta** | `TextStep` + primitives are stable; error handling API may evolve. |
+| `wui-observe` | **stabilizing** | Timeline + OTel span API is close to final; minor adjustments may still land. |
 | `wui-skills` | **beta** | Frontmatter schema and catalog API may refine. |
-| `wui-eval` | **beta** | `MockProvider` and `AgentHarness` are stable for testing; `ScenarioRunner` API may evolve. |
+| `wui-eval` | **mixed** | `MockProvider` and `AgentHarness` are stable for testing; `ScenarioRunner` API may evolve. |
 
 **Beta → Stable promotion criteria:** at least one smoke test, a usage snippet in the crate's doc comment, CI coverage, and no unresolved API questions in the open issues.
 
@@ -386,6 +384,6 @@ collectively — a lightweight property-test harness for agent behavior.
 | Checkpoint/resume runs | `CheckpointStore` in `wui` |
 | Add string-match memory | `RecallBackend` + `RememberBackend` in `wui-memory` |
 | Add semantic search memory | `VectorStore` + `SemanticMemoryTool` in `wui-memory` |
-| Change compression | `CompactionStrategy` in `wui::compress` |
+| Change compression | `CompressStrategy` in `wui::compress` |
 | Change permission behavior | `PermissionMode` in `wui` |
 | Test deterministically | `MockProvider` + `AgentHarness` in `wui-eval` |

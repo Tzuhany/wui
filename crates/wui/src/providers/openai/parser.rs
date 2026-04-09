@@ -135,6 +135,15 @@ impl SseParser {
 
         Ok(events)
     }
+
+    pub(crate) fn finish(&mut self) -> Option<StreamEvent> {
+        self.pending_stop
+            .take()
+            .map(|stop_reason| StreamEvent::MessageEnd {
+                usage: TokenUsage::default(),
+                stop_reason,
+            })
+    }
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────
@@ -208,5 +217,25 @@ mod tests {
         } else {
             panic!("expected MessageEnd");
         }
+    }
+
+    #[test]
+    fn finish_without_usage_emits_message_end() {
+        let mut p = SseParser {
+            pending_stop: Some(StopReason::EndTurn),
+            ..Default::default()
+        };
+
+        let event = p.finish().expect("expected MessageEnd fallback");
+        match event {
+            StreamEvent::MessageEnd { usage, stop_reason } => {
+                assert_eq!(usage.input_tokens, 0);
+                assert_eq!(usage.output_tokens, 0);
+                assert_eq!(stop_reason, StopReason::EndTurn);
+            }
+            other => panic!("expected MessageEnd, got {other:?}"),
+        }
+
+        assert!(p.finish().is_none(), "fallback should only emit once");
     }
 }

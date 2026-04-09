@@ -7,18 +7,22 @@
 
 use std::sync::{
     atomic::{AtomicU32, Ordering},
-    Arc,
+    Arc, Mutex,
 };
+use std::{collections::VecDeque, pin::Pin};
 
 use async_trait::async_trait;
+use futures::Stream;
 use serde_json::{json, Value};
 
 use futures::StreamExt as _;
 
 use wui::{
-    Agent, AgentEvent, ExecutorHints, InMemoryCheckpointStore, PermissionMode, RunStopReason, Tool,
-    ToolCtx, ToolMeta, ToolOutput,
+    Agent, AgentEvent, ExecutorHints, InMemoryCheckpointStore, PermissionMode, RunStopReason,
+    SessionHooks, Tool, ToolCtx, ToolMeta, ToolOutput,
 };
+use wui_core::event::{StopReason, StreamEvent, TokenUsage};
+use wui_core::provider::{ChatRequest, Provider, ProviderError};
 use wui_eval::{AgentHarness, MockProvider};
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -111,6 +115,46 @@ impl Tool for CountingTool {
     async fn call(&self, _input: Value, _ctx: &ToolCtx) -> ToolOutput {
         self.counter.fetch_add(1, Ordering::SeqCst);
         ToolOutput::success("counted")
+    }
+}
+
+struct ScopedPermissionTool {
+    counter: Arc<AtomicU32>,
+}
+
+#[async_trait]
+impl Tool for ScopedPermissionTool {
+    fn name(&self) -> &str {
+        "scoped_tool"
+    }
+    fn description(&self) -> &str {
+        "A tool whose permission scope comes from the 'cmd' field."
+    }
+    fn input_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "cmd": { "type": "string" }
+            },
+            "required": ["cmd"]
+        })
+    }
+    fn meta(&self, input: &Value) -> ToolMeta {
+        ToolMeta {
+            permission_key: input
+                .get("cmd")
+                .and_then(|value| value.as_str())
+                .map(str::to_owned),
+            ..ToolMeta::default()
+        }
+    }
+    async fn call(&self, input: Value, _ctx: &ToolCtx) -> ToolOutput {
+        self.counter.fetch_add(1, Ordering::SeqCst);
+        let cmd = input
+            .get("cmd")
+            .and_then(|value| value.as_str())
+            .unwrap_or("");
+        ToolOutput::success(cmd)
     }
 }
 
@@ -438,6 +482,200 @@ async fn session_preserves_history() {
     );
 }
 
+#[tokio::test]
+async fn session_emits_turn_done_with_incrementing_turn_numbers() {
+    let provider = MockProvider::new(vec![
+        MockProvider::text("turn one"),
+        MockProvider::text("turn two"),
+    ]);
+
+    let agent = Agent::builder(provider)
+        .permission(PermissionMode::Auto)
+        .build();
+
+    let session = agent.session("turn-done-test").await;
+
+    let mut first = session.send("first").await;
+    let mut first_turn_done = None;
+    let mut first_done_seen = false;
+    let mut first_terminal_order = Vec::new();
+    while let Some(event) = first.next().await {
+        match event {
+            AgentEvent::TurnDone { turn, .. } => {
+                first_turn_done = Some(turn);
+                first_terminal_order.push("turn_done");
+            }
+            AgentEvent::Done(_) => {
+                first_done_seen = true;
+                first_terminal_order.push("done");
+            }
+            _ => {}
+        }
+    }
+
+    let mut second = session.send("second").await;
+    let mut second_turn_done = None;
+    let mut second_terminal_order = Vec::new();
+    while let Some(event) = second.next().await {
+        match event {
+            AgentEvent::TurnDone { turn, .. } => {
+                second_turn_done = Some(turn);
+                second_terminal_order.push("turn_done");
+            }
+            AgentEvent::Done(_) => second_terminal_order.push("done"),
+            _ => {}
+        }
+    }
+
+    assert!(first_done_seen, "session stream should still emit Done");
+    assert_eq!(first_turn_done, Some(1));
+    assert_eq!(second_turn_done, Some(2));
+    assert_eq!(first_terminal_order, vec!["turn_done", "done"]);
+    assert_eq!(second_terminal_order, vec!["turn_done", "done"]);
+}
+
+#[tokio::test]
+async fn session_on_error_can_retry_before_visible_output() {
+    let retries = Arc::new(AtomicU32::new(0));
+
+    let provider = MockProvider::new(vec![
+        MockProvider::error("first attempt failed", false),
+        MockProvider::text("retry succeeded"),
+    ]);
+
+    let agent = Agent::builder(provider)
+        .permission(PermissionMode::Auto)
+        .session_hooks(SessionHooks {
+            on_error: Some(Arc::new({
+                let retries = Arc::clone(&retries);
+                move |_error, attempt| {
+                    retries.fetch_add(1, Ordering::SeqCst);
+                    attempt == 1
+                }
+            })),
+            ..Default::default()
+        })
+        .build();
+
+    let session = agent.session("session-retry-test").await;
+    let mut stream = session.send("retry me").await;
+    let mut text = String::new();
+    let mut saw_error = false;
+    let mut turn_done = None;
+
+    while let Some(event) = stream.next().await {
+        match event {
+            AgentEvent::TextDelta(t) => text.push_str(&t),
+            AgentEvent::Error(_) => saw_error = true,
+            AgentEvent::TurnDone { turn, .. } => turn_done = Some(turn),
+            _ => {}
+        }
+    }
+
+    assert_eq!(retries.load(Ordering::SeqCst), 1);
+    assert!(!saw_error, "error should have been retried transparently");
+    assert_eq!(text, "retry succeeded");
+    assert_eq!(turn_done, Some(1));
+}
+
+struct VisibleOutputThenErrorProvider {
+    responses: Arc<Mutex<VecDeque<ScriptedProviderResponse>>>,
+}
+
+type ScriptedProviderResponse = Vec<Result<StreamEvent, ProviderError>>;
+
+impl VisibleOutputThenErrorProvider {
+    fn new(responses: Vec<ScriptedProviderResponse>) -> Self {
+        Self {
+            responses: Arc::new(Mutex::new(VecDeque::from(responses))),
+        }
+    }
+}
+
+#[async_trait]
+impl Provider for VisibleOutputThenErrorProvider {
+    async fn stream(
+        &self,
+        _req: ChatRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent, ProviderError>> + Send>>, ProviderError>
+    {
+        let response = self
+            .responses
+            .lock()
+            .expect("VisibleOutputThenErrorProvider lock poisoned")
+            .pop_front()
+            .expect("provider response queue exhausted");
+        Ok(Box::pin(futures::stream::iter(response)))
+    }
+}
+
+#[tokio::test]
+async fn session_does_not_retry_after_visible_output() {
+    let retries = Arc::new(AtomicU32::new(0));
+
+    let provider = VisibleOutputThenErrorProvider::new(vec![
+        vec![
+            Ok(StreamEvent::TextDelta {
+                text: "partial output".into(),
+            }),
+            Ok(StreamEvent::Error {
+                message: "late failure".into(),
+                retryable: false,
+            }),
+        ],
+        vec![
+            Ok(StreamEvent::TextDelta {
+                text: "should not be replayed".into(),
+            }),
+            Ok(StreamEvent::MessageEnd {
+                usage: TokenUsage {
+                    input_tokens: 10,
+                    output_tokens: 21,
+                    ..Default::default()
+                },
+                stop_reason: StopReason::EndTurn,
+            }),
+        ],
+    ]);
+
+    let agent = Agent::builder(provider)
+        .permission(PermissionMode::Auto)
+        .session_hooks(SessionHooks {
+            on_error: Some(Arc::new({
+                let retries = Arc::clone(&retries);
+                move |_error, _attempt| {
+                    retries.fetch_add(1, Ordering::SeqCst);
+                    true
+                }
+            })),
+            ..Default::default()
+        })
+        .build();
+
+    let session = agent.session("session-no-replay-after-output").await;
+    let mut stream = session.send("show the boundary").await;
+    let mut text = String::new();
+    let mut saw_error = false;
+    let mut saw_done = false;
+
+    while let Some(event) = stream.next().await {
+        match event {
+            AgentEvent::TextDelta(t) => text.push_str(&t),
+            AgentEvent::Error(_) => saw_error = true,
+            AgentEvent::Done(_) => saw_done = true,
+            _ => {}
+        }
+    }
+
+    assert_eq!(retries.load(Ordering::SeqCst), 1);
+    assert_eq!(text, "partial output");
+    assert!(
+        saw_error,
+        "visible output should force the error to surface"
+    );
+    assert!(!saw_done, "a failed turn should not emit Done");
+}
+
 // ── Test 10: dynamic_tool_expose ──────────────────────────────────────────────
 
 /// A tool that exposes a second tool when called.
@@ -493,6 +731,103 @@ async fn dynamic_tool_expose() {
         1,
         "exposed_tool should have been called once after bootstrap exposed it"
     );
+}
+
+#[tokio::test]
+async fn deferred_tool_is_activated_after_tool_search() {
+    let counter = Arc::new(AtomicU32::new(0));
+
+    let provider = MockProvider::new(vec![
+        MockProvider::tool_call("tool_search", json!({"query": "deferred_tool"})),
+        MockProvider::tool_call("deferred_tool", json!({})),
+        MockProvider::text("finished"),
+    ]);
+
+    let agent = Agent::builder(provider)
+        .tool_deferred(CountingTool {
+            name: "deferred_tool",
+            counter: Arc::clone(&counter),
+        })
+        .permission(PermissionMode::Auto)
+        .build();
+
+    let h = AgentHarness::run(&agent, "Find and run deferred_tool.").await;
+    h.assert_tool_called("tool_search")
+        .assert_tool_called("deferred_tool")
+        .assert_stop_reason(RunStopReason::Completed);
+
+    assert_eq!(
+        counter.load(Ordering::SeqCst),
+        1,
+        "deferred tool should execute after tool_search exposes it"
+    );
+}
+
+#[tokio::test]
+async fn approve_always_stays_scoped_to_permission_key() {
+    let counter = Arc::new(AtomicU32::new(0));
+
+    let provider = MockProvider::new(vec![
+        MockProvider::tool_call("scoped_tool", json!({"cmd": "ls"})),
+        MockProvider::text("first done"),
+        MockProvider::tool_call("scoped_tool", json!({"cmd": "rm"})),
+        MockProvider::text("second done"),
+    ]);
+
+    let agent = Agent::builder(provider)
+        .tool(ScopedPermissionTool {
+            counter: Arc::clone(&counter),
+        })
+        .permission(PermissionMode::Ask)
+        .build();
+
+    let session = agent.session("scoped-permission-test").await;
+
+    let mut first_stream = session.send("Run ls.").await;
+    let mut first_controls = 0;
+    while let Some(event) = first_stream.next().await {
+        if let AgentEvent::Control(handle) = event {
+            first_controls += 1;
+            handle.approve_always();
+        }
+    }
+
+    let mut second_stream = session.send("Run rm.").await;
+    let mut second_controls = 0;
+    while let Some(event) = second_stream.next().await {
+        if let AgentEvent::Control(handle) = event {
+            second_controls += 1;
+            handle.deny("rm still needs approval");
+        }
+    }
+
+    assert_eq!(first_controls, 1, "first scoped call should prompt once");
+    assert_eq!(
+        second_controls, 1,
+        "changing permission_key should require a fresh approval"
+    );
+    assert_eq!(
+        counter.load(Ordering::SeqCst),
+        1,
+        "only the approved scoped invocation should execute"
+    );
+}
+
+#[test]
+#[should_panic(expected = "duplicate tool name 'tool_search'")]
+fn injected_tool_search_name_collision_is_rejected_at_build_time() {
+    let provider = MockProvider::new(vec![]);
+
+    let _agent = Agent::builder(provider)
+        .tool(ConstTool {
+            name: "tool_search",
+            output: "user implementation",
+        })
+        .tool_deferred(ConstTool {
+            name: "deferred_tool",
+            output: "deferred",
+        })
+        .build();
 }
 
 // ── Test 11: pre_tool_hook_can_block ────────────────────────────────────────
@@ -644,6 +979,162 @@ async fn pre_tool_hook_can_mutate_input() {
     );
 }
 
+struct PrefixInputHook(&'static str);
+
+#[async_trait]
+impl wui::Hook for PrefixInputHook {
+    fn handles(&self, event: &wui::HookEvent<'_>) -> bool {
+        matches!(
+            event,
+            wui::HookEvent::PreToolUse {
+                name: "echo_input",
+                ..
+            }
+        )
+    }
+
+    async fn evaluate(&self, event: &wui::HookEvent<'_>) -> wui::HookDecision {
+        if let wui::HookEvent::PreToolUse { input, .. } = event {
+            let current = input
+                .get("data")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            return wui::HookDecision::mutate(json!({
+                "data": format!("{}{}", self.0, current)
+            }));
+        }
+        wui::HookDecision::Allow
+    }
+}
+
+#[tokio::test]
+async fn pre_tool_hooks_compose_mutations_in_order() {
+    let provider = MockProvider::new(vec![
+        MockProvider::tool_call("echo_input", json!({"data": "core"})),
+        MockProvider::text("done"),
+    ]);
+
+    let agent = Agent::builder(provider)
+        .tool(EchoInputTool)
+        .hook(PrefixInputHook("A-"))
+        .hook(PrefixInputHook("B-"))
+        .permission(PermissionMode::Auto)
+        .build();
+
+    let mut stream = agent.stream("Call echo_input.");
+    let mut tool_output = String::new();
+
+    while let Some(event) = stream.next().await {
+        if let AgentEvent::ToolDone { output, .. } = &event {
+            tool_output = output.clone();
+        }
+    }
+
+    assert_eq!(tool_output, "B-A-core");
+}
+
+struct AlwaysFailInputTool;
+
+#[async_trait]
+impl Tool for AlwaysFailInputTool {
+    fn name(&self) -> &str {
+        "always_fail_input"
+    }
+    fn description(&self) -> &str {
+        "Fails after receiving input."
+    }
+    fn input_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "data": { "type": "string" }
+            }
+        })
+    }
+    async fn call(&self, input: Value, _ctx: &ToolCtx) -> ToolOutput {
+        let data = input
+            .get("data")
+            .and_then(|value| value.as_str())
+            .unwrap_or("missing");
+        ToolOutput::error(format!("failed with {data}"))
+    }
+}
+
+struct CaptureFailureInputHook {
+    seen: Arc<Mutex<Option<String>>>,
+}
+
+struct MutateFailureInputHook;
+
+#[async_trait]
+impl wui::Hook for MutateFailureInputHook {
+    fn handles(&self, event: &wui::HookEvent<'_>) -> bool {
+        matches!(
+            event,
+            wui::HookEvent::PreToolUse {
+                name: "always_fail_input",
+                ..
+            }
+        )
+    }
+
+    async fn evaluate(&self, event: &wui::HookEvent<'_>) -> wui::HookDecision {
+        if let wui::HookEvent::PreToolUse { input, .. } = event {
+            let mut mutated = (*input).clone();
+            mutated["data"] = json!("mutated_by_hook");
+            return wui::HookDecision::mutate(mutated);
+        }
+        wui::HookDecision::Allow
+    }
+}
+
+#[async_trait]
+impl wui::Hook for CaptureFailureInputHook {
+    fn handles(&self, event: &wui::HookEvent<'_>) -> bool {
+        matches!(event, wui::HookEvent::PostToolFailure { .. })
+    }
+
+    async fn evaluate(&self, event: &wui::HookEvent<'_>) -> wui::HookDecision {
+        if let wui::HookEvent::PostToolFailure { name, input, .. } = event {
+            if *name == "always_fail_input" {
+                let value = input
+                    .get("data")
+                    .and_then(|value| value.as_str())
+                    .map(str::to_owned);
+                *self.seen.lock().expect("failure input hook lock poisoned") = value;
+            }
+        }
+        wui::HookDecision::Allow
+    }
+}
+
+#[tokio::test]
+async fn post_tool_failure_sees_mutated_input() {
+    let seen = Arc::new(Mutex::new(None));
+
+    let provider = MockProvider::new(vec![
+        MockProvider::tool_call("always_fail_input", json!({"data": "original"})),
+        MockProvider::text("done"),
+    ]);
+
+    let agent = Agent::builder(provider)
+        .tool(AlwaysFailInputTool)
+        .hook(MutateFailureInputHook)
+        .hook(CaptureFailureInputHook {
+            seen: Arc::clone(&seen),
+        })
+        .permission(PermissionMode::Auto)
+        .build();
+
+    let mut stream = agent.stream("Call always_fail_input.");
+    while stream.next().await.is_some() {}
+
+    assert_eq!(
+        *seen.lock().expect("failure input hook lock poisoned"),
+        Some("mutated_by_hook".to_string())
+    );
+}
+
 // ── Test 13: sub_agent_delegates_and_returns ────────────────────────────────
 
 #[tokio::test]
@@ -705,6 +1196,120 @@ async fn sub_agent_delegates_and_returns() {
         Some("sub-agent result"),
         "sub-agent tool output should contain the sub-agent's text response"
     );
+}
+
+struct SubagentAuditHook {
+    events: Arc<Mutex<Vec<String>>>,
+}
+
+#[async_trait]
+impl wui::Hook for SubagentAuditHook {
+    fn handles(&self, event: &wui::HookEvent<'_>) -> bool {
+        matches!(
+            event,
+            wui::HookEvent::SubagentStart { .. } | wui::HookEvent::SubagentEnd { .. }
+        )
+    }
+
+    async fn evaluate(&self, event: &wui::HookEvent<'_>) -> wui::HookDecision {
+        let mut events = self.events.lock().expect("audit mutex poisoned");
+        match event {
+            wui::HookEvent::SubagentStart { name, prompt } => {
+                events.push(format!("start:{name}:{prompt}"));
+            }
+            wui::HookEvent::SubagentEnd { name, result } => match result {
+                Ok(text) => events.push(format!("end:{name}:ok:{text}")),
+                Err(err) => events.push(format!("end:{name}:err:{err}")),
+            },
+            _ => {}
+        }
+        wui::HookDecision::Allow
+    }
+}
+
+#[tokio::test]
+async fn subagent_hooks_receive_start_and_end_events() {
+    use wui::SubAgent;
+
+    let audit = Arc::new(Mutex::new(Vec::<String>::new()));
+
+    let sub_provider = MockProvider::new(vec![MockProvider::text("sub-agent result")]);
+    let sub_agent = Agent::builder(sub_provider)
+        .hook(SubagentAuditHook {
+            events: Arc::clone(&audit),
+        })
+        .permission(PermissionMode::Auto)
+        .build();
+
+    let supervisor_provider = MockProvider::new(vec![
+        MockProvider::tool_call("researcher", json!({"prompt": "find something"})),
+        MockProvider::text("done"),
+    ]);
+
+    let supervisor = Agent::builder(supervisor_provider)
+        .tool(SubAgent::new(
+            "researcher",
+            "A research sub-agent",
+            sub_agent,
+        ))
+        .permission(PermissionMode::Auto)
+        .build();
+
+    let _ = AgentHarness::run(&supervisor, "Delegate to researcher.").await;
+
+    let events = audit.lock().expect("audit mutex poisoned").clone();
+    assert_eq!(events.len(), 2, "expected start and end hook notifications");
+    assert_eq!(events[0], "start:researcher:find something");
+    assert_eq!(events[1], "end:researcher:ok:sub-agent result");
+}
+
+#[derive(Clone, Default)]
+struct PendingProvider;
+
+#[async_trait]
+impl Provider for PendingProvider {
+    async fn stream(
+        &self,
+        _req: ChatRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent, ProviderError>> + Send>>, ProviderError>
+    {
+        Ok(Box::pin(futures::stream::pending()))
+    }
+}
+
+#[tokio::test]
+async fn subagent_hooks_receive_end_event_when_cancelled() {
+    use wui::SubAgent;
+
+    let audit = Arc::new(Mutex::new(Vec::<String>::new()));
+
+    let sub_agent = Agent::builder(PendingProvider)
+        .hook(SubagentAuditHook {
+            events: Arc::clone(&audit),
+        })
+        .permission(PermissionMode::Auto)
+        .build();
+
+    let tool = SubAgent::new("researcher", "A research sub-agent", sub_agent);
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let ctx = ToolCtx {
+        cancel: cancel.clone(),
+        messages: Arc::from(Vec::<wui::Message>::new()),
+        on_progress: Box::new(|_| {}),
+    };
+
+    let handle =
+        tokio::spawn(async move { tool.call(json!({"prompt": "find something"}), &ctx).await });
+    tokio::task::yield_now().await;
+    cancel.cancel();
+    let output = handle.await.expect("sub-agent task should join");
+
+    assert_eq!(output.content, "sub-agent cancelled");
+
+    let events = audit.lock().expect("audit mutex poisoned").clone();
+    assert_eq!(events.len(), 2, "expected start and end hook notifications");
+    assert_eq!(events[0], "start:researcher:find something");
+    assert_eq!(events[1], "end:researcher:err:sub-agent cancelled");
 }
 
 // ── Test 14: run_structured_extracts_tag ────────────────────────────────────

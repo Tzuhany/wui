@@ -6,7 +6,7 @@ use tokio::sync::mpsc;
 
 use wui_core::event::AgentEvent;
 use wui_core::hook::HookDecision;
-use wui_core::message::{ContentBlock, Message};
+use wui_core::message::Message;
 
 use super::auth::{self, AuthOutcome, AuthRequest};
 use super::history::system_reminder_msg;
@@ -25,35 +25,20 @@ pub(super) async fn authorize_and_dispatch(
     tx: &mpsc::Sender<AgentEvent>,
 ) {
     let mut auth_tasks: tokio::task::JoinSet<AuthOutcome> = tokio::task::JoinSet::new();
+    let history_snapshot: Arc<[Message]> = Arc::from(messages.to_vec());
 
     for (id, name, input) in std::mem::take(&mut ctx.pending_auths) {
         let config_c = Arc::clone(config);
         let registry_c = Arc::clone(active_registry);
         let tx_c = tx.clone();
         auth_tasks.spawn(async move {
-            let (result, injections) = auth::authorize_tool(
+            auth::authorize_tool(
                 &config_c,
                 &registry_c,
-                AuthRequest {
-                    id: id.clone(),
-                    name: name.clone(),
-                    input,
-                },
+                AuthRequest { id, name, input },
                 &tx_c,
             )
-            .await;
-            match result {
-                Ok(effective_input) => AuthOutcome::Allowed {
-                    id,
-                    name,
-                    input: effective_input,
-                    injections,
-                },
-                Err(denied) => AuthOutcome::Denied {
-                    tool: denied,
-                    injections,
-                },
-            }
+            .await
         });
     }
 
@@ -65,37 +50,7 @@ pub(super) async fn authorize_and_dispatch(
                 continue;
             }
         };
-        match outcome {
-            AuthOutcome::Allowed {
-                id,
-                name,
-                input,
-                injections,
-            } => {
-                ctx.auth_injections.extend(injections);
-                let history_snap = Arc::from(messages);
-                tracing::debug!(tool = %name, "tool dispatched");
-                tx.send(AgentEvent::ToolStart {
-                    id: id.clone(),
-                    name: name.clone(),
-                    input: input.clone(),
-                })
-                .await
-                .ok();
-                executor.submit(PendingTool {
-                    id,
-                    name,
-                    input,
-                    messages: history_snap,
-                });
-            }
-            AuthOutcome::Denied { tool, injections } => {
-                ctx.auth_injections.extend(injections);
-                ctx.emission_guard.first_time(&tool.id);
-                emit_tool_event(&tool, tx).await;
-                ctx.completed_map.insert(tool.id.clone(), tool);
-            }
-        }
+        handle_auth_outcome(ctx, executor, &history_snapshot, outcome, tx).await;
     }
 }
 
@@ -120,14 +75,8 @@ pub(super) async fn run_post_hooks(
         let is_error = done.output.is_error();
 
         let decision = if is_error {
-            let input = ctx.assistant_blocks.iter().find_map(|b| {
-                if let ContentBlock::ToolUse { id: bid, input, .. } = b {
-                    (bid == id).then_some(input)
-                } else {
-                    None
-                }
-            });
-            let input = input.unwrap_or(&serde_json::Value::Null);
+            let null_input = serde_json::Value::Null;
+            let input = ctx.tool_input(id).unwrap_or(&null_input);
             config
                 .hooks
                 .post_tool_failure(&tool_name, input, &done.output)
@@ -191,6 +140,46 @@ pub(super) async fn emit_tool_event(done: &CompletedTool, tx: &mpsc::Sender<Agen
         }
     };
     tx.send(event).await.ok();
+}
+
+async fn handle_auth_outcome(
+    ctx: &mut IterationCtx,
+    executor: &mut ToolExecutor,
+    history_snapshot: &Arc<[Message]>,
+    outcome: AuthOutcome,
+    tx: &mpsc::Sender<AgentEvent>,
+) {
+    match outcome {
+        AuthOutcome::Allowed {
+            id,
+            name,
+            input,
+            injections,
+        } => {
+            ctx.auth_injections.extend(injections);
+            ctx.remember_tool_input(&id, input.clone());
+            tracing::debug!(tool = %name, "tool dispatched");
+            tx.send(AgentEvent::ToolStart {
+                id: id.clone(),
+                name: name.clone(),
+                input: input.clone(),
+            })
+            .await
+            .ok();
+            executor.submit(PendingTool {
+                id,
+                name,
+                input,
+                messages: Arc::clone(history_snapshot),
+            });
+        }
+        AuthOutcome::Denied { tool, injections } => {
+            ctx.auth_injections.extend(injections);
+            ctx.emission_guard.first_time(&tool.id);
+            emit_tool_event(&tool, tx).await;
+            ctx.completed_map.insert(tool.id.clone(), tool);
+        }
+    }
 }
 
 /// Guards against double-emission of tool events.

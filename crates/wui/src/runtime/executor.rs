@@ -127,7 +127,7 @@ pub struct ToolExecutor {
     default_timeout: Option<Duration>,
     /// Optional store for persisting large tool results before truncation.
     result_store: Option<Arc<dyn ResultStore>>,
-    pending: JoinSet<(ToolCallId, String, ToolOutput, u64, u32)>,
+    pending: JoinSet<CompletedTool>,
     sequential: VecDeque<QueuedTool>,
 }
 
@@ -169,18 +169,23 @@ impl ToolExecutor {
         } = pending;
 
         let Some(impl_) = self.registry.get(&name) else {
-            let out = ToolOutput::not_found(format!("unknown tool: {name}"));
-            self.pending
-                .spawn(async move { (id, name, out, 0u64, 1u32) });
+            let message = format!("unknown tool: {name}");
+            self.spawn_completed(CompletedTool::immediate(
+                id,
+                name,
+                ToolOutput::not_found(message),
+            ));
             return;
         };
 
         if let Err(errors) = validate_input(&input, &impl_.input_schema()) {
             let msg = format!("invalid input for '{name}': {}", errors.join("; "));
             tracing::warn!(tool = %name, %msg, "input validation failed");
-            let out = ToolOutput::invalid_input(msg);
-            self.pending
-                .spawn(async move { (id, name, out, 0u64, 1u32) });
+            self.spawn_completed(CompletedTool::immediate(
+                id,
+                name,
+                ToolOutput::invalid_input(msg),
+            ));
             return;
         }
 
@@ -214,18 +219,12 @@ impl ToolExecutor {
         let mut results = Vec::new();
         while let Some(res) = self.pending.join_next().await {
             match res {
-                Ok((id, name, output, ms, attempts)) => {
-                    if output.is_retryable() {
-                        tracing::debug!(tool = %name, "concurrent tool failed — cancelling siblings");
+                Ok(tool) => {
+                    if tool.output.is_retryable() {
+                        tracing::debug!(tool = %tool.name, "concurrent tool failed — cancelling siblings");
                         self.sibling_cancel.cancel();
                     }
-                    results.push(CompletedTool {
-                        id,
-                        name,
-                        output,
-                        ms,
-                        attempts,
-                    });
+                    results.push(tool);
                 }
                 Err(e) => tracing::error!(error = %e, "tool task panicked"),
             }
@@ -243,32 +242,10 @@ impl ToolExecutor {
                 tool.concurrent = false,
                 "wui.tool.exec.start"
             );
-            let start = Instant::now();
-            let hints = tool.impl_.executor_hints(&tool.input);
-            let timeout = hints.timeout.or(self.default_timeout);
-            let ctx = make_ctx(
-                self.cancel.clone(),
-                tool.messages,
-                self.tx.clone(),
-                tool.id.clone(),
-                tool.name.clone(),
+            results.push(
+                self.execute_tool(tool, self.cancel.clone(), self.tx.clone())
+                    .await,
             );
-            let out_cfg = OutputConfig {
-                tool_id: &tool.id,
-                max_chars: hints.max_output_chars,
-                max_retries: hints.max_retries,
-                result_store: self.result_store.as_deref(),
-            };
-            let (out, attempts) =
-                run_with_retries(tool.impl_, tool.input, &ctx, timeout, &out_cfg).await;
-            let ms = start.elapsed().as_millis() as u64;
-            results.push(CompletedTool {
-                id: tool.id,
-                name: tool.name,
-                output: out,
-                ms,
-                attempts,
-            });
         }
         results
     }
@@ -283,8 +260,6 @@ impl ToolExecutor {
     ) {
         let cancel = self.sibling_cancel.clone();
         let tx = self.tx.clone();
-        let hints = impl_.executor_hints(&input);
-        let timeout = hints.timeout.or(self.default_timeout);
         let result_store = self.result_store.clone();
         let span = tracing::info_span!(
             "wui.tool.exec",
@@ -292,26 +267,55 @@ impl ToolExecutor {
             tool.name = %name,
             tool.concurrent = true,
         );
-        self.pending.spawn(
-            async move {
-                let start = Instant::now();
-                let ctx = make_ctx(cancel, messages, tx, id.clone(), name.clone());
-                let out_cfg = OutputConfig {
-                    tool_id: &id,
-                    max_chars: hints.max_output_chars,
-                    max_retries: hints.max_retries,
-                    result_store: result_store.as_deref(),
-                };
-                let (out, attempts) = run_with_retries(impl_, input, &ctx, timeout, &out_cfg).await;
-                let ms = start.elapsed().as_millis() as u64;
-                (id, name, out, ms, attempts)
-            }
-            .instrument(span),
-        );
+        let executor_cfg = ExecutionConfig {
+            cancel,
+            tx,
+            default_timeout: self.default_timeout,
+            result_store,
+        };
+        let queued = QueuedTool {
+            id,
+            name,
+            input,
+            messages,
+            impl_,
+        };
+        self.pending
+            .spawn(async move { execute_tool_call(queued, executor_cfg).await }.instrument(span));
+    }
+
+    fn spawn_completed(&mut self, tool: CompletedTool) {
+        self.pending.spawn(async move { tool });
+    }
+
+    async fn execute_tool(
+        &self,
+        tool: QueuedTool,
+        cancel: CancellationToken,
+        tx: mpsc::Sender<AgentEvent>,
+    ) -> CompletedTool {
+        execute_tool_call(
+            tool,
+            ExecutionConfig {
+                cancel,
+                tx,
+                default_timeout: self.default_timeout,
+                result_store: self.result_store.clone(),
+            },
+        )
+        .await
     }
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
+
+#[derive(Clone)]
+struct ExecutionConfig {
+    cancel: CancellationToken,
+    tx: mpsc::Sender<AgentEvent>,
+    default_timeout: Option<Duration>,
+    result_store: Option<Arc<dyn ResultStore>>,
+}
 
 /// Per-invocation output-handling context for retries and truncation.
 struct OutputConfig<'a> {
@@ -319,6 +323,35 @@ struct OutputConfig<'a> {
     max_chars: Option<usize>,
     max_retries: u32,
     result_store: Option<&'a dyn ResultStore>,
+}
+
+async fn execute_tool_call(tool: QueuedTool, config: ExecutionConfig) -> CompletedTool {
+    let QueuedTool {
+        id,
+        name,
+        input,
+        messages,
+        impl_,
+    } = tool;
+    let start = Instant::now();
+    let hints = impl_.executor_hints(&input);
+    let timeout = hints.timeout.or(config.default_timeout);
+    let ctx = make_ctx(config.cancel, messages, config.tx, id.clone(), name.clone());
+    let out_cfg = OutputConfig {
+        tool_id: &id,
+        max_chars: hints.max_output_chars,
+        max_retries: hints.max_retries,
+        result_store: config.result_store.as_deref(),
+    };
+    let (output, attempts) = run_with_retries(impl_, input, &ctx, timeout, &out_cfg).await;
+
+    CompletedTool {
+        id,
+        name,
+        output,
+        ms: start.elapsed().as_millis() as u64,
+        attempts,
+    }
 }
 
 /// Run a tool with automatic retries.

@@ -124,7 +124,10 @@ impl PermissionRules {
         }
 
         // 3. Session always-denied.
-        if session.is_always_denied(name).await {
+        if session
+            .denies(name, check.permission_key, check.matcher)
+            .await
+        {
             return PermissionVerdict::denied(
                 format!("tool '{name}' was previously denied for this session"),
                 PermissionSource::SessionDeny,
@@ -138,7 +141,10 @@ impl PermissionRules {
         }
 
         // 5. Session always-allowed.
-        if session.is_always_allowed(name).await {
+        if session
+            .allows(name, check.permission_key, check.matcher)
+            .await
+        {
             return PermissionVerdict::allowed(PermissionSource::SessionAllow, name);
         }
 

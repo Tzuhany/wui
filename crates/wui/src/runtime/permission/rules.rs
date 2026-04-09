@@ -93,13 +93,21 @@ impl PermissionRules {
     }
 }
 
+/// Encode one invocation into the same pattern grammar used by static rules.
+pub(crate) fn invocation_pattern(tool_name: &str, permission_key: Option<&str>) -> String {
+    match permission_key {
+        Some(key) => format!("{tool_name}({key})"),
+        None => tool_name.to_owned(),
+    }
+}
+
 /// Match a rule with an optional tool-provided matcher.
 ///
 /// When `matcher` is provided, sub-tool patterns are tested against the
 /// matcher closure first. If the matcher rejects, falls through to the
 /// default prefix matching. This lets tools implement glob, wildcard,
 /// or parsed-command matching for their permission rules.
-fn matches_rule_with_matcher(
+pub(super) fn matches_rule_with_matcher(
     rule: &str,
     tool_name: &str,
     permission_key: Option<&str>,

@@ -7,7 +7,6 @@
 //
 // Optional extensions (separate crates, opt-in):
 //   wui-observe  — timeline collection and OTel span emission
-//   wui-workflow — deterministic pipeline / branch / parallel primitives
 //   wui-memory   — built-in remember/recall/forget tools
 //   wui-mcp      — MCP protocol adapter
 //
@@ -31,7 +30,7 @@ pub mod providers;
 
 pub use facade::agent::Agent;
 pub use facade::builder::{AgentBuilder, Effort};
-pub use facade::session::Session;
+pub use facade::session::{Session, SessionHooks};
 pub use facade::sub_agent::{SubAgent, SubAgentSummary, SubAgentToolCall};
 
 // ── Core types ────────────────────────────────────────────────────────────────
@@ -48,7 +47,7 @@ pub use wui_core::provider::Provider;
 pub use wui_core::tool::ToolCallId;
 pub use wui_core::tool::{
     Artifact, ArtifactContent, ArtifactKind, ContextInjection, FailureKind, InterruptBehavior,
-    Tool, ToolCtx, ToolInput, ToolMeta, ToolOutput,
+    Tool, ToolCtx, ToolInput, ToolInputError, ToolMeta, ToolOutput, TypedTool,
 };
 
 pub use facade::agent::StructuredRun;
@@ -82,8 +81,9 @@ pub mod prelude {
         Agent, AgentBuilder, AgentError, AgentEvent, Artifact, ArtifactContent, CompressPipeline,
         ContextInjection, ControlResponse, DenyList, Effort, Hook, HookDecision, HookEvent,
         InMemorySessionStore, Message, PermissionMode, PermissionRules, Provider, RetryPolicy,
-        RunStopReason, RunStream, Session, SessionStore, SubAgent, SubAgentSummary,
-        SubAgentToolCall, Tool, ToolCtx, ToolInput, ToolMeta, ToolOutput,
+        RunStopReason, RunStream, Session, SessionHooks, SessionStore, SubAgent, SubAgentSummary,
+        SubAgentToolCall, Tool, ToolCtx, ToolInput, ToolInputError, ToolMeta, ToolOutput,
+        TypedTool,
     };
     pub use futures::StreamExt;
 }

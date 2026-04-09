@@ -65,21 +65,14 @@ pub(super) async fn authorize_tool(
     registry: &ToolRegistry,
     req: AuthRequest,
     tx: &mpsc::Sender<AgentEvent>,
-) -> (Result<serde_json::Value, CompletedTool>, Vec<Message>) {
+) -> AuthOutcome {
     let AuthRequest { id, name, input } = req;
     tracing::info!(tool.id = %id, tool.name = %name, "wui.tool.auth.start");
 
     // 1. Pre-tool hook — may allow, mutate, or block.
     let input = match config.hooks.pre_tool_use(&name, &input).await {
         HookDecision::Block { reason } => {
-            return (
-                Err(CompletedTool::immediate(
-                    id,
-                    name,
-                    output_hook_blocked(reason),
-                )),
-                vec![],
-            )
+            return denied_outcome(id, name, output_hook_blocked(reason), vec![]);
         }
         HookDecision::Mutate { input: new } => new,
         HookDecision::Allow | HookDecision::MutateOutput { .. } => input,
@@ -88,22 +81,16 @@ pub(super) async fn authorize_tool(
     // 2. Gather metadata and evaluate verdict.
     let (verdict, is_destructive, tool_is_readonly, perm_key) =
         evaluate_permission(config, registry, &name, &input).await;
+    let session_pattern = permission::invocation_pattern(&name, perm_key.as_deref());
 
     match verdict {
         PermissionVerdict::Allowed { source } => {
             tracing::debug!(tool = %name, ?source, "permission granted");
-            return (Ok(input), vec![]);
+            return allowed_outcome(id, name, input, vec![]);
         }
         PermissionVerdict::Denied { reason, source } => {
             tracing::debug!(tool = %name, ?source, %reason, "permission denied");
-            return (
-                Err(CompletedTool::immediate(
-                    id,
-                    name,
-                    output_permission_denied(reason),
-                )),
-                vec![],
-            );
+            return denied_outcome(id, name, output_permission_denied(reason), vec![]);
         }
         PermissionVerdict::NeedsApproval => {}
     }
@@ -112,17 +99,12 @@ pub(super) async fn authorize_tool(
     let ctrl_req = build_control_request(&name, perm_key.as_deref(), is_destructive);
 
     match permission::check(&config.permission, &ctrl_req, tool_is_readonly, &input) {
-        PermissionOutcome::Allowed => (Ok(input), vec![]),
-        PermissionOutcome::Denied { reason } => (
-            Err(CompletedTool::immediate(
-                id,
-                name,
-                output_permission_denied(reason),
-            )),
-            vec![],
-        ),
+        PermissionOutcome::Allowed => allowed_outcome(id, name, input, vec![]),
+        PermissionOutcome::Denied { reason } => {
+            denied_outcome(id, name, output_permission_denied(reason), vec![])
+        }
         PermissionOutcome::NeedsApproval => {
-            await_approval(config, id, name, input, ctrl_req, tx).await
+            await_approval(config, id, name, session_pattern, input, ctrl_req, tx).await
         }
     }
 }
@@ -197,10 +179,11 @@ async fn await_approval(
     config: &RunConfig,
     id: ToolCallId,
     name: String,
+    session_pattern: String,
     input: serde_json::Value,
     ctrl_req: ControlRequest,
     tx: &mpsc::Sender<AgentEvent>,
-) -> (Result<serde_json::Value, CompletedTool>, Vec<Message>) {
+) -> AuthOutcome {
     let request_id = ctrl_req.id.clone();
     let (handle, rx) = ControlHandle::new(ctrl_req);
     tx.send(AgentEvent::Control(handle)).await.ok();
@@ -213,27 +196,49 @@ async fn await_approval(
     });
 
     let injection = Message::system(permission::response_to_system_message(&response));
+    let injections = vec![injection];
 
-    let result = match response.decision {
-        ControlDecision::Deny { reason } => Err(CompletedTool::immediate(
-            id,
-            name,
-            output_permission_denied(reason),
-        )),
+    match response.decision {
+        ControlDecision::Deny { reason } => {
+            denied_outcome(id, name, output_permission_denied(reason), injections)
+        }
         ControlDecision::DenyAlways { reason } => {
-            config.session_perms.set_always_deny(name.clone()).await;
-            Err(CompletedTool::immediate(
-                id,
-                name,
-                output_permission_denied(reason),
-            ))
+            config
+                .session_perms
+                .set_always_deny(session_pattern.clone())
+                .await;
+            denied_outcome(id, name, output_permission_denied(reason), injections)
         }
         ControlDecision::ApproveAlways => {
-            config.session_perms.set_always_allow(name).await;
-            Ok(input)
+            config.session_perms.set_always_allow(session_pattern).await;
+            allowed_outcome(id, name, input, injections)
         }
-        ControlDecision::Approve { .. } => Ok(input),
-    };
+        ControlDecision::Approve { .. } => allowed_outcome(id, name, input, injections),
+    }
+}
 
-    (result, vec![injection])
+fn allowed_outcome(
+    id: ToolCallId,
+    name: String,
+    input: serde_json::Value,
+    injections: Vec<Message>,
+) -> AuthOutcome {
+    AuthOutcome::Allowed {
+        id,
+        name,
+        input,
+        injections,
+    }
+}
+
+fn denied_outcome(
+    id: ToolCallId,
+    name: String,
+    output: wui_core::tool::ToolOutput,
+    injections: Vec<Message>,
+) -> AuthOutcome {
+    AuthOutcome::Denied {
+        tool: CompletedTool::immediate(id, name, output),
+        injections,
+    }
 }

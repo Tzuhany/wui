@@ -25,7 +25,7 @@ pub(crate) const EVENT_CHANNEL_CAPACITY: usize = 256;
 /// underlying run immediately — no orphaned tasks, no wasted tokens.
 ///
 /// ```rust,ignore
-/// let mut stream = agent.stream("Hello").await;
+/// let mut stream = agent.stream("Hello");
 ///
 /// // Cancel explicitly:
 /// stream.cancel();

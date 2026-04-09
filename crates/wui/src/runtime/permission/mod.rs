@@ -44,5 +44,6 @@ pub use decision::{
     PermissionVerdict,
 };
 pub use mode::PermissionMode;
+pub(crate) use rules::invocation_pattern;
 pub use rules::PermissionRules;
 pub use session::SessionPermissions;

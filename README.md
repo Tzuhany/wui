@@ -281,7 +281,7 @@ If you want to understand the framework itself, this is the shortest useful path
 3. [`docs/runtime-invariants.md`](./docs/runtime-invariants.md)
 4. [`crates/wui-core/src/tool.rs`](./crates/wui-core/src/tool.rs)
 5. [`crates/wui-core/src/provider.rs`](./crates/wui-core/src/provider.rs)
-6. [`crates/wui/src/runtime/run.rs`](./crates/wui/src/runtime/run.rs)
+6. [`crates/wui/src/runtime/run/mod.rs`](./crates/wui/src/runtime/run/mod.rs)
 7. [`crates/wui/src/runtime/executor.rs`](./crates/wui/src/runtime/executor.rs)
 
 ## License

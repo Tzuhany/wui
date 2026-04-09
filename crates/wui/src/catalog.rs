@@ -16,8 +16,9 @@ use wui_core::tool::Tool;
 /// A lazily-loaded, searchable collection of tools.
 ///
 /// Catalogs are not listed in the agent's initial prompt. The LLM discovers
-/// them by calling `ToolSearch`, which queries all registered catalogs and
-/// dynamically injects matching tools into the active tool set.
+/// them by calling the built-in `tool_search` tool, which queries all
+/// registered catalogs and dynamically injects matching tools into the active
+/// tool set.
 ///
 /// # Example
 ///
@@ -51,7 +52,7 @@ pub struct CatalogHit {
 /// A [`ToolCatalog`] backed by a fixed, in-memory list of tools.
 ///
 /// Useful for testing and for registering a known set of tools that should
-/// be discoverable via `ToolSearch` without paying the upfront schema cost.
+/// be discoverable via `tool_search` without paying the upfront schema cost.
 ///
 /// ```rust,ignore
 /// Agent::builder(provider)

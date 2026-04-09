@@ -1,14 +1,14 @@
 // ============================================================================
-// ToolSearch — the deferred tool discovery tool.
+// ToolSearch — implementation of the built-in `tool_search` discovery tool.
 //
 // When an agent has deferred tools, their full schemas are not in the initial
 // system prompt. The LLM knows they exist (from the system prompt listing)
-// but needs to call ToolSearch to get their schema before it can use them.
+// but needs to call `tool_search` to get their schema before it can use them.
 //
 // This is the "目录常驻，正文按需" principle: the table of contents is
 // always visible; the full content is fetched on demand.
 //
-// ToolSearch is automatically injected by AgentBuilder when deferred tools
+// `ToolSearch` is automatically injected by AgentBuilder when deferred tools
 // or catalogs are present. You never need to add it manually.
 // ============================================================================
 
@@ -115,6 +115,10 @@ impl Tool for ToolSearch {
         }
 
         let mut sections: Vec<String> = Vec::new();
+        let mut exposed_tools: Vec<Arc<dyn Tool>> = deferred_matches
+            .iter()
+            .map(|tool| Arc::clone(tool))
+            .collect();
 
         // Format deferred tool results.
         for t in &deferred_matches {
@@ -127,7 +131,6 @@ impl Tool for ToolSearch {
         }
 
         // Format catalog results and collect tools to expose.
-        let mut catalog_tools: Vec<Arc<dyn Tool>> = Vec::new();
         for hit in &catalog_hits {
             let t = &hit.tool;
             let schema = serde_json::to_string_pretty(&t.input_schema()).unwrap_or_default();
@@ -137,12 +140,12 @@ impl Tool for ToolSearch {
                 desc  = t.description(),
                 score = hit.score,
             ));
-            catalog_tools.push(Arc::clone(&hit.tool));
+            exposed_tools.push(Arc::clone(&hit.tool));
         }
 
         let result = sections.join("\n\n---\n\n");
 
-        ToolOutput::success(result).expose(catalog_tools)
+        ToolOutput::success(result).expose(exposed_tools)
     }
 }
 

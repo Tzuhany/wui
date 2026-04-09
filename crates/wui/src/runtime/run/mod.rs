@@ -20,7 +20,7 @@
 //   6. Run PostToolUse hooks — may inject system notices for blocked outputs.
 //   7. Append tool results as a single user message (closes the loop).
 //   8. Append context injections as system reminders.
-//   9. Run PreComplete hook.
+//   9. Run PreStop hook.
 //   10. Evaluate stop condition.
 //   11. Continue or return RunSummary.
 //
@@ -79,7 +79,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use wui_core::event::{AgentError, AgentEvent, RunStopReason, RunSummary, StopReason};
+use wui_core::event::{AgentError, AgentEvent, RunStopReason, RunSummary, StopReason, TokenUsage};
 use wui_core::hook::HookDecision;
 use wui_core::message::Message;
 use wui_core::provider::ChatRequest;
@@ -95,61 +95,8 @@ use super::registry::{self, ToolRegistry};
 use compression::{emergency_compress, maybe_compress};
 use history::{last_assistant_text, replace_last_assistant_text, system_reminder_msg};
 use parsing::parse_stream;
-use provider::{call_with_retry, is_prompt_too_long};
+use provider::{call_with_retry, is_prompt_too_long, ProviderStream};
 use tool_batch::{authorize_and_dispatch, run_post_hooks};
-
-// ── handle_stop! ──────────────────────────────────────────────────────────────
-//
-// Shared stop-condition logic used by BudgetExhausted, MaxTokensExhausted,
-// DiminishingReturns, and Completed.
-//
-// Each invocation:
-//   1. Runs the PreStop hook (unless stop_hook_active is set).
-//   2. On Block: injects the reason as a system reminder, sets the flag, and
-//      `continue`s the outer loop.
-//   3. On non-Block (or when already active): returns Ok(RunSummary{...}).
-//
-// The Completed variant also handles MutateOutput — pass the optional
-// `$on_mutate` expression (evaluated when MutateOutput fires) as a block.
-//
-// `$extra_on_block` runs extra reset logic (e.g., resetting counters) before
-// the `continue`. Pass `{}` when not needed.
-macro_rules! handle_stop {
-    (
-        hooks        = $hooks:expr,
-        messages     = $messages:expr,
-        iterations   = $iterations:expr,
-        total_usage  = $total_usage:expr,
-        stop_active  = $stop_hook_active:expr,
-        reason       = $reason:expr,
-        extra_on_block = $extra_on_block:block,
-        on_mutate    = |$mutated:ident| $on_mutate:block $(,)?
-    ) => {{
-        match $hooks
-            .pre_stop(
-                last_assistant_text(&$messages),
-                $reason,
-                $stop_hook_active,
-            )
-            .await
-        {
-            HookDecision::Block { reason } if !$stop_hook_active => {
-                $messages.push(system_reminder_msg(&reason));
-                $stop_hook_active = true;
-                $extra_on_block
-                continue;
-            }
-            HookDecision::MutateOutput { content: $mutated } => $on_mutate,
-            _ => {}
-        }
-        return Ok(RunSummary {
-            stop_reason: $reason,
-            iterations: $iterations,
-            usage: $total_usage,
-            messages: $messages,
-        });
-    }};
-}
 
 // ── Diminishing-returns constants ─────────────────────────────────────────────
 
@@ -172,6 +119,25 @@ const MAX_TOKEN_ESCALATIONS: u32 = 2;
 
 /// Multiplier applied on the first escalation (e.g. 16 384 → 65 536).
 const TOKEN_ESCALATION_FACTOR: u32 = 4;
+
+enum IterationSetup {
+    Continue,
+    Finish(RunSummary),
+    Ready {
+        registry: Arc<ToolRegistry>,
+        stream: ProviderStream,
+    },
+}
+
+struct IterationOutcome {
+    stop_reason: StopReason,
+    usage: TokenUsage,
+}
+
+enum LoopControl {
+    Continue,
+    Finish(RunSummary),
+}
 
 // ── Main loop ────────────────────────────────────────────────────────────────
 
@@ -198,146 +164,277 @@ async fn run_loop(
         // body contains multiple await points and EnteredSpan is not Send.
         tracing::info!(iteration = s.iterations + 1, "wui.iteration.start");
 
-        config.hooks.notify_turn_start(&s.messages).await;
-        maybe_compress(&config, &mut s.messages, tx).await;
-        if config.compress.is_critically_full(&s.messages) {
-            return Ok(s.summary(RunStopReason::ContextOverflow));
-        }
-        let registry: Arc<ToolRegistry> = if s.dynamic_tools.is_empty() {
-            config.tools.clone()
-        } else {
-            Arc::new(config.tools.with_dynamic(&s.dynamic_tools))
-        };
-        let req = ChatRequest {
-            model: config.model.clone(),
-            max_tokens: s.effective_max_tokens,
-            temperature: config.temperature,
-            system: s.system.clone(),
-            messages: s.messages.clone(),
-            tools: registry.tool_defs(),
-            thinking_budget: config.thinking_budget,
-        };
-        if !s.preflight_done {
-            preflight_check(&config, &req)?;
-            s.preflight_done = true;
-        }
-        let stream = match call_with_retry(&config, &req, tx).await {
-            Ok(stream) => stream,
-            Err(e) if is_prompt_too_long(&e) => {
-                if emergency_compress(&config, &mut s.messages, tx).await {
-                    continue;
-                }
-                return Err(e);
-            }
-            Err(e) => return Err(e),
+        let (registry, stream) = match prepare_iteration(&config, &mut s, tx).await? {
+            IterationSetup::Continue => continue,
+            IterationSetup::Finish(summary) => return Ok(summary),
+            IterationSetup::Ready { registry, stream } => (registry, stream),
         };
 
-        let mut executor = ToolExecutor::new(
-            registry.clone(),
-            cancel.clone(),
-            tx.clone(),
-            config.tool_timeout,
-            config.result_store.clone(),
-        );
-        let mut ctx = IterationCtx::new();
-        futures::pin_mut!(stream);
+        let Some(outcome) =
+            execute_iteration(&config, &mut s, registry, stream, cancel.clone(), tx).await?
+        else {
+            continue;
+        };
 
-        let got_message_end = parse_stream(&mut stream, &mut ctx, &registry, tx).await?;
-
-        // Stream-drop recovery (needs continue/return).
-        if !got_message_end {
-            if ctx.submission_order.is_empty() {
-                tracing::warn!(s.iterations, "stream ended without MessageEnd — retrying");
-                continue;
-            }
-            return Err(AgentError::retryable(
-                "provider stream dropped mid-response with tools in flight",
-            ));
+        match evaluate_stop_conditions(&config, &mut s, outcome).await {
+            LoopControl::Continue => continue,
+            LoopControl::Finish(summary) => return Ok(summary),
         }
+    }
+}
 
-        authorize_and_dispatch(&mut ctx, &config, &registry, &mut executor, &s.messages, tx).await;
-        let stop_reason = ctx.stop_reason.clone();
-        let usage = ctx.usage.clone();
-        run_post_hooks(&mut ctx, executor, &config, &mut s.messages, tx).await;
-        history::assemble_history(ctx, &mut s, &config, tx).await;
+async fn prepare_iteration(
+    config: &Arc<RunConfig>,
+    s: &mut RunState,
+    tx: &mpsc::Sender<AgentEvent>,
+) -> Result<IterationSetup, AgentError> {
+    config.hooks.notify_turn_start(&s.messages).await;
+    maybe_compress(config, &mut s.messages, tx).await;
 
-        // ── Stop evaluation (handle_stop! needs continue/return) ─────────
+    if config.compress.is_critically_full(&s.messages) {
+        return Ok(IterationSetup::Finish(
+            s.summary(RunStopReason::ContextOverflow),
+        ));
+    }
 
-        if let Some(budget) = config.token_budget {
-            if s.total_usage.input_tokens as u64 + s.total_usage.output_tokens as u64 >= budget {
-                handle_stop! {
-                    hooks = config.hooks, messages = s.messages,
-                    iterations = s.iterations, total_usage = s.total_usage,
-                    stop_active = s.stop_hook_active,
-                    reason = RunStopReason::BudgetExhausted,
-                    extra_on_block = {}, on_mutate = |_content| {},
-                };
-            }
-        }
+    let registry = active_registry(config, s);
+    let req = build_chat_request(config, s, &registry);
+    run_preflight(config, s, &req)?;
 
-        if stop_reason == StopReason::MaxTokens {
-            s.token_escalations += 1;
-            if s.token_escalations == 1 {
-                s.effective_max_tokens =
-                    (s.effective_max_tokens * TOKEN_ESCALATION_FACTOR).min(131_072);
-                continue;
-            } else if s.token_escalations <= MAX_TOKEN_ESCALATIONS {
-                s.messages.push(Message::user(
-                    "Your previous response was truncated due to length limits. \
-                     Continue exactly where you left off. Do not repeat what you already said.",
-                ));
-                continue;
+    match call_with_retry(config, &req, tx).await {
+        Ok(stream) => Ok(IterationSetup::Ready { registry, stream }),
+        Err(error) if is_prompt_too_long(&error) => {
+            if emergency_compress(config, &mut s.messages, tx).await {
+                Ok(IterationSetup::Continue)
             } else {
-                handle_stop! {
-                    hooks = config.hooks, messages = s.messages,
-                    iterations = s.iterations, total_usage = s.total_usage,
-                    stop_active = s.stop_hook_active,
-                    reason = RunStopReason::MaxTokensExhausted,
-                    extra_on_block = {
-                        s.token_escalations = 0;
-                        s.effective_max_tokens = config.max_tokens;
-                    },
-                    on_mutate = |_content| {},
-                };
+                Err(error)
             }
         }
+        Err(error) => Err(error),
+    }
+}
 
+fn active_registry(config: &RunConfig, s: &RunState) -> Arc<ToolRegistry> {
+    if s.dynamic_tools.is_empty() {
+        config.tools.clone()
+    } else {
+        Arc::new(config.tools.with_dynamic(&s.dynamic_tools))
+    }
+}
+
+fn build_chat_request(config: &RunConfig, s: &RunState, registry: &ToolRegistry) -> ChatRequest {
+    ChatRequest {
+        model: config.model.clone(),
+        max_tokens: s.effective_max_tokens,
+        temperature: config.temperature,
+        system: s.system.clone(),
+        messages: s.messages.clone(),
+        tools: registry.tool_defs(),
+        thinking_budget: config.thinking_budget,
+    }
+}
+
+fn run_preflight(
+    config: &RunConfig,
+    s: &mut RunState,
+    req: &ChatRequest,
+) -> Result<(), AgentError> {
+    if !s.preflight_done {
+        preflight_check(config, req)?;
+        s.preflight_done = true;
+    }
+    Ok(())
+}
+
+async fn execute_iteration(
+    config: &Arc<RunConfig>,
+    s: &mut RunState,
+    registry: Arc<ToolRegistry>,
+    stream: ProviderStream,
+    cancel: CancellationToken,
+    tx: &mpsc::Sender<AgentEvent>,
+) -> Result<Option<IterationOutcome>, AgentError> {
+    let mut executor = ToolExecutor::new(
+        registry.clone(),
+        cancel,
+        tx.clone(),
+        config.tool_timeout,
+        config.result_store.clone(),
+    );
+    let mut ctx = IterationCtx::new();
+    futures::pin_mut!(stream);
+
+    let got_message_end = parse_stream(&mut stream, &mut ctx, &registry, tx).await?;
+    if !got_message_end {
+        return handle_stream_drop(s, &ctx);
+    }
+
+    authorize_and_dispatch(&mut ctx, config, &registry, &mut executor, &s.messages, tx).await;
+    let outcome = IterationOutcome {
+        stop_reason: ctx.stop_reason.clone(),
+        usage: ctx.usage.clone(),
+    };
+    run_post_hooks(&mut ctx, executor, config, &mut s.messages, tx).await;
+    history::assemble_history(ctx, s, config, tx).await;
+    Ok(Some(outcome))
+}
+
+fn handle_stream_drop(
+    s: &RunState,
+    ctx: &IterationCtx,
+) -> Result<Option<IterationOutcome>, AgentError> {
+    if ctx.submission_order.is_empty() {
+        tracing::warn!(s.iterations, "stream ended without MessageEnd — retrying");
+        return Ok(None);
+    }
+
+    Err(AgentError::retryable(
+        "provider stream dropped mid-response with tools in flight",
+    ))
+}
+
+async fn evaluate_stop_conditions(
+    config: &Arc<RunConfig>,
+    s: &mut RunState,
+    outcome: IterationOutcome,
+) -> LoopControl {
+    if budget_exhausted(config, s) {
+        return stop_with_hooks(config, s, RunStopReason::BudgetExhausted, |_| {}, |_, _| {}).await;
+    }
+
+    if let Some(control) = handle_max_tokens(config, s, outcome.stop_reason.clone()).await {
+        return control;
+    }
+
+    if let Some(control) = handle_diminishing_returns(config, s, &outcome).await {
+        return control;
+    }
+
+    if outcome.stop_reason == StopReason::EndTurn {
+        return stop_with_hooks(
+            config,
+            s,
+            RunStopReason::Completed,
+            |_| {},
+            |state, content| replace_last_assistant_text(&mut state.messages, content),
+        )
+        .await;
+    }
+
+    s.stop_hook_active = false;
+    LoopControl::Continue
+}
+
+fn budget_exhausted(config: &RunConfig, s: &RunState) -> bool {
+    config.token_budget.is_some_and(|budget| {
+        s.total_usage.input_tokens as u64 + s.total_usage.output_tokens as u64 >= budget
+    })
+}
+
+async fn handle_max_tokens(
+    config: &Arc<RunConfig>,
+    s: &mut RunState,
+    stop_reason: StopReason,
+) -> Option<LoopControl> {
+    if stop_reason != StopReason::MaxTokens {
         s.token_escalations = 0;
         s.effective_max_tokens = config.max_tokens;
+        return None;
+    }
 
-        if !config.ignore_diminishing_returns {
-            if stop_reason == StopReason::ToolUse || usage.output_tokens >= MIN_USEFUL_OUTPUT_TOKENS
-            {
-                s.low_output_streak = 0;
-            } else {
-                s.low_output_streak += 1;
-                if s.low_output_streak >= MAX_LOW_OUTPUT_TURNS {
-                    handle_stop! {
-                        hooks = config.hooks, messages = s.messages,
-                        iterations = s.iterations, total_usage = s.total_usage,
-                        stop_active = s.stop_hook_active,
-                        reason = RunStopReason::DiminishingReturns,
-                        extra_on_block = { s.low_output_streak = 0; },
-                        on_mutate = |_content| {},
-                    };
-                }
-            }
+    s.token_escalations += 1;
+    if s.token_escalations == 1 {
+        s.effective_max_tokens = (s.effective_max_tokens * TOKEN_ESCALATION_FACTOR).min(131_072);
+        return Some(LoopControl::Continue);
+    }
+
+    if s.token_escalations <= MAX_TOKEN_ESCALATIONS {
+        s.messages.push(Message::user(
+            "Your previous response was truncated due to length limits. \
+             Continue exactly where you left off. Do not repeat what you already said.",
+        ));
+        return Some(LoopControl::Continue);
+    }
+
+    Some(
+        stop_with_hooks(
+            config,
+            s,
+            RunStopReason::MaxTokensExhausted,
+            |state| {
+                state.token_escalations = 0;
+                state.effective_max_tokens = config.max_tokens;
+            },
+            |_, _| {},
+        )
+        .await,
+    )
+}
+
+async fn handle_diminishing_returns(
+    config: &Arc<RunConfig>,
+    s: &mut RunState,
+    outcome: &IterationOutcome,
+) -> Option<LoopControl> {
+    if config.ignore_diminishing_returns {
+        return None;
+    }
+
+    if outcome.stop_reason == StopReason::ToolUse
+        || outcome.usage.output_tokens >= MIN_USEFUL_OUTPUT_TOKENS
+    {
+        s.low_output_streak = 0;
+        return None;
+    }
+
+    s.low_output_streak += 1;
+    if s.low_output_streak < MAX_LOW_OUTPUT_TURNS {
+        return None;
+    }
+
+    Some(
+        stop_with_hooks(
+            config,
+            s,
+            RunStopReason::DiminishingReturns,
+            |state| state.low_output_streak = 0,
+            |_, _| {},
+        )
+        .await,
+    )
+}
+
+async fn stop_with_hooks<OnBlock, OnMutate>(
+    config: &RunConfig,
+    s: &mut RunState,
+    stop_reason: RunStopReason,
+    on_block: OnBlock,
+    on_mutate: OnMutate,
+) -> LoopControl
+where
+    OnBlock: FnOnce(&mut RunState),
+    OnMutate: FnOnce(&mut RunState, String),
+{
+    match config
+        .hooks
+        .pre_stop(
+            last_assistant_text(&s.messages),
+            stop_reason.clone(),
+            s.stop_hook_active,
+        )
+        .await
+    {
+        HookDecision::Block { reason } if !s.stop_hook_active => {
+            s.messages.push(system_reminder_msg(&reason));
+            s.stop_hook_active = true;
+            on_block(s);
+            LoopControl::Continue
         }
-
-        if stop_reason == StopReason::EndTurn {
-            handle_stop! {
-                hooks = config.hooks, messages = s.messages,
-                iterations = s.iterations, total_usage = s.total_usage,
-                stop_active = s.stop_hook_active,
-                reason = RunStopReason::Completed,
-                extra_on_block = {},
-                on_mutate = |content| {
-                    replace_last_assistant_text(&mut s.messages, content);
-                },
-            };
+        HookDecision::MutateOutput { content } => {
+            on_mutate(s, content);
+            LoopControl::Finish(s.summary(stop_reason))
         }
-
-        s.stop_hook_active = false;
+        _ => LoopControl::Finish(s.summary(stop_reason)),
     }
 }
 
