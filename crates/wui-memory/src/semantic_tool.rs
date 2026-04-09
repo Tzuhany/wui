@@ -137,3 +137,109 @@ impl SemanticMemoryTool {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    use crate::vector_store::InMemoryVectorStore;
+
+    /// Trivial embedding: hash the string into a fixed-length vector.
+    fn trivial_embed(text: String) -> BoxFuture<'static, Vec<f32>> {
+        Box::pin(async move {
+            use std::collections::hash_map::DefaultHasher;
+            use std::hash::{Hash, Hasher};
+
+            let mut hasher = DefaultHasher::new();
+            text.hash(&mut hasher);
+            let h = hasher.finish();
+
+            // Spread the hash bits into a 4-dimensional vector.
+            vec![
+                ((h >> 0) & 0xFFFF) as f32,
+                ((h >> 16) & 0xFFFF) as f32,
+                ((h >> 32) & 0xFFFF) as f32,
+                ((h >> 48) & 0xFFFF) as f32,
+            ]
+        })
+    }
+
+    fn make_ctx() -> ToolCtx {
+        ToolCtx {
+            cancel: tokio_util::sync::CancellationToken::new(),
+            messages: Arc::from(vec![]),
+            on_progress: Box::new(|_| {}),
+        }
+    }
+
+    #[tokio::test]
+    async fn semantic_tool_upsert_and_search() {
+        let store = Arc::new(InMemoryVectorStore::new());
+        let embed: EmbedFn = Arc::new(trivial_embed);
+        let tool = SemanticMemoryTool::new(store, embed, 5);
+        let ctx = make_ctx();
+
+        // Upsert a few items.
+        let result = tool
+            .call(
+                json!({"action": "upsert", "id": "item1", "text": "Rust programming language"}),
+                &ctx,
+            )
+            .await;
+        assert!(
+            result.content.contains("Stored"),
+            "upsert should succeed, got: {}",
+            result.content
+        );
+
+        let result = tool
+            .call(
+                json!({"action": "upsert", "id": "item2", "text": "Python programming language"}),
+                &ctx,
+            )
+            .await;
+        assert!(result.content.contains("Stored"));
+
+        let result = tool
+            .call(
+                json!({"action": "upsert", "id": "item3", "text": "Go programming language"}),
+                &ctx,
+            )
+            .await;
+        assert!(result.content.contains("Stored"));
+
+        // Search — the trivial embed is deterministic, so the same text
+        // should return itself as the top hit.
+        let result = tool
+            .call(
+                json!({"action": "search", "text": "Rust programming language", "limit": 2}),
+                &ctx,
+            )
+            .await;
+        assert!(
+            result.content.contains("item1"),
+            "expected item1 in search results, got: {}",
+            result.content
+        );
+
+        // Delete and verify it's gone.
+        let result = tool
+            .call(json!({"action": "delete", "id": "item1"}), &ctx)
+            .await;
+        assert!(result.content.contains("Deleted"));
+
+        // Search again — item1 should no longer appear.
+        let result = tool
+            .call(
+                json!({"action": "search", "text": "Rust programming language", "limit": 5}),
+                &ctx,
+            )
+            .await;
+        assert!(
+            !result.content.contains("item1"),
+            "item1 should have been deleted, got: {}",
+            result.content
+        );
+    }
+}

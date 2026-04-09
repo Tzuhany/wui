@@ -960,4 +960,106 @@ mod tests {
         let back: ToolCallId = serde_json::from_str(&json).unwrap();
         assert_eq!(back, id);
     }
+
+    // ── TypedTool blanket impl ──────────────────────────────────────────
+
+    /// A minimal typed input for testing.
+    struct GreetInput {
+        name: String,
+    }
+
+    impl ToolArgs for GreetInput {
+        fn schema() -> Value {
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string" }
+                },
+                "required": ["name"]
+            })
+        }
+
+        fn parse(value: Value) -> Result<Self, ToolInputError> {
+            let name = value
+                .get("name")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| {
+                    ToolInputError::field("name", "string").with_got(
+                        value
+                            .get("name")
+                            .map_or("missing".into(), |v| v.to_string()),
+                    )
+                })?
+                .to_string();
+            Ok(GreetInput { name })
+        }
+    }
+
+    struct GreetTool;
+
+    #[async_trait]
+    impl TypedTool for GreetTool {
+        type Input = GreetInput;
+
+        fn name(&self) -> &str {
+            "greet"
+        }
+
+        fn description(&self) -> &str {
+            "Say hello."
+        }
+
+        async fn call_typed(&self, input: GreetInput, _ctx: &ToolCtx) -> ToolOutput {
+            ToolOutput::success(format!("Hello, {}!", input.name))
+        }
+    }
+
+    fn make_ctx() -> ToolCtx {
+        ToolCtx {
+            cancel: tokio_util::sync::CancellationToken::new(),
+            messages: Arc::from(vec![]),
+            on_progress: Box::new(|_| {}),
+        }
+    }
+
+    #[tokio::test]
+    async fn typed_tool_blanket_impl_works() {
+        let tool = GreetTool;
+
+        // name() delegates correctly
+        assert_eq!(Tool::name(&tool), "greet");
+
+        // input_schema() returns the ToolArgs schema
+        let schema = Tool::input_schema(&tool);
+        assert_eq!(schema["type"], "object");
+        assert!(schema["properties"]["name"].is_object());
+
+        // call() with valid input returns success
+        let ctx = make_ctx();
+        let output = Tool::call(&tool, serde_json::json!({"name": "Alice"}), &ctx).await;
+        assert!(output.is_ok());
+        assert_eq!(output.content, "Hello, Alice!");
+
+        // call() with invalid input returns FailureKind::InvalidInput
+        let output = Tool::call(&tool, serde_json::json!({"name": null}), &ctx).await;
+        assert!(output.is_error());
+        assert_eq!(output.failure, Some(FailureKind::InvalidInput));
+    }
+
+    // ── ToolInputError display ──────────────────────────────────────────
+
+    #[test]
+    fn tool_input_error_display() {
+        // field + expected + got
+        let err = ToolInputError::field("name", "string").with_got("null");
+        assert_eq!(err.to_string(), "field 'name': expected string, got null");
+
+        // field + expected
+        let err = ToolInputError::field("name", "string");
+        assert_eq!(err.to_string(), "field 'name': expected string");
+
+        // just expected
+        let err = ToolInputError::new("valid JSON object");
+        assert_eq!(err.to_string(), "expected valid JSON object");
+    }
 }

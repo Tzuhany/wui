@@ -351,6 +351,52 @@ mod tests {
     }
 
     #[test]
+    fn user_text_message_serializes_correctly() {
+        let msg = Message::user("Hello, world!");
+        let v = messages_to_json("", &[msg]);
+        let arr = v.as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["role"], "user");
+        assert_eq!(arr[0]["content"], "Hello, world!");
+    }
+
+    #[test]
+    fn tool_call_produces_function_wrapper() {
+        use wui_core::provider::ToolDef;
+
+        let req = ChatRequest {
+            model: None,
+            max_tokens: 100,
+            temperature: None,
+            system: String::new(),
+            messages: vec![],
+            tools: vec![ToolDef {
+                name: "search".to_string(),
+                description: "Search the web".to_string(),
+                input_schema: serde_json::json!({"type": "object", "properties": {"q": {"type": "string"}}}),
+            }],
+            thinking_budget: None,
+        };
+
+        let body = build_request_body(&req, "gpt-4");
+        let tools = body["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0]["type"], "function");
+        assert_eq!(tools[0]["function"]["name"], "search");
+        assert_eq!(tools[0]["function"]["description"], "Search the web");
+        assert!(tools[0]["function"]["parameters"].is_object());
+    }
+
+    #[test]
+    fn system_prompt_becomes_system_role() {
+        let v = messages_to_json("You are a helpful assistant.", &[]);
+        let arr = v.as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["role"], "system");
+        assert_eq!(arr[0]["content"], "You are a helpful assistant.");
+    }
+
+    #[test]
     fn tool_call_arguments_encoded_as_json_string() {
         use wui_core::message::{ContentBlock, Message, Role};
         let input = serde_json::json!({"query": "rust lang"});

@@ -494,3 +494,237 @@ async fn dynamic_tool_expose() {
         "exposed_tool should have been called once after bootstrap exposed it"
     );
 }
+
+// ── Test 11: pre_tool_hook_can_block ────────────────────────────────────────
+
+/// A hook that blocks a specific tool by name.
+struct BlockToolHook {
+    tool_name: &'static str,
+}
+
+#[async_trait]
+impl wui::Hook for BlockToolHook {
+    fn handles(&self, event: &wui::HookEvent<'_>) -> bool {
+        matches!(event, wui::HookEvent::PreToolUse { .. })
+    }
+
+    async fn evaluate(&self, event: &wui::HookEvent<'_>) -> wui::HookDecision {
+        if let wui::HookEvent::PreToolUse { name, .. } = event {
+            if *name == self.tool_name {
+                return wui::HookDecision::block(format!("hook blocked {name}"));
+            }
+        }
+        wui::HookDecision::Allow
+    }
+}
+
+#[tokio::test]
+async fn pre_tool_hook_can_block() {
+    let counter = Arc::new(AtomicU32::new(0));
+
+    let provider = MockProvider::new(vec![
+        MockProvider::tool_call("blocked_tool", json!({})),
+        MockProvider::text("tool was blocked"),
+    ]);
+
+    let agent = Agent::builder(provider)
+        .tool(CountingTool {
+            name: "blocked_tool",
+            counter: Arc::clone(&counter),
+        })
+        .hook(BlockToolHook {
+            tool_name: "blocked_tool",
+        })
+        .permission(PermissionMode::Auto)
+        .build();
+
+    let mut stream = agent.stream("Call blocked_tool.");
+    let mut saw_tool_error = false;
+    let mut failure_kind = None;
+
+    while let Some(event) = stream.next().await {
+        if let AgentEvent::ToolError { kind, .. } = &event {
+            saw_tool_error = true;
+            failure_kind = Some(kind.clone());
+        }
+    }
+
+    // The tool implementation must NOT have been invoked.
+    assert_eq!(
+        counter.load(Ordering::SeqCst),
+        0,
+        "hook-blocked tool must not execute"
+    );
+    assert!(saw_tool_error, "should have received a ToolError event");
+    assert_eq!(
+        failure_kind,
+        Some(wui::FailureKind::HookBlocked),
+        "failure kind should be HookBlocked"
+    );
+}
+
+// ── Test 12: pre_tool_hook_can_mutate_input ─────────────────────────────────
+
+/// A tool that returns the value of `key` from its input.
+struct EchoInputTool;
+
+#[async_trait]
+impl Tool for EchoInputTool {
+    fn name(&self) -> &str {
+        "echo_input"
+    }
+    fn description(&self) -> &str {
+        "Echoes the value of the 'data' field."
+    }
+    fn input_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "data": { "type": "string" }
+            }
+        })
+    }
+    async fn call(&self, input: Value, _ctx: &ToolCtx) -> ToolOutput {
+        let data = input
+            .get("data")
+            .and_then(|v| v.as_str())
+            .unwrap_or("missing");
+        ToolOutput::success(data)
+    }
+}
+
+/// A hook that mutates tool input by replacing the `data` field.
+struct MutateInputHook;
+
+#[async_trait]
+impl wui::Hook for MutateInputHook {
+    fn handles(&self, event: &wui::HookEvent<'_>) -> bool {
+        matches!(event, wui::HookEvent::PreToolUse { .. })
+    }
+
+    async fn evaluate(&self, event: &wui::HookEvent<'_>) -> wui::HookDecision {
+        if let wui::HookEvent::PreToolUse {
+            name: "echo_input",
+            input,
+        } = event
+        {
+            let mut mutated = (*input).clone();
+            mutated["data"] = json!("mutated_by_hook");
+            return wui::HookDecision::mutate(mutated);
+        }
+        wui::HookDecision::Allow
+    }
+}
+
+#[tokio::test]
+async fn pre_tool_hook_can_mutate_input() {
+    let provider = MockProvider::new(vec![
+        MockProvider::tool_call("echo_input", json!({"data": "original"})),
+        MockProvider::text("done"),
+    ]);
+
+    let agent = Agent::builder(provider)
+        .tool(EchoInputTool)
+        .hook(MutateInputHook)
+        .permission(PermissionMode::Auto)
+        .build();
+
+    let mut stream = agent.stream("Call echo_input.");
+    let mut tool_output = String::new();
+
+    while let Some(event) = stream.next().await {
+        if let AgentEvent::ToolDone { output, .. } = &event {
+            tool_output = output.clone();
+        }
+    }
+
+    assert_eq!(
+        tool_output, "mutated_by_hook",
+        "tool should have received the mutated input from the hook"
+    );
+}
+
+// ── Test 13: sub_agent_delegates_and_returns ────────────────────────────────
+
+#[tokio::test]
+async fn sub_agent_delegates_and_returns() {
+    use wui::SubAgent;
+
+    // The sub-agent simply responds with text.
+    let sub_provider = MockProvider::new(vec![MockProvider::text("sub-agent result")]);
+
+    let sub_agent = Agent::builder(sub_provider)
+        .system("You are a helpful sub-agent.")
+        .permission(PermissionMode::Auto)
+        .build();
+
+    // The supervisor calls the sub-agent tool, then produces final text.
+    let supervisor_provider = MockProvider::new(vec![
+        MockProvider::tool_call("researcher", json!({"prompt": "find something"})),
+        MockProvider::text("supervisor done"),
+    ]);
+
+    let supervisor = Agent::builder(supervisor_provider)
+        .tool(SubAgent::new(
+            "researcher",
+            "A research sub-agent",
+            sub_agent,
+        ))
+        .permission(PermissionMode::Auto)
+        .build();
+
+    // Collect events manually so we can inspect ToolDone output.
+    let mut stream = supervisor.stream("Delegate to researcher.");
+    let mut events = Vec::new();
+    while let Some(event) = stream.next().await {
+        events.push(event);
+    }
+
+    // Verify the supervisor completed and called the researcher tool.
+    let has_tool_start = events
+        .iter()
+        .any(|e| matches!(e, AgentEvent::ToolStart { name, .. } if name == "researcher"));
+    assert!(has_tool_start, "expected ToolStart for researcher");
+
+    let has_done = events
+        .iter()
+        .any(|e| matches!(e, AgentEvent::Done(s) if s.stop_reason == RunStopReason::Completed));
+    assert!(has_done, "expected run to complete");
+
+    // Verify the sub-agent's result was captured in the ToolDone event.
+    let tool_output = events.iter().find_map(|e| {
+        if let AgentEvent::ToolDone { name, output, .. } = e {
+            if name == "researcher" {
+                return Some(output.clone());
+            }
+        }
+        None
+    });
+    assert_eq!(
+        tool_output.as_deref(),
+        Some("sub-agent result"),
+        "sub-agent tool output should contain the sub-agent's text response"
+    );
+}
+
+// ── Test 14: run_structured_extracts_tag ────────────────────────────────────
+
+#[tokio::test]
+async fn run_structured_extracts_tag() {
+    let provider = MockProvider::new(vec![MockProvider::text(
+        "The answer is <answer>42</answer>, as expected.",
+    )]);
+
+    let agent = Agent::builder(provider)
+        .system("Always wrap your final answer in <answer> tags.")
+        .permission(PermissionMode::Auto)
+        .build();
+
+    let result = agent
+        .run_structured("What is the meaning of life?")
+        .extract("answer")
+        .await
+        .expect("extract should succeed");
+
+    assert_eq!(result, "42");
+}

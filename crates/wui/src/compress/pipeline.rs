@@ -951,6 +951,183 @@ mod tests {
         }
     }
 
+    // ── Mock provider that returns a fixed summary ───────────────────────
+
+    struct MockSummaryProvider {
+        reply: String,
+    }
+
+    impl MockSummaryProvider {
+        fn new(reply: &str) -> Self {
+            Self {
+                reply: reply.to_string(),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl wui_core::provider::Provider for MockSummaryProvider {
+        async fn stream(
+            &self,
+            _: wui_core::provider::ChatRequest,
+        ) -> Result<
+            std::pin::Pin<
+                Box<
+                    dyn futures::Stream<
+                            Item = Result<
+                                wui_core::event::StreamEvent,
+                                wui_core::provider::ProviderError,
+                            >,
+                        > + Send,
+                >,
+            >,
+            wui_core::provider::ProviderError,
+        > {
+            let text = self.reply.clone();
+            Ok(Box::pin(futures::stream::once(async move {
+                Ok(wui_core::event::StreamEvent::TextDelta { text })
+            })))
+        }
+    }
+
+    // ── L3 Summarize ────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn l3_summarize_produces_compact_boundary() {
+        // To force L3, we need L2 to NOT be enough: set collapse_keep_fraction high
+        // so that L2 keeps most messages and pressure stays above threshold.
+        //
+        // Math (estimator = 1 char = 1 token):
+        //   window=200, threshold=0.5 -> trigger above 100 tokens
+        //   40 messages x 20 chars = 800 tokens -> pressure 4.0
+        //   L2 keeps max(40*0.9, 1) = 36 -> ~720 tokens -> pressure 3.6 > 0.5 -> L3 fires
+        //   L3 summarises the 4 oldest messages (4 x 20 = 80 tokens) into "ok" (2 tokens)
+        //   Result: 2 + 36*20 = 722 tokens -> freed = 800 - 722 = 78 > 0
+        let p = CompressPipeline {
+            window_tokens: 200,
+            compact_threshold: 0.5,
+            token_estimator: estimator(1),
+            collapse_keep_min: 1,
+            collapse_keep_fraction: 0.9, // keep 90% -> L2 barely helps
+            allow_l3: true,
+            ..Default::default()
+        };
+
+        let messages = msgs(40, 20);
+        // Short summary so it's smaller than the messages it replaces.
+        let provider = MockSummaryProvider::new("ok");
+
+        let result = p
+            .maybe_compress(&messages, &provider, Some("test-model"))
+            .await;
+        match result {
+            Some((out, method, freed)) => {
+                assert_eq!(
+                    method,
+                    wui_core::event::CompressMethod::Summarize,
+                    "expected L3 Summarize, got {method:?}"
+                );
+                assert!(freed > 0, "expected freed > 0");
+                // First message should be a CompactBoundary.
+                assert!(
+                    matches!(&out[0].content[0], ContentBlock::CompactBoundary { summary } if summary == "ok"),
+                    "expected CompactBoundary with mock summary, got {:?}",
+                    out[0].content[0]
+                );
+            }
+            None => panic!("expected L3 compression to trigger"),
+        }
+    }
+
+    // ── Aggregate result trim ───────────────────────────────────────────
+
+    #[tokio::test]
+    async fn aggregate_result_trim_respects_budget() {
+        let p = CompressPipeline {
+            window_tokens: 10_000,
+            compact_threshold: 0.5,
+            budget_per_result: 10_000,     // per-result trim won't fire
+            token_estimator: estimator(1), // 1 char = 1 token
+            result_token_budget: Some(20), // aggregate budget: 20 tokens total
+            collapse_keep_min: 1,
+            collapse_keep_fraction: 0.5,
+            ..Default::default()
+        };
+
+        // 5 tool results, each 10 tokens = 50 total >> budget of 20.
+        // Most recent results should be kept, oldest replaced.
+        let messages: Vec<Message> = (0..5)
+            .map(|i| {
+                Message::with_id(
+                    format!("msg_{i}"),
+                    Role::User,
+                    vec![ContentBlock::ToolResult {
+                        tool_use_id: wui_core::tool::ToolCallId::from(format!("tu_{i}").as_str()),
+                        content: format!("{}", "x".repeat(10)),
+                        is_error: false,
+                    }],
+                )
+            })
+            .collect();
+
+        let trimmed = p.aggregate_result_trim(&messages, 20);
+        assert_eq!(trimmed.len(), 5, "message count should not change");
+
+        // Count how many got replaced with placeholder.
+        let stubbed: Vec<_> = trimmed
+            .iter()
+            .filter(|m| {
+                matches!(&m.content[0], ContentBlock::ToolResult { content, .. }
+                    if content.contains("[result trimmed"))
+            })
+            .collect();
+        assert!(
+            !stubbed.is_empty(),
+            "expected some results to be trimmed by aggregate budget"
+        );
+
+        // The most recent result(s) should be preserved (not stubbed).
+        if let ContentBlock::ToolResult { content, .. } = &trimmed[4].content[0] {
+            assert!(
+                !content.contains("[result trimmed"),
+                "most recent result should be preserved"
+            );
+        }
+    }
+
+    // ── SummarizingCompressor below threshold ───────────────────────────
+
+    #[tokio::test]
+    async fn summarizing_compressor_below_threshold_no_op() {
+        use super::super::summarizer::SummarizingCompressor;
+        use super::super::CompressStrategy;
+
+        let compressor = SummarizingCompressor {
+            threshold: 0.75,
+            window_tokens: 10_000,
+            ..Default::default()
+        };
+
+        // Small messages: 5 x 40 chars / 4 chars_per_token = 50 tokens
+        // Pressure = 50 / 10_000 = 0.005 << 0.75 threshold
+        let messages = msgs(5, 40);
+
+        let provider: Arc<dyn wui_core::provider::Provider> =
+            Arc::new(MockSummaryProvider::new("should not be called"));
+        let result = compressor
+            .compress(messages.clone(), provider, Some("test"))
+            .await
+            .unwrap();
+
+        assert!(
+            result.method.is_none(),
+            "expected no compression below threshold, got {:?}",
+            result.method
+        );
+        assert_eq!(result.freed, 0);
+        assert_eq!(result.messages.len(), messages.len());
+    }
+
     #[tokio::test]
     async fn maybe_compress_l2_when_l1_insufficient() {
         use wui_core::event::CompressMethod;

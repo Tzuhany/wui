@@ -573,3 +573,53 @@ pub enum ControlDecision {
     /// Deny this tool for all future invocations in this session.
     DenyAlways { reason: String },
 }
+
+// ── Tests ────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_request() -> ControlRequest {
+        ControlRequest {
+            id: "req_1".to_string(),
+            kind: ControlKind::PermissionRequest {
+                tool_name: "bash".to_string(),
+                description: "run rm -rf /".to_string(),
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn control_handle_first_response_wins() {
+        let (handle, rx) = ControlHandle::new(test_request());
+        handle.approve();
+        handle.deny("too late");
+        let response = rx.await.unwrap();
+        assert!(matches!(
+            response.decision,
+            ControlDecision::Approve { modification: None }
+        ));
+    }
+
+    #[tokio::test]
+    async fn control_handle_drop_auto_denies() {
+        let (handle, rx) = ControlHandle::new(test_request());
+        drop(handle);
+        // The sender was dropped without sending — the receiver gets an error,
+        // which the engine treats as a denial.
+        assert!(rx.await.is_err());
+    }
+
+    #[tokio::test]
+    async fn control_handle_clone_shares_sender() {
+        let (handle, rx) = ControlHandle::new(test_request());
+        let clone = handle.clone();
+        clone.deny("nope");
+        let response = rx.await.unwrap();
+        assert!(matches!(
+            response.decision,
+            ControlDecision::Deny { reason } if reason == "nope"
+        ));
+    }
+}
