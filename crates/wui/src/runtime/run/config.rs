@@ -73,9 +73,6 @@ pub(crate) struct RunConfig {
     /// use this to optimize caching. `None` means no boundary.
     pub(crate) cache_boundary: Option<usize>,
 
-    /// Maximum sub-agent nesting depth. Default: 5.
-    pub(crate) max_spawn_depth: u32,
-
     /// Current sub-agent nesting depth for this run.
     pub(crate) spawn_depth: u32,
 

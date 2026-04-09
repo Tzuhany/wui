@@ -351,7 +351,7 @@ async fn handle_max_tokens(
         .recovery
         .on_max_tokens(TOKEN_ESCALATION_FACTOR, MAX_TOKEN_ESCALATIONS)
     {
-        MaxTokensAction::Escalate { .. } => Some(LoopControl::Continue),
+        MaxTokensAction::Escalate => Some(LoopControl::Continue),
         MaxTokensAction::InjectContinuation => {
             s.messages.push(Message::user(
                 "Your previous response was truncated due to length limits. \
@@ -569,7 +569,6 @@ mod tests {
             checkpoint_run_id: None,
             result_store: None,
             cache_boundary: None,
-            max_spawn_depth: 5,
             spawn_depth: 0,
             tool_filter: None,
         })

@@ -305,7 +305,6 @@ pub(crate) fn build_run_config(
         checkpoint_run_id: config.checkpoint_run_id.clone(),
         result_store: config.result_store.clone(),
         cache_boundary,
-        max_spawn_depth: config.max_spawn_depth,
         spawn_depth: 0,
         tool_filter: config.tool_filter.clone(),
     }

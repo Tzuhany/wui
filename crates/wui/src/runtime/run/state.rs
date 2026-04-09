@@ -16,8 +16,8 @@ use crate::runtime::registry::ToolRegistry;
 
 /// What to do when the LLM stops with `MaxTokens`.
 pub(super) enum MaxTokensAction {
-    /// Bump `max_tokens` to `new_max` and retry immediately.
-    Escalate { new_max: u32 },
+    /// Bump `effective_max_tokens` and retry immediately.
+    Escalate,
     /// Inject a "continue where you left off" message.
     InjectContinuation,
     /// All escalation and continuation attempts are exhausted.
@@ -63,9 +63,7 @@ impl RecoveryState {
         if self.token_escalations == 1 {
             self.effective_max_tokens =
                 (self.effective_max_tokens * escalation_factor).min(131_072);
-            return MaxTokensAction::Escalate {
-                new_max: self.effective_max_tokens,
-            };
+            return MaxTokensAction::Escalate;
         }
         if self.token_escalations <= max_escalations {
             return MaxTokensAction::InjectContinuation;
