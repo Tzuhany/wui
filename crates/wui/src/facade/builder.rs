@@ -123,6 +123,8 @@ pub struct AgentConfig {
     /// Set automatically by `run_typed()` when the provider supports it.
     /// `None` means natural language (default).
     pub(crate) response_format: Option<wui_core::provider::ResponseFormat>,
+    /// Maximum number of tools executing concurrently. `None` = unlimited.
+    pub(crate) max_concurrent_tools: Option<usize>,
 }
 
 /// Fluent builder for `Agent`.
@@ -167,6 +169,7 @@ impl AgentBuilder {
                 max_spawn_depth: 5,
                 tool_filter: None,
                 response_format: None,
+                max_concurrent_tools: None,
             },
         }
     }
@@ -510,6 +513,16 @@ impl AgentBuilder {
         f: impl Fn(&str, &wui_core::tool::ToolMeta) -> bool + Send + Sync + 'static,
     ) -> Self {
         self.config.tool_filter = Some(Arc::new(f));
+        self
+    }
+
+    /// Limit the number of tools executing concurrently.
+    ///
+    /// When set, tools beyond this limit wait for a slot before starting.
+    /// Use this when tools call rate-limited external APIs.
+    /// `None` (default) = unlimited concurrency.
+    pub fn max_concurrent_tools(mut self, n: usize) -> Self {
+        self.config.max_concurrent_tools = Some(n);
         self
     }
 

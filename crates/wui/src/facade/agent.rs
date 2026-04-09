@@ -337,6 +337,7 @@ pub(crate) fn build_run_config(
         spawn_depth: 0,
         tool_filter: config.tool_filter.clone(),
         response_format: config.response_format.clone(),
+        max_concurrent_tools: config.max_concurrent_tools,
     }
 }
 

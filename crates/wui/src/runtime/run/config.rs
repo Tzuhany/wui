@@ -86,4 +86,7 @@ pub(crate) struct RunConfig {
     /// providers supporting native JSON mode can constrain the model's output.
     /// Providers that do not support structured output ignore it.
     pub(crate) response_format: Option<wui_core::provider::ResponseFormat>,
+
+    /// Maximum number of tools executing concurrently. `None` = unlimited.
+    pub(crate) max_concurrent_tools: Option<usize>,
 }

@@ -129,6 +129,8 @@ pub struct ToolExecutor {
     result_store: Option<Arc<dyn ResultStore>>,
     /// Sub-agent nesting depth propagated to `ToolCtx`.
     spawn_depth: u32,
+    /// Limits how many concurrent tools run at once. `None` = unlimited.
+    concurrency_limit: Option<Arc<tokio::sync::Semaphore>>,
     pending: JoinSet<CompletedTool>,
     sequential: VecDeque<QueuedTool>,
 }
@@ -141,8 +143,11 @@ impl ToolExecutor {
         default_timeout: Option<Duration>,
         result_store: Option<Arc<dyn ResultStore>>,
         spawn_depth: u32,
+        max_concurrent_tools: Option<usize>,
     ) -> Self {
         let sibling_cancel = cancel.child_token();
+        let concurrency_limit =
+            max_concurrent_tools.map(|n| Arc::new(tokio::sync::Semaphore::new(n)));
         Self {
             registry,
             cancel,
@@ -151,6 +156,7 @@ impl ToolExecutor {
             default_timeout,
             result_store,
             spawn_depth,
+            concurrency_limit,
             pending: JoinSet::new(),
             sequential: VecDeque::new(),
         }
@@ -285,8 +291,20 @@ impl ToolExecutor {
             messages,
             impl_,
         };
-        self.pending
-            .spawn(async move { execute_tool_call(queued, executor_cfg).await }.instrument(span));
+        let semaphore = self.concurrency_limit.clone();
+        self.pending.spawn(
+            async move {
+                // Acquire a concurrency permit if a limit is set.
+                // The permit is held for the duration of tool execution and
+                // released automatically when dropped.
+                let _permit = match &semaphore {
+                    Some(s) => Some(s.acquire().await.expect("semaphore closed")),
+                    None => None,
+                };
+                execute_tool_call(queued, executor_cfg).await
+            }
+            .instrument(span),
+        );
     }
 
     fn spawn_completed(&mut self, tool: CompletedTool) {

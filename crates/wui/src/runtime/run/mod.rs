@@ -267,6 +267,7 @@ async fn execute_iteration(
         config.tool_timeout,
         config.result_store.clone(),
         config.spawn_depth,
+        config.max_concurrent_tools,
     );
     let mut ctx = IterationCtx::new();
     futures::pin_mut!(stream);
@@ -573,6 +574,7 @@ mod tests {
             spawn_depth: 0,
             tool_filter: None,
             response_format: None,
+            max_concurrent_tools: None,
         })
     }
 
