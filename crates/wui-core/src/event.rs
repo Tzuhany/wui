@@ -75,7 +75,12 @@ impl std::ops::Add for TokenUsage {
 
 impl std::ops::AddAssign for TokenUsage {
     fn add_assign(&mut self, rhs: Self) {
-        *self = self.clone() + rhs;
+        self.input_tokens = self.input_tokens.saturating_add(rhs.input_tokens);
+        self.output_tokens = self.output_tokens.saturating_add(rhs.output_tokens);
+        self.cache_read_tokens = self.cache_read_tokens.saturating_add(rhs.cache_read_tokens);
+        self.cache_write_tokens = self
+            .cache_write_tokens
+            .saturating_add(rhs.cache_write_tokens);
     }
 }
 
@@ -537,12 +542,14 @@ pub struct ControlResponse {
 }
 
 impl ControlResponse {
+    /// Approve the request identified by `request_id`.
     pub fn approve(request_id: impl Into<String>) -> Self {
         Self {
             request_id: request_id.into(),
             decision: ControlDecision::Approve { modification: None },
         }
     }
+    /// Deny the request identified by `request_id` with the given reason.
     pub fn deny(request_id: impl Into<String>, reason: impl Into<String>) -> Self {
         Self {
             request_id: request_id.into(),

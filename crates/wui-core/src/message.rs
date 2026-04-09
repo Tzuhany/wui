@@ -149,6 +149,7 @@ pub struct Message {
 }
 
 impl Message {
+    /// Create a user message with the given text.
     pub fn user(text: impl Into<String>) -> Self {
         Self {
             id: uuid::Uuid::new_v4().to_string(),
@@ -180,6 +181,7 @@ impl Message {
         }
     }
 
+    /// Create an assistant message from content blocks.
     pub fn assistant(blocks: Vec<ContentBlock>) -> Self {
         Self {
             id: uuid::Uuid::new_v4().to_string(),
@@ -188,6 +190,7 @@ impl Message {
         }
     }
 
+    /// Create a system message with the given text.
     pub fn system(text: impl Into<String>) -> Self {
         Self {
             id: uuid::Uuid::new_v4().to_string(),

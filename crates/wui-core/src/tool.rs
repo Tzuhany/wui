@@ -26,14 +26,17 @@ use crate::message::Message;
 pub struct ToolCallId(String);
 
 impl ToolCallId {
+    /// Create a new `ToolCallId`.
     pub fn new(s: impl Into<String>) -> Self {
         Self(s.into())
     }
 
+    /// Return the inner string slice.
     pub fn as_str(&self) -> &str {
         &self.0
     }
 
+    /// Consume and return the inner `String`.
     pub fn into_inner(self) -> String {
         self.0
     }
@@ -181,6 +184,8 @@ pub enum InterruptBehavior {
 }
 
 /// A permission-matching closure returned by [`Tool::permission_matcher`].
+///
+/// Tests whether a permission rule pattern matches a specific tool invocation.
 pub type PermissionMatcher = Box<dyn Fn(&str) -> bool + Send + Sync>;
 
 // ── Tool Trait ───────────────────────────────────────────────────────────────
@@ -296,6 +301,7 @@ pub struct ToolCtx {
 }
 
 impl ToolCtx {
+    /// Send an incremental progress update to the stream.
     pub fn report(&self, msg: impl Into<String>) {
         (self.on_progress)(msg.into());
     }
@@ -449,10 +455,12 @@ impl ToolOutput {
 
     // ── Accessors ─────────────────────────────────────────────────────────
 
+    /// `true` when the tool succeeded (no failure).
     pub fn is_ok(&self) -> bool {
         self.failure.is_none()
     }
 
+    /// `true` when the tool failed.
     pub fn is_error(&self) -> bool {
         self.failure.is_some()
     }
@@ -527,6 +535,7 @@ pub struct ContextInjection {
 }
 
 impl ContextInjection {
+    /// Create a new context injection with the given text.
     pub fn new(text: impl Into<String>) -> Self {
         Self { text: text.into() }
     }
@@ -897,6 +906,7 @@ impl<T: TypedTool> Tool for T {
     }
 
     fn meta(&self, input: &Value) -> ToolMeta {
+        // Parse takes ownership; clone is required here.
         match T::Input::parse(input.clone()) {
             Ok(parsed) => TypedTool::meta(self, &parsed),
             Err(_) => ToolMeta::default(),
@@ -904,6 +914,7 @@ impl<T: TypedTool> Tool for T {
     }
 
     fn executor_hints(&self, input: &Value) -> ExecutorHints {
+        // Parse takes ownership; clone is required here.
         match T::Input::parse(input.clone()) {
             Ok(parsed) => TypedTool::executor_hints(self, &parsed),
             Err(_) => ExecutorHints::default(),

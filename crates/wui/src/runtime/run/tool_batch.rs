@@ -8,7 +8,7 @@ use wui_core::event::AgentEvent;
 use wui_core::hook::HookDecision;
 use wui_core::message::{ContentBlock, Message};
 
-use super::auth::{self, AuthOutcome};
+use super::auth::{self, AuthOutcome, AuthRequest};
 use super::history::system_reminder_msg;
 use super::registry::ToolRegistry;
 use super::RunConfig;
@@ -34,9 +34,11 @@ pub(super) async fn authorize_and_dispatch(
             let (result, injections) = auth::authorize_tool(
                 &config_c,
                 &registry_c,
-                id.clone(),
-                name.clone(),
-                input,
+                AuthRequest {
+                    id: id.clone(),
+                    name: name.clone(),
+                    input,
+                },
                 &tx_c,
             )
             .await;

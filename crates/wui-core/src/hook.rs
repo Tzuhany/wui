@@ -49,14 +49,17 @@ use crate::tool::ToolOutput;
 pub struct SessionId(String);
 
 impl SessionId {
+    /// Create a new `SessionId`.
     pub fn new(s: impl Into<String>) -> Self {
         Self(s.into())
     }
 
+    /// Return the inner string slice.
     pub fn as_str(&self) -> &str {
         &self.0
     }
 
+    /// Consume and return the inner `String`.
     pub fn into_inner(self) -> String {
         self.0
     }
@@ -303,10 +306,12 @@ pub enum HookDecision {
 }
 
 impl HookDecision {
+    /// Allow the action to proceed.
     pub fn allow() -> Self {
         Self::Allow
     }
 
+    /// Allow the action but replace the tool input.
     pub fn mutate(input: serde_json::Value) -> Self {
         Self::Mutate { input }
     }
@@ -318,12 +323,14 @@ impl HookDecision {
         }
     }
 
+    /// Block the action with the given reason.
     pub fn block(reason: impl Into<String>) -> Self {
         Self::Block {
             reason: reason.into(),
         }
     }
 
+    /// `true` when this decision blocks the action.
     pub fn is_blocked(&self) -> bool {
         matches!(self, Self::Block { .. })
     }
@@ -343,6 +350,7 @@ pub struct DenyList {
 }
 
 impl DenyList {
+    /// Create a deny list from the given tool names.
     pub fn new(tools: impl IntoIterator<Item = impl Into<String>>) -> Self {
         Self {
             denied: tools.into_iter().map(Into::into).collect(),

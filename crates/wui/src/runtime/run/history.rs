@@ -47,14 +47,15 @@ pub(super) async fn assemble_history(
             .filter_map(|id| completed_map.remove(id))
             .collect();
 
+        // Single pass: register dynamic tools, emit artifacts, build
+        // result blocks, and collect injections in one traversal.
+        let mut result_blocks = Vec::new();
+        let mut injections = Vec::new();
         for done in &done_tools {
             for tool in &done.output.expose_tools {
                 s.dynamic_tools
                     .insert(tool.name().to_string(), Arc::clone(tool));
             }
-        }
-
-        for done in &done_tools {
             for artifact in &done.output.artifacts {
                 tx.send(AgentEvent::Artifact {
                     tool_id: done.id.clone(),
@@ -64,16 +65,18 @@ pub(super) async fn assemble_history(
                 .await
                 .ok();
             }
-        }
-
-        let result_blocks: Vec<ContentBlock> = done_tools
-            .iter()
-            .map(|done| ContentBlock::ToolResult {
+            result_blocks.push(ContentBlock::ToolResult {
                 tool_use_id: done.id.clone(),
                 content: done.output.content.clone(),
                 is_error: done.output.is_error(),
-            })
-            .collect();
+            });
+            injections.extend(
+                done.output
+                    .injections
+                    .iter()
+                    .map(|inj| system_reminder_msg(&inj.text)),
+            );
+        }
 
         if !result_blocks.is_empty() {
             s.messages.push(Message::with_id(
@@ -82,12 +85,7 @@ pub(super) async fn assemble_history(
                 result_blocks,
             ));
         }
-
-        for done in &done_tools {
-            for injection in &done.output.injections {
-                s.messages.push(system_reminder_msg(&injection.text));
-            }
-        }
+        s.messages.extend(injections);
     }
 
     tracing::debug!(

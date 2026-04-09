@@ -59,8 +59,11 @@ use super::registry::ToolRegistry;
 
 /// A tool call received from the LLM, ready for validation and execution.
 pub struct PendingTool {
+    /// Unique identifier assigned by the LLM for this tool call.
     pub id: ToolCallId,
+    /// Tool name as declared in the schema.
     pub name: String,
+    /// JSON arguments produced by the LLM.
     pub input: serde_json::Value,
     /// Snapshot of the conversation at submission time.
     /// `Arc` so the snapshot is shared across concurrent tools without copying.
@@ -69,9 +72,13 @@ pub struct PendingTool {
 
 /// A tool call that has finished executing.
 pub struct CompletedTool {
+    /// Unique identifier matching the original `ToolUse` block.
     pub id: ToolCallId,
+    /// Tool name as declared in the schema.
     pub name: String,
+    /// The tool's output (content, artifacts, injections, etc.).
     pub output: ToolOutput,
+    /// Wall-clock execution time in milliseconds.
     pub ms: u64,
     /// Number of invocations that were made.
     ///
@@ -331,6 +338,7 @@ async fn run_with_retries(
     let mut attempt = 0u32;
     loop {
         attempt += 1;
+        // call() takes ownership; clone is required for retry.
         let out = apply_output_limit(
             run_tool_safely(Arc::clone(&impl_), input.clone(), ctx, timeout).await,
             out_cfg.max_chars,

@@ -43,6 +43,7 @@ pub enum ProviderError {
 }
 
 impl ProviderError {
+    /// Whether this error is transient and worth retrying.
     pub fn is_retryable(&self) -> bool {
         matches!(
             self,
@@ -181,6 +182,7 @@ pub struct ToolDef {
 }
 
 impl ToolDef {
+    /// Build a `ToolDef` from a `Tool` implementation.
     pub fn from_tool(tool: &dyn Tool) -> Self {
         Self {
             name: tool.name().to_string(),

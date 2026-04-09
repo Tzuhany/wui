@@ -38,6 +38,13 @@ fn output_permission_denied(reason: impl Into<String>) -> wui_core::tool::ToolOu
     }
 }
 
+/// A tool call awaiting authorization.
+pub(super) struct AuthRequest {
+    pub id: ToolCallId,
+    pub name: String,
+    pub input: serde_json::Value,
+}
+
 /// Outcome of a concurrent authorization task.
 pub(super) enum AuthOutcome {
     Allowed {
@@ -56,11 +63,10 @@ pub(super) enum AuthOutcome {
 pub(super) async fn authorize_tool(
     config: &RunConfig,
     registry: &ToolRegistry,
-    id: ToolCallId,
-    name: String,
-    input: serde_json::Value,
+    req: AuthRequest,
     tx: &mpsc::Sender<AgentEvent>,
 ) -> (Result<serde_json::Value, CompletedTool>, Vec<Message>) {
+    let AuthRequest { id, name, input } = req;
     tracing::info!(tool.id = %id, tool.name = %name, "wui.tool.auth.start");
 
     // 1. Pre-tool hook — may allow, mutate, or block.
