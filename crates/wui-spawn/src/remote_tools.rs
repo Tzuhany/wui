@@ -12,9 +12,7 @@ use serde_json::{json, Value};
 
 use wui_core::tool::{Tool, ToolCtx, ToolInput, ToolMeta, ToolOutput};
 
-use crate::transport::{
-    AgentTransport, RemoteAgentStatus, RemoteJobHandle,
-};
+use crate::transport::{AgentTransport, RemoteAgentStatus, RemoteJobHandle};
 
 // ── RemoteDelegate ───────────────────────────────────────────────────────────
 
@@ -266,7 +264,11 @@ pub fn remote_tools(
     transport: Arc<dyn AgentTransport>,
 ) -> Vec<Arc<dyn Tool>> {
     vec![
-        Arc::new(RemoteDelegate::new(name, description, Arc::clone(&transport))),
+        Arc::new(RemoteDelegate::new(
+            name,
+            description,
+            Arc::clone(&transport),
+        )),
         Arc::new(RemoteStatus::new(Arc::clone(&transport))),
         Arc::new(RemoteAwait::new(Arc::clone(&transport))),
         Arc::new(RemoteCancel::new(transport)),

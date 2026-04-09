@@ -458,7 +458,10 @@ impl AgentBuilder {
         // Auto-calibrate the compression window from provider capabilities
         // when the user hasn't explicitly set a custom strategy.
         if !self.compress_explicitly_set {
-            let caps = self.config.provider.capabilities(self.config.model.as_deref());
+            let caps = self
+                .config
+                .provider
+                .capabilities(self.config.model.as_deref());
             if let Some(window) = caps.max_context_window {
                 self.config.compress = Arc::new(CompressPipeline {
                     window_tokens: window,

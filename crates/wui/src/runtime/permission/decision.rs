@@ -48,8 +48,13 @@ pub enum PermissionSource {
 
 #[derive(Debug)]
 pub enum PermissionVerdict {
-    Allowed { source: PermissionSource },
-    Denied { reason: String, source: PermissionSource },
+    Allowed {
+        source: PermissionSource,
+    },
+    Denied {
+        reason: String,
+        source: PermissionSource,
+    },
     NeedsApproval,
 }
 
@@ -97,16 +102,17 @@ impl PermissionRules {
         // 1. Structural: interaction-requiring tools can't run headlessly.
         if check.requires_interaction && matches!(mode, PermissionMode::Auto) {
             return PermissionVerdict::denied(
-                format!("tool '{name}' requires user interaction and cannot run in Auto mode; \
-                         switch to PermissionMode::Ask or disable this tool for headless runs"),
+                format!(
+                    "tool '{name}' requires user interaction and cannot run in Auto mode; \
+                         switch to PermissionMode::Ask or disable this tool for headless runs"
+                ),
                 PermissionSource::StructuralDeny,
                 name,
             );
         }
 
         // Evaluate static rules once (used in steps 2 and 4).
-        let static_rule =
-            self.evaluate_with_matcher(name, check.permission_key, check.matcher);
+        let static_rule = self.evaluate_with_matcher(name, check.permission_key, check.matcher);
 
         // 2. Static deny rules.
         if static_rule == Some(false) {
@@ -138,9 +144,7 @@ impl PermissionRules {
 
         // 6. Mode-based check.
         match mode {
-            PermissionMode::Auto => {
-                PermissionVerdict::allowed(PermissionSource::ModeAuto, name)
-            }
+            PermissionMode::Auto => PermissionVerdict::allowed(PermissionSource::ModeAuto, name),
             PermissionMode::Readonly if check.is_readonly => {
                 PermissionVerdict::allowed(PermissionSource::ModeReadonly, name)
             }
@@ -171,7 +175,9 @@ pub fn check(
         PermissionMode::Auto => PermissionOutcome::Allowed,
         PermissionMode::Readonly if tool_is_readonly => PermissionOutcome::Allowed,
         PermissionMode::Readonly => PermissionOutcome::Denied {
-            reason: format!("tool '{name}' has side effects and is not permitted in read-only mode"),
+            reason: format!(
+                "tool '{name}' has side effects and is not permitted in read-only mode"
+            ),
         },
         PermissionMode::Ask => PermissionOutcome::NeedsApproval,
         PermissionMode::Callback(f) => {

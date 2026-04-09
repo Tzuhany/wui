@@ -64,8 +64,8 @@ mod tool_batch;
 // Re-export public / pub(crate) items at the `run` module boundary so that
 // existing import paths (`super::run::run`, `super::run::RunConfig`, etc.)
 // continue to resolve unchanged.
-pub use provider::RetryPolicy;
 pub(crate) use config::RunConfig;
+pub use provider::RetryPolicy;
 pub(crate) use stream::run;
 pub use stream::RunStream;
 

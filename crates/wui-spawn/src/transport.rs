@@ -147,9 +147,7 @@ impl AgentTransport for LocalTransport {
             crate::JobStatus::Running => RemoteAgentStatus::Running,
             crate::JobStatus::Done(_) => RemoteAgentStatus::Done,
             crate::JobStatus::Failed(e) => RemoteAgentStatus::Failed { error: e },
-            crate::JobStatus::NotFound => {
-                return Err(TransportError::NotFound(handle.id.clone()))
-            }
+            crate::JobStatus::NotFound => return Err(TransportError::NotFound(handle.id.clone())),
         })
     }
 
@@ -162,14 +160,10 @@ impl AgentTransport for LocalTransport {
                 output: Some(text),
             },
             crate::JobStatus::Failed(e) => RemoteAgentResult {
-                status: RemoteAgentStatus::Failed {
-                    error: e.clone(),
-                },
+                status: RemoteAgentStatus::Failed { error: e.clone() },
                 output: Some(e),
             },
-            crate::JobStatus::NotFound => {
-                return Err(TransportError::NotFound(handle.id.clone()))
-            }
+            crate::JobStatus::NotFound => return Err(TransportError::NotFound(handle.id.clone())),
             crate::JobStatus::Running => RemoteAgentResult {
                 status: RemoteAgentStatus::Running,
                 output: None,

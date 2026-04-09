@@ -86,7 +86,10 @@ pub(super) async fn emergency_compress(
     messages: &mut Vec<Message>,
     tx: &mpsc::Sender<AgentEvent>,
 ) -> bool {
-    tracing::warn!(messages_before = messages.len(), "wui.compress.emergency — provider rejected prompt as too long");
+    tracing::warn!(
+        messages_before = messages.len(),
+        "wui.compress.emergency — provider rejected prompt as too long"
+    );
     let pressure_before = config.compress.pressure(messages);
     let result = config
         .compress

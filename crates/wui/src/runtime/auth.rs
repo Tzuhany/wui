@@ -67,7 +67,11 @@ pub(super) async fn authorize_tool(
     let input = match config.hooks.pre_tool_use(&name, &input).await {
         HookDecision::Block { reason } => {
             return (
-                Err(CompletedTool::immediate(id, name, output_hook_blocked(reason))),
+                Err(CompletedTool::immediate(
+                    id,
+                    name,
+                    output_hook_blocked(reason),
+                )),
                 vec![],
             )
         }
@@ -87,7 +91,11 @@ pub(super) async fn authorize_tool(
         PermissionVerdict::Denied { reason, source } => {
             tracing::debug!(tool = %name, ?source, %reason, "permission denied");
             return (
-                Err(CompletedTool::immediate(id, name, output_permission_denied(reason))),
+                Err(CompletedTool::immediate(
+                    id,
+                    name,
+                    output_permission_denied(reason),
+                )),
                 vec![],
             );
         }
@@ -100,7 +108,11 @@ pub(super) async fn authorize_tool(
     match permission::check(&config.permission, &ctrl_req, tool_is_readonly, &input) {
         PermissionOutcome::Allowed => (Ok(input), vec![]),
         PermissionOutcome::Denied { reason } => (
-            Err(CompletedTool::immediate(id, name, output_permission_denied(reason))),
+            Err(CompletedTool::immediate(
+                id,
+                name,
+                output_permission_denied(reason),
+            )),
             vec![],
         ),
         PermissionOutcome::NeedsApproval => {
@@ -198,12 +210,16 @@ async fn await_approval(
 
     let result = match response.decision {
         ControlDecision::Deny { reason } => Err(CompletedTool::immediate(
-            id, name, output_permission_denied(reason),
+            id,
+            name,
+            output_permission_denied(reason),
         )),
         ControlDecision::DenyAlways { reason } => {
             config.session_perms.set_always_deny(name.clone()).await;
             Err(CompletedTool::immediate(
-                id, name, output_permission_denied(reason),
+                id,
+                name,
+                output_permission_denied(reason),
             ))
         }
         ControlDecision::ApproveAlways => {

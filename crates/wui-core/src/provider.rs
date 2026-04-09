@@ -101,17 +101,35 @@ impl ProviderCapabilities {
     }
 
     /// Set whether tool calling is supported.
-    pub fn with_tool_calling(mut self, v: bool) -> Self { self.tool_calling = v; self }
+    pub fn with_tool_calling(mut self, v: bool) -> Self {
+        self.tool_calling = v;
+        self
+    }
     /// Set whether extended thinking is supported.
-    pub fn with_thinking(mut self, v: bool) -> Self { self.thinking = v; self }
+    pub fn with_thinking(mut self, v: bool) -> Self {
+        self.thinking = v;
+        self
+    }
     /// Set whether image input is supported.
-    pub fn with_image_input(mut self, v: bool) -> Self { self.image_input = v; self }
+    pub fn with_image_input(mut self, v: bool) -> Self {
+        self.image_input = v;
+        self
+    }
     /// Set whether document input is supported.
-    pub fn with_document_input(mut self, v: bool) -> Self { self.document_input = v; self }
+    pub fn with_document_input(mut self, v: bool) -> Self {
+        self.document_input = v;
+        self
+    }
     /// Set whether structured output is supported.
-    pub fn with_structured_output(mut self, v: bool) -> Self { self.structured_output = v; self }
+    pub fn with_structured_output(mut self, v: bool) -> Self {
+        self.structured_output = v;
+        self
+    }
     /// Set the maximum context window size in tokens.
-    pub fn with_max_context_window(mut self, tokens: usize) -> Self { self.max_context_window = Some(tokens); self }
+    pub fn with_max_context_window(mut self, tokens: usize) -> Self {
+        self.max_context_window = Some(tokens);
+        self
+    }
 }
 
 // ── TokenEstimate ────────────────────────────────────────────────────────────

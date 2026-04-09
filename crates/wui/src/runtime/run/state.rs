@@ -6,11 +6,11 @@ use wui_core::hook::HookDecision;
 use wui_core::message::{ContentBlock, Message};
 use wui_core::tool::ToolCallId;
 
-use crate::runtime::executor::CompletedTool;
-use crate::runtime::registry::ToolRegistry;
 use super::history::{last_assistant_text, system_reminder_msg};
 use super::tool_batch::EmissionGuard;
 use super::RunConfig;
+use crate::runtime::executor::CompletedTool;
+use crate::runtime::registry::ToolRegistry;
 
 // ── RunState ────────────────────────────────────────────────────────────────
 
@@ -146,7 +146,9 @@ impl RunState {
                     s.total_usage = cp.total_usage;
                 }
                 Ok(None) => tracing::debug!(run_id, "no checkpoint found — starting fresh"),
-                Err(e) => tracing::warn!(run_id, error = %e, "checkpoint load failed — starting fresh"),
+                Err(e) => {
+                    tracing::warn!(run_id, error = %e, "checkpoint load failed — starting fresh")
+                }
             }
         }
         s

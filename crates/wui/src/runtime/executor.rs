@@ -48,8 +48,8 @@ use tracing::Instrument as _;
 
 use wui_core::event::AgentEvent;
 use wui_core::message::Message;
-use wui_core::tool::{Tool, ToolCtx, ToolOutput};
 use wui_core::tool::ToolCallId;
+use wui_core::tool::{Tool, ToolCtx, ToolOutput};
 
 pub use wui_core::tool::ExecutorHints;
 
@@ -285,19 +285,22 @@ impl ToolExecutor {
             tool.name = %name,
             tool.concurrent = true,
         );
-        self.pending.spawn(async move {
-            let start = Instant::now();
-            let ctx = make_ctx(cancel, messages, tx, id.clone(), name.clone());
-            let out_cfg = OutputConfig {
-                tool_id: &id,
-                max_chars: hints.max_output_chars,
-                max_retries: hints.max_retries,
-                result_store: result_store.as_deref(),
-            };
-            let (out, attempts) = run_with_retries(impl_, input, &ctx, timeout, &out_cfg).await;
-            let ms = start.elapsed().as_millis() as u64;
-            (id, name, out, ms, attempts)
-        }.instrument(span));
+        self.pending.spawn(
+            async move {
+                let start = Instant::now();
+                let ctx = make_ctx(cancel, messages, tx, id.clone(), name.clone());
+                let out_cfg = OutputConfig {
+                    tool_id: &id,
+                    max_chars: hints.max_output_chars,
+                    max_retries: hints.max_retries,
+                    result_store: result_store.as_deref(),
+                };
+                let (out, attempts) = run_with_retries(impl_, input, &ctx, timeout, &out_cfg).await;
+                let ms = start.elapsed().as_millis() as u64;
+                (id, name, out, ms, attempts)
+            }
+            .instrument(span),
+        );
     }
 }
 

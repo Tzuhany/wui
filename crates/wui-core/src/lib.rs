@@ -31,15 +31,15 @@ pub mod prelude {
         ControlRequest, ControlResponse, RunStopReason, RunSummary, StopReason, StreamEvent,
         TokenUsage,
     };
+    pub use crate::hook::SessionId;
     pub use crate::hook::{DenyList, Hook, HookDecision, HookEvent};
     pub use crate::message::{ContentBlock, DocumentSource, ImageSource, Message, Role};
     pub use crate::provider::{
         ChatRequest, Provider, ProviderCapabilities, ProviderError, TokenEstimate, ToolDef,
     };
+    pub use crate::tool::ToolCallId;
     pub use crate::tool::{
         Artifact, ArtifactContent, ArtifactKind, ContextInjection, FailureKind, Tool, ToolArgs,
         ToolCtx, ToolInput, ToolInputError, ToolOutput, TypedTool,
     };
-    pub use crate::hook::SessionId;
-    pub use crate::tool::ToolCallId;
 }

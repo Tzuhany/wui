@@ -160,4 +160,3 @@ pub(super) fn replace_last_assistant_text(messages: &mut [Message], new_text: St
         }
     }
 }
-

@@ -48,8 +48,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::runtime::{run, HookRunner, RunConfig, SessionPermissions, SessionStore, StoredSession};
 use wui_core::event::{AgentEvent, RunSummary};
-use wui_core::message::Message;
 use wui_core::hook::SessionId;
+use wui_core::message::Message;
 
 use super::agent::build_run_config;
 use super::builder::AgentConfig;
