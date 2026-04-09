@@ -7,7 +7,7 @@
 use serde_json::{json, Value};
 
 use wui_core::message::{ContentBlock, ImageSource, Message, Role};
-use wui_core::provider::{ChatRequest, ToolDef};
+use wui_core::provider::{ChatRequest, ResponseFormat, ToolDef};
 
 pub(crate) fn build_request_body(req: &ChatRequest, default_model: &str) -> Value {
     let mut body = json!({
@@ -21,6 +21,21 @@ pub(crate) fn build_request_body(req: &ChatRequest, default_model: &str) -> Valu
 
     if let Some(t) = req.temperature {
         body["temperature"] = json!(t);
+    }
+
+    if let Some(ref fmt) = req.response_format {
+        match fmt {
+            ResponseFormat::JsonSchema { name, schema } => {
+                body["response_format"] = json!({
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": name,
+                        "schema": schema,
+                        "strict": true,
+                    },
+                });
+            }
+        }
     }
 
     body
@@ -377,6 +392,7 @@ mod tests {
             }],
             thinking_budget: None,
             cache_boundary: None,
+            response_format: None,
         };
 
         let body = build_request_body(&req, "gpt-4");

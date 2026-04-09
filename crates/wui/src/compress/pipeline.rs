@@ -540,6 +540,7 @@ impl CompressPipeline {
             tools: vec![],
             thinking_budget: None,
             cache_boundary: None,
+            response_format: None,
         };
 
         let stream = provider.stream(summary_req).await.ok()?;

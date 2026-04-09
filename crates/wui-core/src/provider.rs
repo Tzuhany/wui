@@ -15,6 +15,8 @@ use async_trait::async_trait;
 use futures::Stream;
 use serde_json::Value;
 
+use serde::{Deserialize, Serialize};
+
 use crate::event::StreamEvent;
 use crate::message::Message;
 use crate::tool::Tool;
@@ -154,6 +156,28 @@ pub struct TokenEstimate {
     pub exact: bool,
 }
 
+// ── ResponseFormat ───────────────────────────────────────────────────────────
+
+/// Response format hint for providers that support structured output.
+///
+/// When set on a [`ChatRequest`], providers that support structured output
+/// (see [`ProviderCapabilities::structured_output`]) will constrain the
+/// model's response accordingly. Providers that do not support it silently
+/// ignore the field — the caller should fall back to prompt-based extraction.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResponseFormat {
+    /// The provider should return valid JSON conforming to the given schema.
+    ///
+    /// Maps to OpenAI's `response_format: { type: "json_schema", json_schema: { name, schema, strict: true } }`.
+    JsonSchema {
+        /// A short name for the schema (e.g. the Rust type name).
+        name: String,
+        /// The JSON Schema that the response must conform to.
+        schema: serde_json::Value,
+    },
+}
+
 // ── ChatRequest + ToolDef ────────────────────────────────────────────────────
 
 /// Everything a Provider needs to produce a response.
@@ -174,6 +198,12 @@ pub struct ChatRequest {
     /// may use this to split the system prompt into a cached prefix and a
     /// dynamic suffix. `None` means no boundary (single block).
     pub cache_boundary: Option<usize>,
+    /// Requested response format. `None` means natural language (default).
+    ///
+    /// When set, providers that support structured output will constrain the
+    /// model's response to match the specified format. Providers that do not
+    /// support structured output ignore this field.
+    pub response_format: Option<ResponseFormat>,
 }
 
 /// A tool definition as sent to the LLM.

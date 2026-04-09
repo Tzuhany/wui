@@ -5,8 +5,9 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 
 use wui_core::event::AgentEvent;
-use wui_core::message::{ContentBlock, Message, Role};
-use wui_core::tool::ToolCallId;
+use wui_core::message::{ContentBlock, ImageSource, Message, Role};
+use wui_core::provider::ProviderCapabilities;
+use wui_core::tool::{Artifact, ArtifactContent, ArtifactKind, ToolCallId};
 
 use super::checkpoint::RunCheckpoint;
 use super::{CompletedTool, IterationCtx, RunConfig, RunState};
@@ -41,10 +42,12 @@ pub(super) async fn assemble_history(
     s.messages.extend(auth_injections);
     append_assistant_message(&mut s.messages, text_buf, thinking_buf, assistant_blocks);
 
+    let caps = config.provider.capabilities(config.model.as_deref());
     let tool_update = collect_tool_history(
         ordered_completed_tools(submission_order, completed_map),
         s,
         tx,
+        &caps,
     )
     .await;
     append_tool_history(&mut s.messages, tool_update);
@@ -108,6 +111,7 @@ async fn collect_tool_history(
     done_tools: Vec<CompletedTool>,
     s: &mut RunState,
     tx: &mpsc::Sender<AgentEvent>,
+    caps: &ProviderCapabilities,
 ) -> ToolHistoryUpdate {
     let mut update = ToolHistoryUpdate {
         result_blocks: Vec::new(),
@@ -133,6 +137,15 @@ async fn collect_tool_history(
             content: done.output.content.clone(),
             is_error: done.output.is_error(),
         });
+
+        // Inject image artifacts as content blocks so the LLM can see them
+        // in the next turn. Only when the provider accepts image input.
+        if caps.image_input {
+            for block in artifact_image_blocks(&done.output.artifacts) {
+                update.result_blocks.push(block);
+            }
+        }
+
         update.injections.extend(
             done.output
                 .injections
@@ -142,6 +155,59 @@ async fn collect_tool_history(
     }
 
     update
+}
+
+/// Convert image artifacts into `ContentBlock::Image` blocks suitable for
+/// inclusion in the message history.
+///
+/// Only artifacts that can be meaningfully represented as vision input are
+/// converted:
+/// - `ArtifactKind::Image` with inline data → base-64 image block.
+/// - `ArtifactKind::Image` with a reference URI → URL image block.
+/// - File artifacts whose MIME type starts with `image/` → same logic.
+///
+/// Non-image artifacts (JSON, charts without image data, etc.) are skipped.
+fn artifact_image_blocks(artifacts: &[Artifact]) -> Vec<ContentBlock> {
+    let mut blocks = Vec::new();
+
+    for artifact in artifacts {
+        let is_image_kind = matches!(artifact.kind, ArtifactKind::Image);
+        let is_image_mime = artifact
+            .mime_type
+            .as_deref()
+            .is_some_and(|m| m.starts_with("image/"));
+
+        if !is_image_kind && !is_image_mime {
+            continue;
+        }
+
+        match &artifact.content {
+            ArtifactContent::Inline { data } => {
+                // Determine MIME type: explicit > inferred from kind.
+                let media_type = artifact
+                    .mime_type
+                    .clone()
+                    .unwrap_or_else(|| "image/png".to_string());
+
+                use base64::Engine;
+                let encoded = base64::engine::general_purpose::STANDARD.encode(data);
+
+                blocks.push(ContentBlock::Image {
+                    source: ImageSource::Base64 {
+                        media_type,
+                        data: encoded,
+                    },
+                });
+            }
+            ArtifactContent::Reference { uri } => {
+                blocks.push(ContentBlock::Image {
+                    source: ImageSource::Url(uri.clone()),
+                });
+            }
+        }
+    }
+
+    blocks
 }
 
 fn append_tool_history(messages: &mut Vec<Message>, update: ToolHistoryUpdate) {

@@ -118,6 +118,11 @@ pub struct AgentConfig {
     pub(crate) max_spawn_depth: u32,
     /// Optional predicate that filters which tools are sent to the provider.
     pub(crate) tool_filter: Option<ToolFilterFn>,
+    /// Requested response format for structured output.
+    ///
+    /// Set automatically by `run_typed()` when the provider supports it.
+    /// `None` means natural language (default).
+    pub(crate) response_format: Option<wui_core::provider::ResponseFormat>,
 }
 
 /// Fluent builder for `Agent`.
@@ -161,6 +166,7 @@ impl AgentBuilder {
                 result_store: None,
                 max_spawn_depth: 5,
                 tool_filter: None,
+                response_format: None,
             },
         }
     }

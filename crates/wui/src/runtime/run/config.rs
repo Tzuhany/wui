@@ -79,4 +79,11 @@ pub(crate) struct RunConfig {
 
     /// Optional predicate that filters which tools are sent to the provider.
     pub(crate) tool_filter: Option<ToolFilterFn>,
+
+    /// Requested response format for structured output.
+    ///
+    /// When set, the engine includes this in every `ChatRequest` so that
+    /// providers supporting native JSON mode can constrain the model's output.
+    /// Providers that do not support structured output ignore it.
+    pub(crate) response_format: Option<wui_core::provider::ResponseFormat>,
 }

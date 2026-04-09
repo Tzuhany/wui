@@ -131,19 +131,48 @@ impl Agent {
     {
         // Generate a JSON Schema for T so we can inject it into the prompt.
         let schema_root = schemars::gen::SchemaGenerator::default().into_root_schema_for::<T>();
+        let schema_json =
+            serde_json::to_value(&schema_root).unwrap_or_else(|_| serde_json::json!({}));
         let schema_str =
-            serde_json::to_string_pretty(&schema_root).unwrap_or_else(|_| "{}".to_string());
+            serde_json::to_string_pretty(&schema_json).unwrap_or_else(|_| "{}".to_string());
 
-        // Create a derived agent whose system prompt includes the format instruction.
-        // This does not mutate the original agent — we clone the Arc'd config and
-        // add the instruction to the copy.
+        // Check whether the provider supports native structured output.
+        let caps = self
+            .config
+            .provider
+            .capabilities(self.config.model.as_deref());
+        let use_native = caps.structured_output;
+
+        // Create a derived agent whose system prompt includes the format
+        // instruction. This does not mutate the original agent — we clone the
+        // Arc'd config and add the instruction to the copy.
         let mut config = (*self.config).clone();
-        let instruction = format!(
-            "\n\nIMPORTANT: Your response must be a single valid JSON value with no \
-             explanation, no markdown code fences, and no surrounding text. \
-             The JSON must conform to this schema:\n{schema_str}"
-        );
-        config.system.push_str(&instruction);
+
+        if use_native {
+            // Provider supports JSON mode — set response_format and use a
+            // lighter system instruction (the schema is enforced by the API).
+            let type_name = std::any::type_name::<T>()
+                .rsplit("::")
+                .next()
+                .unwrap_or("Response");
+            config.response_format = Some(wui_core::provider::ResponseFormat::JsonSchema {
+                name: type_name.to_string(),
+                schema: schema_json,
+            });
+            config.system.push_str(
+                "\n\nIMPORTANT: Respond with a single valid JSON value. \
+                 No explanation, no markdown code fences, no surrounding text.",
+            );
+        } else {
+            // Fall back to prompt-based extraction with the full schema.
+            let instruction = format!(
+                "\n\nIMPORTANT: Your response must be a single valid JSON value with no \
+                 explanation, no markdown code fences, and no surrounding text. \
+                 The JSON must conform to this schema:\n{schema_str}"
+            );
+            config.system.push_str(&instruction);
+        }
+
         let typed_agent = Agent {
             config: Arc::new(config),
         };
@@ -307,6 +336,7 @@ pub(crate) fn build_run_config(
         cache_boundary,
         spawn_depth: 0,
         tool_filter: config.tool_filter.clone(),
+        response_format: config.response_format.clone(),
     }
 }
 

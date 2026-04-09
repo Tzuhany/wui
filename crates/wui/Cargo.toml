@@ -20,6 +20,7 @@ full      = ["anthropic", "openai"]
 wui-core    = { workspace = true }
 
 anyhow       = { workspace = true }
+base64       = "0.22"
 async-trait  = { workspace = true }
 futures      = { workspace = true }
 serde        = { workspace = true }

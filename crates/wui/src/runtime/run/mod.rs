@@ -236,6 +236,7 @@ fn build_chat_request(config: &RunConfig, s: &RunState, registry: &ToolRegistry)
         },
         thinking_budget: config.thinking_budget,
         cache_boundary: s.cache_boundary,
+        response_format: config.response_format.clone(),
     }
 }
 
@@ -571,6 +572,7 @@ mod tests {
             cache_boundary: None,
             spawn_depth: 0,
             tool_filter: None,
+            response_format: None,
         })
     }
 
