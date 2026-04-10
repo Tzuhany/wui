@@ -1,7 +1,25 @@
 // ============================================================================
-// wui-spawn — agent delegation for Wui supervisors.
+// wui-spawn — background agent delegation for Wui supervisors.
 //
-// This crate provides two delegation patterns:
+// Use this crate when a sub-task is long-running or when the supervisor needs
+// to continue doing other work while waiting for the result. The supervisor
+// spawns a sub-agent as a background job (non-blocking, returns a job ID
+// immediately) and polls status or awaits the result in a later turn.
+//
+// ── wui-spawn vs SubAgent ────────────────────────────────────────────────────
+//
+// `SubAgent` (wui crate, AgentBuilder::sub_agent): wraps one Agent as a
+// synchronous Tool. The supervisor calls it, blocks until the sub-agent
+// finishes, and the result appears in the same turn. Use for short tasks
+// where the result is needed immediately.
+//
+// `wui-spawn` (this crate): background job registry. The supervisor fires and
+// returns a job ID, then checks status or awaits the result across separate
+// turns. Use for long-running tasks or when the supervisor should do parallel
+// work while waiting. Supports pluggable transports for cross-process
+// delegation.
+//
+// ── Delegation patterns ──────────────────────────────────────────────────────
 //
 // 1. **In-process** (direct): spawn sub-agents as background tokio tasks.
 //    Use `AgentRegistry::delegation_tools()` for the simplest setup.

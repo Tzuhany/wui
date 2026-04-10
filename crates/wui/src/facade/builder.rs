@@ -332,10 +332,10 @@ impl AgentBuilder {
     ///     .build();
     ///
     /// let supervisor = Agent::builder(provider)
-    ///     .spawn_agent("research", "Search the web and summarise findings.", researcher)
+    ///     .sub_agent("research", "Search the web and summarise findings.", researcher)
     ///     .build();
     /// ```
-    pub fn spawn_agent(
+    pub fn sub_agent(
         self,
         name: impl Into<String>,
         description: impl Into<String>,

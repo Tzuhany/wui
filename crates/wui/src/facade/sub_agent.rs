@@ -38,7 +38,7 @@
 //       .build();
 //
 //   let supervisor = Agent::builder(provider)
-//       .spawn_agent("research", "Search the web and summarise findings.", researcher)
+//       .sub_agent("research", "Search the web and summarise findings.", researcher)
 //       .build();
 //
 // Or directly:

@@ -27,8 +27,18 @@ pub enum PermissionMode {
     ///
     /// The callback receives the tool name and raw input JSON.
     /// Return `true` to allow, `false` to deny.
-    /// Unlike `Ask`, the callback is synchronous and cannot upgrade to
-    /// `approve_always` — use `Ask` with `ControlHandle` for that.
+    ///
+    /// The callback is synchronous: it runs inline, does not suspend the event
+    /// loop, and emits no `AgentEvent::Control`. There is no session memory —
+    /// every tool call re-evaluates the callback from scratch.
+    ///
+    /// Use `Callback` for automated servers or embedded hosts that apply a
+    /// fixed allow/deny policy without user interaction.
+    ///
+    /// Use `Ask` instead when you need any of:
+    /// - `approve_always` / `deny_always` (session-scoped memory)
+    /// - async decision logic (e.g. database or network lookup)
+    /// - a running event consumer that handles `AgentEvent::Control`
     #[allow(clippy::type_complexity)]
     Callback(Arc<dyn Fn(&str, &serde_json::Value) -> bool + Send + Sync>),
 }
