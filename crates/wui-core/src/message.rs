@@ -221,3 +221,113 @@ pub enum Role {
     Assistant,
     System,
 }
+
+// ── TurnInput ─────────────────────────────────────────────────────────────────
+
+/// The user's input for a single conversation turn.
+///
+/// Accepted by [`Session::send`], [`Agent::stream`], and [`Agent::run`].
+/// Converts implicitly from `&str`, `String`, a single [`ContentBlock`], or a
+/// `Vec<ContentBlock>`, so existing call sites require no changes.
+///
+/// Use the named constructors when you need richer input — multimodal prompts,
+/// document attachments, or arbitrary block sequences.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // Plain text — no change from before.
+/// session.send("Hello!").await;
+///
+/// // Text with an image.
+/// session.send(TurnInput::text_with_image(
+///     "What's in this screenshot?",
+///     ImageSource::Url("https://example.com/shot.png".into()),
+/// )).await;
+///
+/// // Arbitrary blocks.
+/// session.send(vec![
+///     ContentBlock::Text { text: "Summarise this PDF:".into() },
+///     ContentBlock::Document { source: DocumentSource::Base64 { .. }, title: None },
+/// ]).await;
+/// ```
+pub struct TurnInput {
+    pub(crate) blocks: Vec<ContentBlock>,
+}
+
+impl TurnInput {
+    /// A turn containing a single text block.
+    pub fn text(s: impl Into<String>) -> Self {
+        Self {
+            blocks: vec![ContentBlock::Text { text: s.into() }],
+        }
+    }
+
+    /// A turn built from an arbitrary sequence of content blocks.
+    pub fn blocks(blocks: Vec<ContentBlock>) -> Self {
+        Self { blocks }
+    }
+
+    /// Text with an inline image — the standard multimodal input pattern.
+    pub fn text_with_image(text: impl Into<String>, source: ImageSource) -> Self {
+        Self {
+            blocks: vec![
+                ContentBlock::Text { text: text.into() },
+                ContentBlock::Image { source },
+            ],
+        }
+    }
+
+    /// Text with an attached document (e.g., a PDF).
+    pub fn text_with_document(
+        text: impl Into<String>,
+        source: DocumentSource,
+        title: Option<String>,
+    ) -> Self {
+        Self {
+            blocks: vec![
+                ContentBlock::Text { text: text.into() },
+                ContentBlock::Document { source, title },
+            ],
+        }
+    }
+
+    /// Convert into a user [`Message`].
+    pub fn into_message(self) -> Message {
+        Message {
+            id: uuid::Uuid::new_v4().to_string(),
+            role: Role::User,
+            content: self.blocks,
+        }
+    }
+}
+
+impl From<String> for TurnInput {
+    fn from(s: String) -> Self {
+        Self::text(s)
+    }
+}
+
+impl From<&str> for TurnInput {
+    fn from(s: &str) -> Self {
+        Self::text(s)
+    }
+}
+
+impl From<&String> for TurnInput {
+    fn from(s: &String) -> Self {
+        Self::text(s.as_str())
+    }
+}
+
+impl From<Vec<ContentBlock>> for TurnInput {
+    fn from(blocks: Vec<ContentBlock>) -> Self {
+        Self::blocks(blocks)
+    }
+}
+
+impl From<ContentBlock> for TurnInput {
+    fn from(block: ContentBlock) -> Self {
+        Self::blocks(vec![block])
+    }
+}

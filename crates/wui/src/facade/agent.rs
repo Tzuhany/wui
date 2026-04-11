@@ -21,7 +21,7 @@ use crate::runtime::{
     run, HookRunner, RunConfig, RunStream, SessionPermissions, ToolRegistry, ToolSearch,
 };
 use wui_core::event::{AgentError, AgentEvent};
-use wui_core::message::Message;
+use wui_core::message::TurnInput;
 use wui_core::provider::Provider;
 
 use super::builder::{AgentBuilder, AgentConfig};
@@ -65,10 +65,10 @@ impl Agent {
     /// For tool visibility, streaming output, or HITL, use `stream()` directly.
     pub async fn run(
         &self,
-        prompt: impl Into<String>,
+        input: impl Into<TurnInput>,
     ) -> Result<String, wui_core::event::AgentError> {
         let mut text = String::new();
-        let mut stream = self.stream(prompt);
+        let mut stream = self.stream(input);
 
         while let Some(event) = stream.next().await {
             match event {
@@ -97,8 +97,8 @@ impl Agent {
     /// Dropping the stream cancels the run. Call `stream.cancel()` for
     /// explicit cancellation or `stream.cancel_token()` to share the
     /// signal with other tasks.
-    pub fn stream(&self, prompt: impl Into<String>) -> RunStream {
-        let messages = vec![Message::user(prompt.into())];
+    pub fn stream(&self, input: impl Into<TurnInput>) -> RunStream {
+        let messages = vec![input.into().into_message()];
         run(Arc::new(self.make_run_config()), messages)
     }
 
@@ -124,7 +124,7 @@ impl Agent {
     /// ```
     pub async fn run_typed<T>(
         &self,
-        prompt: impl Into<String>,
+        input: impl Into<TurnInput>,
     ) -> Result<T, wui_core::event::AgentError>
     where
         T: serde::de::DeserializeOwned + JsonSchema,
@@ -177,7 +177,7 @@ impl Agent {
             config: Arc::new(config),
         };
 
-        let text = typed_agent.run(prompt).await?;
+        let text = typed_agent.run(input).await?;
 
         // Strip markdown fences (```json ... ```) that some models emit
         // despite being asked not to.
@@ -208,10 +208,10 @@ impl Agent {
     ///     .await?;
     /// // result == "4"
     /// ```
-    pub fn run_structured(&self, prompt: impl Into<String>) -> StructuredRun<'_> {
+    pub fn run_structured(&self, input: impl Into<TurnInput>) -> StructuredRun<'_> {
         StructuredRun {
             agent: self,
-            prompt: prompt.into(),
+            input: input.into(),
         }
     }
 
@@ -234,10 +234,10 @@ impl Agent {
 
     pub(crate) fn stream_with_spawn_depth(
         &self,
-        prompt: impl Into<String>,
+        input: impl Into<TurnInput>,
         spawn_depth: u32,
     ) -> RunStream {
-        let messages = vec![Message::user(prompt.into())];
+        let messages = vec![input.into().into_message()];
         let mut config = self.make_run_config();
         config.spawn_depth = spawn_depth;
         run(Arc::new(config), messages)
@@ -378,7 +378,7 @@ pub(crate) fn build_registry(
 /// [`Self::extract_as`] to drive the run and capture the result.
 pub struct StructuredRun<'a> {
     pub(crate) agent: &'a Agent,
-    pub(crate) prompt: String,
+    pub(crate) input: TurnInput,
 }
 
 impl<'a> StructuredRun<'a> {
@@ -432,7 +432,7 @@ impl<'a> StructuredRun<'a> {
 
     async fn collect_text(self) -> Result<String, AgentError> {
         let mut text = String::new();
-        let mut stream = self.agent.stream(self.prompt);
+        let mut stream = self.agent.stream(self.input);
 
         while let Some(event) = stream.next().await {
             match event {
