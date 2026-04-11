@@ -7,10 +7,13 @@
 // ============================================================================
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+
+use wui_core::runner::AgentRunner;
 
 // ── Error ────────────────────────────────────────────────────────────────────
 
@@ -98,7 +101,7 @@ pub trait AgentTransport: Send + Sync + 'static {
 /// ```
 pub struct LocalTransport {
     registry: crate::AgentRegistry,
-    agents: HashMap<String, wui::Agent>,
+    agents: HashMap<String, Arc<dyn AgentRunner>>,
 }
 
 impl LocalTransport {
@@ -110,8 +113,8 @@ impl LocalTransport {
     }
 
     /// Register a named agent for in-process delegation.
-    pub fn register(&mut self, name: impl Into<String>, agent: wui::Agent) -> &mut Self {
-        self.agents.insert(name.into(), agent);
+    pub fn register(&mut self, name: impl Into<String>, agent: impl AgentRunner) -> &mut Self {
+        self.agents.insert(name.into(), Arc::new(agent));
         self
     }
 }
@@ -133,7 +136,7 @@ impl AgentTransport for LocalTransport {
             .agents
             .get(agent_name)
             .ok_or_else(|| TransportError::NotFound(agent_name.to_string()))?;
-        let id = self.registry.spawn(agent, prompt).await;
+        let id = self.registry.spawn(Arc::clone(agent), prompt).await;
         Ok(RemoteJobHandle {
             id: id.to_string(),
             agent_name: agent_name.to_string(),

@@ -11,11 +11,13 @@
 // an extension for Wui, this is the only crate you need.
 // ============================================================================
 
+pub mod catalog;
 pub mod event;
 pub mod fmt;
 pub mod hook;
 pub mod message;
 pub mod provider;
+pub mod runner;
 pub mod tool;
 
 pub use wui_macros::ToolInput;

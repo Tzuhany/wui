@@ -73,6 +73,10 @@ pub use compress::{
 pub mod catalog;
 pub use catalog::{CatalogHit, SearchStrategy, StaticCatalog, TokenOverlapStrategy, ToolCatalog};
 
+// ── AgentRunner ───────────────────────────────────────────────────────────────
+
+pub use wui_core::runner::AgentRunner;
+
 // ── Prelude ───────────────────────────────────────────────────────────────────
 
 /// `use wui::prelude::*` to bring the most-used types into scope.

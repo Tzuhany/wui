@@ -69,7 +69,7 @@ impl AgentRegistry {
         &self,
         name: impl Into<String>,
         description: impl Into<String>,
-        agent: wui::Agent,
+        agent: impl wui_core::runner::AgentRunner,
     ) -> Vec<Arc<dyn wui_core::tool::Tool>> {
         let registry = Arc::new(self.clone());
         vec![

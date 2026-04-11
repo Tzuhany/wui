@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 use uuid::Uuid;
 
+use wui_core::runner::AgentRunner;
 use wui_core::tool::{Tool, ToolCtx, ToolInput, ToolMeta, ToolOutput};
 
 use crate::registry::{AgentRegistry, JobStatus};
@@ -13,7 +14,7 @@ use crate::registry::{AgentRegistry, JobStatus};
 pub struct DelegateAgent {
     tool_name: String,
     tool_desc: String,
-    agent: wui::Agent,
+    agent: Arc<dyn AgentRunner>,
     registry: Arc<AgentRegistry>,
 }
 
@@ -21,13 +22,13 @@ impl DelegateAgent {
     pub fn new(
         name: impl Into<String>,
         description: impl Into<String>,
-        agent: wui::Agent,
+        agent: impl AgentRunner,
         registry: Arc<AgentRegistry>,
     ) -> Self {
         Self {
             tool_name: name.into(),
             tool_desc: description.into(),
-            agent,
+            agent: Arc::new(agent),
             registry,
         }
     }
@@ -61,7 +62,7 @@ impl Tool for DelegateAgent {
             Ok(p) => p.to_string(),
             Err(e) => return ToolOutput::invalid_input(e),
         };
-        let id = self.registry.spawn(&self.agent, prompt).await;
+        let id = self.registry.spawn(Arc::clone(&self.agent), prompt).await;
         ToolOutput::success(format!("Sub-agent started. Job ID: {id}"))
     }
 }

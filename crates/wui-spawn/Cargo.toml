@@ -12,7 +12,6 @@ rust-version.workspace = true
 
 [dependencies]
 wui-core    = { workspace = true }
-wui         = { workspace = true }
 anyhow       = { workspace = true }
 async-trait  = { workspace = true }
 futures      = { workspace = true }
@@ -24,4 +23,5 @@ tokio-util   = { workspace = true }
 uuid         = { workspace = true }
 
 [dev-dependencies]
+wui      = { workspace = true }
 wui-eval = { workspace = true }

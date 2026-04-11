@@ -44,7 +44,7 @@ use async_trait::async_trait;
 use serde_json::Value;
 use tokio::sync::OnceCell;
 
-use wui::catalog::{CatalogHit, ToolCatalog};
+use wui_core::catalog::{CatalogHit, ToolCatalog};
 use wui_core::tool::{ContextInjection, Tool, ToolCtx, ToolOutput};
 
 // ── SkillsCatalog ─────────────────────────────────────────────────────────────

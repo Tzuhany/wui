@@ -451,3 +451,11 @@ impl<'a> StructuredRun<'a> {
         Ok(text)
     }
 }
+
+// ── AgentRunner ───────────────────────────────────────────────────────────────
+
+impl wui_core::runner::AgentRunner for Agent {
+    fn run_stream(&self, prompt: String) -> futures::stream::BoxStream<'static, AgentEvent> {
+        Box::pin(self.stream(prompt))
+    }
+}

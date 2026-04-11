@@ -15,7 +15,7 @@ use async_trait::async_trait;
 use serde_json::Value;
 use tokio::sync::Mutex;
 
-use wui::catalog::{CatalogHit, SearchStrategy, ToolCatalog};
+use wui_core::catalog::{CatalogHit, SearchStrategy, ToolCatalog};
 use wui_core::tool::{Tool, ToolCtx, ToolMeta, ToolOutput};
 
 use crate::{McpClient, McpError};
@@ -73,7 +73,7 @@ impl McpCatalog {
                 args,
                 transport: TransportKind::Stdio,
             }),
-            searcher: Arc::new(wui::catalog::TokenOverlapStrategy),
+            searcher: Arc::new(wui_core::catalog::TokenOverlapStrategy),
         }
     }
 
@@ -88,7 +88,7 @@ impl McpCatalog {
                 args: vec![],
                 transport: TransportKind::Http(url),
             }),
-            searcher: Arc::new(wui::catalog::TokenOverlapStrategy),
+            searcher: Arc::new(wui_core::catalog::TokenOverlapStrategy),
         }
     }
 

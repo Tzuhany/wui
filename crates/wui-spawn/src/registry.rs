@@ -8,6 +8,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use wui_core::event::AgentEvent;
+use wui_core::runner::AgentRunner;
 
 /// Tracks in-flight background sub-agent runs.
 #[derive(Default, Clone)]
@@ -37,16 +38,15 @@ impl AgentRegistry {
     }
 
     /// Spawn a sub-agent run in the background. Returns the job ID.
-    pub async fn spawn(&self, agent: &wui::Agent, prompt: String) -> Uuid {
+    pub async fn spawn(&self, agent: Arc<dyn AgentRunner>, prompt: String) -> Uuid {
         let id = Uuid::new_v4();
         let cancel = CancellationToken::new();
-        let agent = agent.clone();
         let ct = cancel.clone();
         let (event_tx, _) = broadcast::channel(256);
         let tx = event_tx.clone();
 
         let handle = tokio::spawn(async move {
-            let mut stream = agent.stream(prompt);
+            let mut stream = agent.run_stream(prompt);
             let mut text = String::new();
 
             loop {
@@ -139,25 +139,24 @@ impl AgentRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wui::Agent;
+    use wui::AgentRunner;
     use wui_eval::MockProvider;
 
-    fn instant_agent(reply: &'static str) -> Agent {
+    fn instant_agent(reply: &'static str) -> Arc<dyn AgentRunner> {
         let provider = MockProvider::new(vec![MockProvider::text(reply)]);
-        Agent::builder(provider)
-            .permission(wui::PermissionMode::Auto)
-            .build()
+        Arc::new(
+            wui::Agent::builder(provider)
+                .permission(wui::PermissionMode::Auto)
+                .build(),
+        )
     }
 
     #[tokio::test]
     async fn registry_cancel_stops_job() {
-        // Spawn an agent that never finishes (mock queue is empty → panic would
-        // indicate test logic error; we cancel before it runs).
-        // Use an instant-reply agent and cancel immediately to verify cancel path.
         let registry = AgentRegistry::new();
         let agent = instant_agent("finished");
 
-        let id = registry.spawn(&agent, "Do something.".into()).await;
+        let id = registry.spawn(agent, "Do something.".into()).await;
 
         // Status should be Running or Done (instant agent may finish before cancel).
         let cancelled = registry.cancel(id).await;
@@ -180,7 +179,7 @@ mod tests {
         let registry = AgentRegistry::new();
         let agent = instant_agent("the answer is 42");
 
-        let id = registry.spawn(&agent, "What is the answer?".into()).await;
+        let id = registry.spawn(agent, "What is the answer?".into()).await;
         let status = registry.wait(id).await;
 
         assert!(matches!(status, JobStatus::Done(text) if text.contains("42")));
