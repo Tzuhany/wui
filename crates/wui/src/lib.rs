@@ -42,7 +42,7 @@ pub use wui_core::event::{
 pub use wui_core::fmt;
 pub use wui_core::hook::SessionId;
 pub use wui_core::hook::{DenyList, Hook, HookDecision, HookEvent};
-pub use wui_core::message::{ContentBlock, DocumentSource, ImageSource, Message, Role, TurnInput};
+pub use wui_core::message::{ContentBlock, DocumentSource, ImageSource, Message, Role};
 pub use wui_core::provider::Provider;
 pub use wui_core::tool::ToolCallId;
 pub use wui_core::tool::{
@@ -87,7 +87,7 @@ pub mod prelude {
         InMemorySessionStore, Message, PermissionMode, PermissionRules, Provider, RetryPolicy,
         RunStopReason, RunStream, Session, SessionHooks, SessionStore, SubAgent, SubAgentSummary,
         SubAgentToolCall, Tool, ToolCtx, ToolInput, ToolInputError, ToolMeta, ToolOutput,
-        TurnInput, TypedTool,
+        TypedTool,
     };
     pub use futures::StreamExt;
 }

@@ -21,7 +21,7 @@ use crate::runtime::{
     run, HookRunner, RunConfig, RunStream, SessionPermissions, ToolRegistry, ToolSearch,
 };
 use wui_core::event::{AgentError, AgentEvent};
-use wui_core::message::TurnInput;
+use wui_core::message::Message;
 use wui_core::provider::Provider;
 
 use super::builder::{AgentBuilder, AgentConfig};
@@ -65,7 +65,7 @@ impl Agent {
     /// For tool visibility, streaming output, or HITL, use `stream()` directly.
     pub async fn run(
         &self,
-        input: impl Into<TurnInput>,
+        input: impl Into<Message>,
     ) -> Result<String, wui_core::event::AgentError> {
         let mut text = String::new();
         let mut stream = self.stream(input);
@@ -97,8 +97,8 @@ impl Agent {
     /// Dropping the stream cancels the run. Call `stream.cancel()` for
     /// explicit cancellation or `stream.cancel_token()` to share the
     /// signal with other tasks.
-    pub fn stream(&self, input: impl Into<TurnInput>) -> RunStream {
-        let messages = vec![input.into().into_message()];
+    pub fn stream(&self, input: impl Into<Message>) -> RunStream {
+        let messages = vec![input.into()];
         run(Arc::new(self.make_run_config()), messages)
     }
 
@@ -124,7 +124,7 @@ impl Agent {
     /// ```
     pub async fn run_typed<T>(
         &self,
-        input: impl Into<TurnInput>,
+        input: impl Into<Message>,
     ) -> Result<T, wui_core::event::AgentError>
     where
         T: serde::de::DeserializeOwned + JsonSchema,
@@ -208,7 +208,7 @@ impl Agent {
     ///     .await?;
     /// // result == "4"
     /// ```
-    pub fn run_structured(&self, input: impl Into<TurnInput>) -> StructuredRun<'_> {
+    pub fn run_structured(&self, input: impl Into<Message>) -> StructuredRun<'_> {
         StructuredRun {
             agent: self,
             input: input.into(),
@@ -234,10 +234,10 @@ impl Agent {
 
     pub(crate) fn stream_with_spawn_depth(
         &self,
-        input: impl Into<TurnInput>,
+        input: impl Into<Message>,
         spawn_depth: u32,
     ) -> RunStream {
-        let messages = vec![input.into().into_message()];
+        let messages = vec![input.into()];
         let mut config = self.make_run_config();
         config.spawn_depth = spawn_depth;
         run(Arc::new(config), messages)
@@ -378,7 +378,7 @@ pub(crate) fn build_registry(
 /// [`Self::extract_as`] to drive the run and capture the result.
 pub struct StructuredRun<'a> {
     pub(crate) agent: &'a Agent,
-    pub(crate) input: TurnInput,
+    pub(crate) input: Message,
 }
 
 impl<'a> StructuredRun<'a> {

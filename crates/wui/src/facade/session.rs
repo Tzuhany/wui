@@ -52,7 +52,7 @@ use crate::runtime::{
 };
 use wui_core::event::{AgentError, AgentEvent, RunSummary};
 use wui_core::hook::SessionId;
-use wui_core::message::{ContentBlock, Message, Role, TurnInput};
+use wui_core::message::{ContentBlock, Message, Role};
 
 use super::agent::build_run_config;
 use super::builder::AgentConfig;
@@ -340,8 +340,13 @@ impl Session {
 
     /// Send a message and return a stream of events.
     ///
-    /// Accepts plain text, a [`TurnInput`], a `Vec<ContentBlock>`, or a single
-    /// `ContentBlock` — anything that converts to [`TurnInput`].
+    /// Accepts anything that converts to a [`Message`]:
+    ///
+    /// ```rust,ignore
+    /// session.send("Plain text").await;
+    /// session.send(Message::user_with_image("What's this?", source)).await;
+    /// session.send(Message::user_blocks(vec![text_block, img_block])).await;
+    /// ```
     ///
     /// Consume the stream fully. When `AgentEvent::Done` is yielded,
     /// session history has already been updated in memory — the next `send()`
@@ -351,7 +356,7 @@ impl Session {
     /// `session.cancel_current()` to abort the run without dropping the stream.
     pub async fn send(
         &self,
-        input: impl Into<TurnInput>,
+        input: impl Into<Message>,
     ) -> impl futures::Stream<Item = AgentEvent> + Unpin + '_ {
         // Acquire the turn guard — ensures only one turn runs at a time.
         // If another turn is in progress, this awaits until it completes.
@@ -430,7 +435,7 @@ impl Session {
         run_stream
     }
 
-    fn prepare_turn_messages(&self, input: TurnInput) -> Vec<Message> {
+    fn prepare_turn_messages(&self, message: Message) -> Vec<Message> {
         // Build the message list for this turn: existing history + the new
         // user message. We do NOT push into `self.messages` here — that is
         // only updated on `AgentEvent::Done` (via `summary.messages`). If the
@@ -438,7 +443,7 @@ impl Session {
         // the next `send()` does not see a dangling user message without a
         // response.
         let mut messages = recover_mutex(&self.messages, "session messages").clone();
-        messages.push(input.into_message());
+        messages.push(message);
 
         match self
             .config

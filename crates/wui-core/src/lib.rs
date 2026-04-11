@@ -35,7 +35,7 @@ pub mod prelude {
     };
     pub use crate::hook::SessionId;
     pub use crate::hook::{DenyList, Hook, HookDecision, HookEvent};
-    pub use crate::message::{ContentBlock, DocumentSource, ImageSource, Message, Role, TurnInput};
+    pub use crate::message::{ContentBlock, DocumentSource, ImageSource, Message, Role};
     pub use crate::provider::{
         ChatRequest, Provider, ProviderCapabilities, ProviderError, ResponseFormat, TokenEstimate,
         ToolDef,

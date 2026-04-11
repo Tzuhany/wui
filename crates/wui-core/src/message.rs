@@ -199,6 +199,27 @@ impl Message {
         }
     }
 
+    /// Create a user message from an arbitrary sequence of content blocks.
+    ///
+    /// Use when a single text block is insufficient — for example, when sending
+    /// multiple images, a mix of text and documents, or any other multi-block
+    /// composition. Consistent with `user()` and `user_with_image()`.
+    ///
+    /// ```rust,ignore
+    /// session.send(Message::user_blocks(vec![
+    ///     ContentBlock::Text { text: "Compare these two images:".into() },
+    ///     ContentBlock::Image { source: img_a },
+    ///     ContentBlock::Image { source: img_b },
+    /// ])).await;
+    /// ```
+    pub fn user_blocks(blocks: Vec<ContentBlock>) -> Self {
+        Self {
+            id: uuid::Uuid::new_v4().to_string(),
+            role: Role::User,
+            content: blocks,
+        }
+    }
+
     /// Construct a message with an explicit id.
     ///
     /// Use when reconstructing messages from storage (checkpoints, databases)
@@ -213,6 +234,40 @@ impl Message {
     }
 }
 
+// ── From impls — implicit conversion to Message ───────────────────────────────
+//
+// Plain strings convert to user messages. This is the overwhelmingly common
+// case: agents are driven by user prompts. The convention — "a string is a
+// user message" — is explicit in the `send()` / `stream()` / `run()` call
+// sites and consistent with every role-specific constructor on `Message`.
+//
+// `Vec<ContentBlock>` also converts to a user message, enabling multimodal
+// turn input without naming an intermediate type.
+
+impl From<String> for Message {
+    fn from(s: String) -> Self {
+        Self::user(s)
+    }
+}
+
+impl From<&str> for Message {
+    fn from(s: &str) -> Self {
+        Self::user(s)
+    }
+}
+
+impl From<&String> for Message {
+    fn from(s: &String) -> Self {
+        Self::user(s.as_str())
+    }
+}
+
+impl From<Vec<ContentBlock>> for Message {
+    fn from(blocks: Vec<ContentBlock>) -> Self {
+        Self::user_blocks(blocks)
+    }
+}
+
 /// Who produced this message.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -220,114 +275,4 @@ pub enum Role {
     User,
     Assistant,
     System,
-}
-
-// ── TurnInput ─────────────────────────────────────────────────────────────────
-
-/// The user's input for a single conversation turn.
-///
-/// Accepted by [`Session::send`], [`Agent::stream`], and [`Agent::run`].
-/// Converts implicitly from `&str`, `String`, a single [`ContentBlock`], or a
-/// `Vec<ContentBlock>`, so existing call sites require no changes.
-///
-/// Use the named constructors when you need richer input — multimodal prompts,
-/// document attachments, or arbitrary block sequences.
-///
-/// # Examples
-///
-/// ```rust,ignore
-/// // Plain text — no change from before.
-/// session.send("Hello!").await;
-///
-/// // Text with an image.
-/// session.send(TurnInput::text_with_image(
-///     "What's in this screenshot?",
-///     ImageSource::Url("https://example.com/shot.png".into()),
-/// )).await;
-///
-/// // Arbitrary blocks.
-/// session.send(vec![
-///     ContentBlock::Text { text: "Summarise this PDF:".into() },
-///     ContentBlock::Document { source: DocumentSource::Base64 { .. }, title: None },
-/// ]).await;
-/// ```
-pub struct TurnInput {
-    pub(crate) blocks: Vec<ContentBlock>,
-}
-
-impl TurnInput {
-    /// A turn containing a single text block.
-    pub fn text(s: impl Into<String>) -> Self {
-        Self {
-            blocks: vec![ContentBlock::Text { text: s.into() }],
-        }
-    }
-
-    /// A turn built from an arbitrary sequence of content blocks.
-    pub fn blocks(blocks: Vec<ContentBlock>) -> Self {
-        Self { blocks }
-    }
-
-    /// Text with an inline image — the standard multimodal input pattern.
-    pub fn text_with_image(text: impl Into<String>, source: ImageSource) -> Self {
-        Self {
-            blocks: vec![
-                ContentBlock::Text { text: text.into() },
-                ContentBlock::Image { source },
-            ],
-        }
-    }
-
-    /// Text with an attached document (e.g., a PDF).
-    pub fn text_with_document(
-        text: impl Into<String>,
-        source: DocumentSource,
-        title: Option<String>,
-    ) -> Self {
-        Self {
-            blocks: vec![
-                ContentBlock::Text { text: text.into() },
-                ContentBlock::Document { source, title },
-            ],
-        }
-    }
-
-    /// Convert into a user [`Message`].
-    pub fn into_message(self) -> Message {
-        Message {
-            id: uuid::Uuid::new_v4().to_string(),
-            role: Role::User,
-            content: self.blocks,
-        }
-    }
-}
-
-impl From<String> for TurnInput {
-    fn from(s: String) -> Self {
-        Self::text(s)
-    }
-}
-
-impl From<&str> for TurnInput {
-    fn from(s: &str) -> Self {
-        Self::text(s)
-    }
-}
-
-impl From<&String> for TurnInput {
-    fn from(s: &String) -> Self {
-        Self::text(s.as_str())
-    }
-}
-
-impl From<Vec<ContentBlock>> for TurnInput {
-    fn from(blocks: Vec<ContentBlock>) -> Self {
-        Self::blocks(blocks)
-    }
-}
-
-impl From<ContentBlock> for TurnInput {
-    fn from(block: ContentBlock) -> Self {
-        Self::blocks(vec![block])
-    }
 }
