@@ -1,11 +1,33 @@
 // ============================================================================
 // wui-skills — file-based skill discovery.
 //
-// A SkillsCatalog scans a directory for Markdown files with YAML-like
-// frontmatter. Each file becomes a Tool. Invoking the tool injects the
-// skill's content into the agent's context as a <system-reminder>.
+// A SkillsCatalog scans a directory for skills. Each skill becomes a Tool.
+// Invoking the tool injects the skill's content into the agent's context
+// as a <system-reminder>.
 //
-// Frontmatter format:
+// Two formats are supported:
+//
+// 1. Single-file skill — a plain .md file with YAML-like frontmatter:
+//
+//      skills/
+//      └── git-commit.md
+//
+// 2. Directory skill — a subdirectory containing SKILL.md as the entry
+//    point, plus any supporting files (referenced docs, templates, etc.):
+//
+//      skills/
+//      └── release/
+//          ├── SKILL.md        ← required entry point
+//          ├── checklist.md    ← referenced in SKILL.md, loaded on demand
+//          └── template.md
+//
+//    Supporting files are NOT loaded automatically — SKILL.md should
+//    reference them by path so Claude reads them when needed.
+//    Use ${SKILL_DIR} in SKILL.md to refer to the skill's own directory:
+//
+//      See the checklist at ${SKILL_DIR}/checklist.md before proceeding.
+//
+// Frontmatter format (same for both):
 //   ---
 //   name: git-commit
 //   description: Write conventional commit messages following project style.
@@ -15,7 +37,7 @@
 // The directory is scanned lazily on first search().
 // ============================================================================
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -62,10 +84,18 @@ impl SkillsCatalog {
 
             while let Some(entry) = entries.next_entry().await? {
                 let path = entry.path();
-                if path.extension().is_some_and(|e| e == "md") {
+                if path.is_file() && path.extension().is_some_and(|e| e == "md") {
                     match parse_skill_file(&path).await {
                         Ok(skill) => skills.push(Arc::new(skill)),
-                        Err(e)    => tracing::warn!(path = %path.display(), error = %e, "skipping skill file with invalid frontmatter"),
+                        Err(e) => tracing::warn!(path = %path.display(), error = %e, "skipping skill file with invalid frontmatter"),
+                    }
+                } else if path.is_dir() {
+                    let skill_md = path.join("SKILL.md");
+                    if skill_md.exists() {
+                        match parse_skill_dir(&path).await {
+                            Ok(skill) => skills.push(Arc::new(skill)),
+                            Err(e) => tracing::warn!(path = %path.display(), error = %e, "skipping skill directory with invalid SKILL.md"),
+                        }
                     }
                 }
             }
@@ -128,6 +158,9 @@ struct SkillTool {
     content: String,
     /// Structured configuration parsed from frontmatter.
     manifest: SkillManifest,
+    /// For directory-based skills: the skill's own directory.
+    /// Substituted for `${SKILL_DIR}` in content at invocation time.
+    skill_dir: Option<PathBuf>,
 }
 
 /// Structured skill configuration parsed from YAML-like frontmatter.
@@ -173,7 +206,11 @@ impl Tool for SkillTool {
 
     async fn call(&self, _input: Value, _ctx: &ToolCtx) -> ToolOutput {
         // Build the injected context: skill content + manifest hints.
-        let mut injection = self.content.clone();
+        // Substitute ${SKILL_DIR} so directory skills can reference assets.
+        let mut injection = match &self.skill_dir {
+            Some(dir) => self.content.replace("${SKILL_DIR}", &dir.display().to_string()),
+            None => self.content.clone(),
+        };
         if !self.manifest.allowed_tools.is_empty() {
             injection.push_str(&format!(
                 "\n\nThis skill works best with these tools: {}",
@@ -207,9 +244,17 @@ impl Tool for SkillTool {
 
 // ── Frontmatter parser ────────────────────────────────────────────────────────
 
-async fn parse_skill_file(path: &PathBuf) -> anyhow::Result<SkillTool> {
-    let content = tokio::fs::read_to_string(path).await?;
+async fn parse_skill_file(path: &Path) -> anyhow::Result<SkillTool> {
+    let raw = tokio::fs::read_to_string(path).await?;
+    parse_skill_markdown(&raw, None)
+}
 
+async fn parse_skill_dir(dir: &Path) -> anyhow::Result<SkillTool> {
+    let raw = tokio::fs::read_to_string(dir.join("SKILL.md")).await?;
+    parse_skill_markdown(&raw, Some(dir.to_path_buf()))
+}
+
+fn parse_skill_markdown(content: &str, skill_dir: Option<PathBuf>) -> anyhow::Result<SkillTool> {
     let rest = content
         .strip_prefix("---\n")
         .ok_or_else(|| anyhow::anyhow!("no frontmatter"))?;
@@ -248,6 +293,7 @@ async fn parse_skill_file(path: &PathBuf) -> anyhow::Result<SkillTool> {
         description: desc.ok_or_else(|| anyhow::anyhow!("missing description"))?,
         content: body,
         manifest,
+        skill_dir,
     })
 }
 
@@ -261,6 +307,16 @@ mod tests {
     async fn write_skill(dir: &TempDir, filename: &str, content: &str) {
         let path = dir.path().join(filename);
         std::fs::write(path, content).unwrap();
+    }
+
+    /// Create a directory skill: `skills/<name>/SKILL.md` plus optional extra files.
+    fn write_skill_dir(dir: &TempDir, name: &str, skill_md: &str, extras: &[(&str, &str)]) {
+        let skill_dir = dir.path().join(name);
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(skill_dir.join("SKILL.md"), skill_md).unwrap();
+        for (filename, content) in extras {
+            std::fs::write(skill_dir.join(filename), content).unwrap();
+        }
     }
 
     #[tokio::test]
@@ -311,6 +367,79 @@ mod tests {
             ---
             Skill body.
         "},
+        )
+        .await;
+
+        let catalog = SkillsCatalog::new(dir.path());
+        let hits = catalog.search("valid", 10).await.unwrap();
+
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].tool.name(), "valid-skill");
+    }
+
+    #[tokio::test]
+    async fn skills_catalog_loads_directory_skill() {
+        let dir = TempDir::new().unwrap();
+
+        write_skill_dir(
+            &dir,
+            "release",
+            indoc::indoc! {"
+                ---
+                name: release
+                description: Run the release workflow.
+                ---
+                Follow the checklist at ${SKILL_DIR}/checklist.md.
+            "},
+            &[("checklist.md", "- bump version\n- publish\n")],
+        );
+
+        let catalog = SkillsCatalog::new(dir.path());
+        let hits = catalog.search("release", 10).await.unwrap();
+
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].tool.name(), "release");
+
+        // Invoke and check that ${SKILL_DIR} was substituted.
+        let ctx = ToolCtx {
+            cancel: tokio_util::sync::CancellationToken::new(),
+            messages: std::sync::Arc::from(vec![]),
+            spawn_depth: 0,
+            on_progress: Box::new(|_| {}),
+        };
+        let output = hits[0].tool.call(serde_json::json!({}), &ctx).await;
+        assert!(!output.injections.is_empty(), "should have context injection");
+        let injection_text = &output.injections[0].text;
+        assert!(
+            !injection_text.contains("${SKILL_DIR}"),
+            "placeholder should be replaced, got: {injection_text}"
+        );
+        let expected_path = dir.path().join("release");
+        assert!(
+            injection_text.contains(&expected_path.display().to_string()),
+            "injection should contain skill dir path"
+        );
+    }
+
+    #[tokio::test]
+    async fn skills_catalog_ignores_dir_without_skill_md() {
+        let dir = TempDir::new().unwrap();
+
+        // Directory with no SKILL.md — should be silently ignored.
+        let stray = dir.path().join("stray");
+        std::fs::create_dir_all(&stray).unwrap();
+        std::fs::write(stray.join("notes.md"), "not a skill").unwrap();
+
+        write_skill(
+            &dir,
+            "good.md",
+            indoc::indoc! {"
+                ---
+                name: valid-skill
+                description: A valid skill.
+                ---
+                Body.
+            "},
         )
         .await;
 
