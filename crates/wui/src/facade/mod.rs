@@ -9,5 +9,6 @@
 
 pub(crate) mod agent;
 pub(crate) mod builder;
+pub(crate) mod hitl_registry;
 pub(crate) mod session;
 pub(crate) mod sub_agent;

@@ -206,7 +206,7 @@ pub enum RunStopReason {
 /// raw provider responses) that may contain file paths, code fragments, or
 /// other information not appropriate for end-user display. Log it; do not
 /// show it verbatim to end users.
-#[derive(Debug, Clone, thiserror::Error)]
+#[derive(Debug, Clone, thiserror::Error, Serialize)]
 #[error("{message}")]
 pub struct AgentError {
     pub message: String,
@@ -288,7 +288,7 @@ impl AgentError {
 /// Match on it to build any kind of consumer: TUI, websocket, log file, test.
 ///
 /// Only `Control` requires caller action. All other variants are informational.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub enum AgentEvent {
     // ── Streaming text ────────────────────────────────────────────────
     TextDelta(String),
@@ -433,7 +433,7 @@ pub enum CompressMethod {
 /// }
 /// ```
 #[must_use = "ControlHandle must be responded to; dropping it auto-denies the request"]
-#[derive(Clone)]
+#[derive(Clone, Serialize)]
 pub struct ControlHandle {
     /// The details of what the agent is requesting.
     pub request: ControlRequest,
@@ -441,6 +441,11 @@ pub struct ControlHandle {
     // for storage in multiple UI components) while guaranteeing that only the
     // *first* response call (approve/deny/etc.) wins. Subsequent calls are
     // silent no-ops because `take()` consumes the inner sender.
+    //
+    // Skipped during serialisation — the live channel cannot be serialised.
+    // A deserialised handle would have tx=None and all respond calls are
+    // silent no-ops, which is correct: the handle is for logging, not replay.
+    #[serde(skip)]
     tx: Arc<Mutex<Option<tokio::sync::oneshot::Sender<ControlResponse>>>>,
 }
 

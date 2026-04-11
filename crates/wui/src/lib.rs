@@ -30,8 +30,11 @@ pub mod providers;
 
 pub use facade::agent::Agent;
 pub use facade::builder::{AgentBuilder, Effort};
+pub use facade::hitl_registry::HitlRegistry;
 pub use facade::session::{Session, SessionHooks};
 pub use facade::sub_agent::{SubAgent, SubAgentSummary, SubAgentToolCall};
+
+pub use tokio_util::sync::CancellationToken;
 
 // ── Core types ────────────────────────────────────────────────────────────────
 
@@ -82,12 +85,12 @@ pub use wui_core::runner::AgentRunner;
 /// `use wui::prelude::*` to bring the most-used types into scope.
 pub mod prelude {
     pub use super::{
-        Agent, AgentBuilder, AgentError, AgentEvent, Artifact, ArtifactContent, CompressPipeline,
-        ContextInjection, ControlResponse, DenyList, Effort, Hook, HookDecision, HookEvent,
-        InMemorySessionStore, Message, PermissionMode, PermissionRules, Provider, RetryPolicy,
-        RunStopReason, RunStream, Session, SessionHooks, SessionStore, SubAgent, SubAgentSummary,
-        SubAgentToolCall, Tool, ToolCtx, ToolInput, ToolInputError, ToolMeta, ToolOutput,
-        TypedTool,
+        Agent, AgentBuilder, AgentError, AgentEvent, Artifact, ArtifactContent, CancellationToken,
+        CompressPipeline, ContextInjection, ControlResponse, DenyList, Effort, HitlRegistry, Hook,
+        HookDecision, HookEvent, InMemorySessionStore, Message, PermissionMode, PermissionRules,
+        Provider, RetryPolicy, RunStopReason, RunStream, Session, SessionHooks, SessionStore,
+        SubAgent, SubAgentSummary, SubAgentToolCall, Tool, ToolCtx, ToolInput, ToolInputError,
+        ToolMeta, ToolOutput, TypedTool,
     };
     pub use futures::StreamExt;
 }

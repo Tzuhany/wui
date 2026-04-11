@@ -145,6 +145,10 @@ struct SessionSendState<'a> {
     attempt: u32,
     emitted_visible_output: bool,
     finished: bool,
+    /// External cancellation token. When triggered, `cancel_current()` is
+    /// called once and the field is cleared — the run then drains naturally
+    /// and emits `Done(Cancelled)`. No spawned task required.
+    cancel_token: Option<CancellationToken>,
 }
 
 enum SessionPoll {
@@ -244,7 +248,25 @@ impl<'a> SessionSendState<'a> {
                 return None;
             }
 
-            let event = self.current.next().await?;
+            let event = if let Some(token) = self.cancel_token.take() {
+                tokio::select! {
+                    event = self.current.next() => {
+                        // Put the token back — cancellation hasn't fired yet.
+                        self.cancel_token = Some(token);
+                        event?
+                    }
+                    _ = token.cancelled() => {
+                        // Token fired: cancel the run, then drain until Done.
+                        // cancel_token remains None so subsequent loops poll
+                        // the stream directly.
+                        self.session.cancel_current();
+                        continue;
+                    }
+                }
+            } else {
+                self.current.next().await?
+            };
+
             match self.handle_event(event).await {
                 SessionPoll::Emit(event) => return Some(event),
                 SessionPoll::Continue => continue,
@@ -374,6 +396,42 @@ impl Session {
         &self,
         input: impl Into<Message>,
     ) -> impl futures::Stream<Item = AgentEvent> + Unpin + '_ {
+        self.send_inner(input.into(), None).await
+    }
+
+    /// Send a message and tie its lifetime to an external [`CancellationToken`].
+    ///
+    /// Equivalent to [`send()`][Session::send] but with a built-in cancel
+    /// bridge: when `cancel` is triggered the current run is cancelled without
+    /// the caller needing to spawn a separate task or hold a reference to the
+    /// session. The stream will drain and emit `AgentEvent::Done` with
+    /// `stop_reason: Cancelled`.
+    ///
+    /// ```rust,ignore
+    /// let token = CancellationToken::new();
+    ///
+    /// // Cancel from a timeout, signal handler, or UI button:
+    /// tokio::spawn({
+    ///     let token = token.clone();
+    ///     async move { tokio::time::sleep(Duration::from_secs(30)).await; token.cancel(); }
+    /// });
+    ///
+    /// let mut stream = session.send_with_cancel("do something long", token).await;
+    /// while let Some(event) = stream.next().await { /* ... */ }
+    /// ```
+    pub async fn send_with_cancel(
+        &self,
+        input: impl Into<Message>,
+        cancel: CancellationToken,
+    ) -> impl futures::Stream<Item = AgentEvent> + Unpin + '_ {
+        self.send_inner(input.into(), Some(cancel)).await
+    }
+
+    async fn send_inner(
+        &self,
+        message: Message,
+        cancel_token: Option<CancellationToken>,
+    ) -> impl futures::Stream<Item = AgentEvent> + Unpin + '_ {
         // Acquire the turn guard — ensures only one turn runs at a time.
         // If another turn is in progress, this awaits until it completes.
         // The permit is moved into TurnCleanup and held for the stream's
@@ -385,7 +443,7 @@ impl Session {
             .await
             .expect("turn_guard semaphore closed");
 
-        let messages = self.prepare_turn_messages(input.into());
+        let messages = self.prepare_turn_messages(message);
 
         let run_stream = self.start_run_stream(&messages);
 
@@ -409,6 +467,7 @@ impl Session {
             attempt: 1,
             emitted_visible_output: false,
             finished: false,
+            cancel_token,
         };
 
         Box::pin(stream::unfold(state, |mut state| async move {
