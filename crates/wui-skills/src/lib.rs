@@ -979,4 +979,681 @@ mod tests {
         let result = substitute_arguments("$a-$b", "only_one", &declared);
         assert_eq!(result, "only_one-");
     }
+
+    #[test]
+    fn substitute_arguments_no_args_leaves_placeholders_for_declared() {
+        // When called with an empty string, $name → "" and $ARGUMENTS → "".
+        let declared = vec!["name".to_string()];
+        let result = substitute_arguments("Hello $name! Full: [$ARGUMENTS]", "", &declared);
+        assert_eq!(result, "Hello ! Full: []");
+    }
+
+    #[test]
+    fn substitute_arguments_unknown_dollar_left_intact() {
+        // $unknown_var is not in declared and has no positional match; untouched.
+        let declared = vec!["known".to_string()];
+        let result = substitute_arguments("$known $unknown_var", "alpha", &declared);
+        assert_eq!(result, "alpha $unknown_var");
+    }
+
+    // ── Frontmatter parsing ───────────────────────────────────────────────────
+
+    #[test]
+    fn parse_all_frontmatter_fields() {
+        let md = indoc::indoc! {"
+            ---
+            name: full-skill
+            description: A fully configured skill.
+            when_to_use: synonym trigger alias
+            arguments: target env
+            context: fork
+            allowed_tools: Bash, Read
+            effort: high
+            model: claude-opus-4-6
+            ---
+            Body text.
+        "};
+        let skill = parse_skill_markdown(md, None).unwrap();
+        assert_eq!(skill.skill_name, "full-skill");
+        assert_eq!(skill.description, "A fully configured skill.");
+        assert_eq!(
+            skill.manifest.when_to_use.as_deref(),
+            Some("synonym trigger alias")
+        );
+        assert_eq!(
+            skill.manifest.arguments,
+            vec!["target".to_string(), "env".to_string()]
+        );
+        assert_eq!(skill.manifest.context, SkillContext::Fork);
+        assert_eq!(
+            skill.manifest.allowed_tools,
+            vec!["Bash".to_string(), "Read".to_string()]
+        );
+        assert_eq!(skill.manifest.effort.as_deref(), Some("high"));
+        assert_eq!(skill.manifest.model.as_deref(), Some("claude-opus-4-6"));
+        assert_eq!(skill.content, "Body text.");
+    }
+
+    #[test]
+    fn parse_context_inline_explicit() {
+        let md = indoc::indoc! {"
+            ---
+            name: s
+            description: d
+            context: inline
+            ---
+            Body.
+        "};
+        let skill = parse_skill_markdown(md, None).unwrap();
+        assert_eq!(skill.manifest.context, SkillContext::Inline);
+    }
+
+    #[test]
+    fn parse_context_unknown_defaults_to_inline() {
+        let md = indoc::indoc! {"
+            ---
+            name: s
+            description: d
+            context: something-else
+            ---
+            Body.
+        "};
+        let skill = parse_skill_markdown(md, None).unwrap();
+        assert_eq!(skill.manifest.context, SkillContext::Inline);
+    }
+
+    #[test]
+    fn parse_missing_name_errors() {
+        let md = indoc::indoc! {"
+            ---
+            description: No name here.
+            ---
+            Body.
+        "};
+        assert!(parse_skill_markdown(md, None).is_err());
+    }
+
+    #[test]
+    fn parse_missing_description_errors() {
+        let md = indoc::indoc! {"
+            ---
+            name: no-desc
+            ---
+            Body.
+        "};
+        assert!(parse_skill_markdown(md, None).is_err());
+    }
+
+    #[test]
+    fn parse_unknown_frontmatter_fields_ignored() {
+        let md = indoc::indoc! {"
+            ---
+            name: s
+            description: d
+            future_field: some value
+            another: 42
+            ---
+            Body.
+        "};
+        let skill = parse_skill_markdown(md, None).unwrap();
+        assert_eq!(skill.skill_name, "s");
+        assert_eq!(skill.content, "Body.");
+    }
+
+    // ── Input schema ─────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn schema_without_arguments_is_empty_object() {
+        let dir = TempDir::new().unwrap();
+        write_skill(
+            &dir,
+            "simple.md",
+            indoc::indoc! {"
+                ---
+                name: simple
+                description: No arguments.
+                ---
+                Body.
+            "},
+        )
+        .await;
+
+        let catalog = SkillsCatalog::new(dir.path());
+        let hits = catalog.search("simple", 10).await.unwrap();
+        assert_eq!(hits.len(), 1);
+
+        let schema = hits[0].tool.input_schema();
+        assert_eq!(schema["type"], "object");
+        assert!(
+            schema["properties"].as_object().unwrap().is_empty(),
+            "no-argument skill should have empty properties"
+        );
+    }
+
+    #[tokio::test]
+    async fn schema_with_arguments_exposes_field() {
+        let dir = TempDir::new().unwrap();
+        write_skill(
+            &dir,
+            "arg.md",
+            indoc::indoc! {"
+                ---
+                name: arg-skill
+                description: Parametrised skill with dynamic inputs.
+                arguments: target
+                ---
+                Deploy $target.
+            "},
+        )
+        .await;
+
+        let catalog = SkillsCatalog::new(dir.path());
+        let hits = catalog
+            .search("parametrised skill dynamic", 10)
+            .await
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+
+        let schema = hits[0].tool.input_schema();
+        assert!(
+            schema["properties"]["arguments"].is_object(),
+            "schema must have 'arguments' property: {schema}"
+        );
+    }
+
+    // ── Structured output & manifest hints ────────────────────────────────────
+
+    #[tokio::test]
+    async fn allowed_tools_appended_to_injection_text() {
+        let dir = TempDir::new().unwrap();
+        write_skill(
+            &dir,
+            "deploy.md",
+            indoc::indoc! {"
+                ---
+                name: deploy
+                description: Deploy the app.
+                allowed_tools: Bash, Read
+                ---
+                Run the deploy script.
+            "},
+        )
+        .await;
+
+        let catalog = SkillsCatalog::new(dir.path());
+        let hits = catalog.search("deploy", 10).await.unwrap();
+        let ctx = make_ctx();
+        let output = hits[0].tool.call(serde_json::json!({}), &ctx).await;
+
+        let text = &output.injections[0].text;
+        assert!(
+            text.contains("Bash") && text.contains("Read"),
+            "allowed_tools hint missing from injection: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn manifest_fields_appear_in_structured_output() {
+        let dir = TempDir::new().unwrap();
+        write_skill(
+            &dir,
+            "heavy.md",
+            indoc::indoc! {"
+                ---
+                name: heavy
+                description: Heavy skill.
+                allowed_tools: Bash
+                effort: high
+                model: claude-opus-4-6
+                ---
+                Body.
+            "},
+        )
+        .await;
+
+        let catalog = SkillsCatalog::new(dir.path());
+        let hits = catalog.search("heavy", 10).await.unwrap();
+        let ctx = make_ctx();
+        let output = hits[0].tool.call(serde_json::json!({}), &ctx).await;
+
+        let s = output.structured.expect("should have structured output");
+        let m = &s["skill_manifest"];
+        assert_eq!(m["effort"], "high");
+        assert_eq!(m["model"], "claude-opus-4-6");
+        assert!(m["allowed_tools"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("Bash")));
+    }
+
+    #[tokio::test]
+    async fn no_manifest_extras_means_no_structured_output() {
+        let dir = TempDir::new().unwrap();
+        write_skill(
+            &dir,
+            "bare.md",
+            indoc::indoc! {"
+                ---
+                name: bare
+                description: Minimal skill.
+                ---
+                Body.
+            "},
+        )
+        .await;
+
+        let catalog = SkillsCatalog::new(dir.path());
+        let hits = catalog.search("bare", 10).await.unwrap();
+        let ctx = make_ctx();
+        let output = hits[0].tool.call(serde_json::json!({}), &ctx).await;
+
+        assert!(
+            output.structured.is_none(),
+            "bare skill should produce no structured output"
+        );
+    }
+
+    // ── context:fork ─────────────────────────────────────────────────────────
+
+    /// A minimal AgentRunner that always emits a fixed text response.
+    struct FixedRunner {
+        text: String,
+    }
+
+    impl AgentRunner for FixedRunner {
+        fn run_stream(
+            &self,
+            _prompt: String,
+        ) -> futures::stream::BoxStream<'static, wui_core::event::AgentEvent> {
+            use wui_core::event::{AgentEvent, RunStopReason, RunSummary, TokenUsage};
+            let text = self.text.clone();
+            Box::pin(futures::stream::iter(vec![
+                AgentEvent::TextDelta(text),
+                AgentEvent::Done(RunSummary {
+                    stop_reason: RunStopReason::Completed,
+                    iterations: 1,
+                    usage: TokenUsage::default(),
+                    messages: vec![],
+                }),
+            ]))
+        }
+    }
+
+    /// A runner that captures the prompt it received and echoes it back.
+    struct CaptureRunner {
+        captured: Arc<std::sync::Mutex<String>>,
+    }
+
+    impl AgentRunner for CaptureRunner {
+        fn run_stream(
+            &self,
+            prompt: String,
+        ) -> futures::stream::BoxStream<'static, wui_core::event::AgentEvent> {
+            use wui_core::event::{AgentEvent, RunStopReason, RunSummary, TokenUsage};
+            *self.captured.lock().unwrap() = prompt.clone();
+            Box::pin(futures::stream::iter(vec![
+                AgentEvent::TextDelta(format!("got:{prompt}")),
+                AgentEvent::Done(RunSummary {
+                    stop_reason: RunStopReason::Completed,
+                    iterations: 1,
+                    usage: TokenUsage::default(),
+                    messages: vec![],
+                }),
+            ]))
+        }
+    }
+
+    #[tokio::test]
+    async fn fork_skill_without_runner_falls_back_to_inline() {
+        let dir = TempDir::new().unwrap();
+        write_skill(
+            &dir,
+            "fork.md",
+            indoc::indoc! {"
+                ---
+                name: fork-skill
+                description: Dispatch as independent sub-agent context.
+                context: fork
+                ---
+                Do the thing.
+            "},
+        )
+        .await;
+
+        // No runner configured — expect inline injection fallback.
+        let catalog = SkillsCatalog::new(dir.path());
+        let hits = catalog
+            .search("dispatch independent sub-agent", 10)
+            .await
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+
+        let ctx = make_ctx();
+        let output = hits[0].tool.call(serde_json::json!({}), &ctx).await;
+
+        // Inline fallback produces a context injection, not an agent run.
+        assert!(
+            !output.injections.is_empty(),
+            "fallback should inject content"
+        );
+        assert!(
+            output.injections[0].text.contains("Do the thing"),
+            "injection should contain skill body"
+        );
+    }
+
+    #[tokio::test]
+    async fn fork_skill_with_runner_returns_agent_text() {
+        let dir = TempDir::new().unwrap();
+        write_skill(
+            &dir,
+            "fork2.md",
+            indoc::indoc! {"
+                ---
+                name: fork-skill2
+                description: Fork skill with runner.
+                context: fork
+                ---
+                Prompt for agent.
+            "},
+        )
+        .await;
+
+        let runner = FixedRunner {
+            text: "agent completed".to_string(),
+        };
+        let catalog = SkillsCatalog::new(dir.path()).with_fork_runner(runner);
+        let hits = catalog.search("fork runner", 10).await.unwrap();
+        assert_eq!(hits.len(), 1);
+
+        let ctx = make_ctx();
+        let output = hits[0].tool.call(serde_json::json!({}), &ctx).await;
+
+        // Fork dispatch: no injections, result is the agent's text output.
+        assert!(
+            output.injections.is_empty(),
+            "fork should not produce context injections"
+        );
+        assert_eq!(output.content, "agent completed");
+    }
+
+    #[tokio::test]
+    async fn fork_skill_receives_fully_substituted_prompt() {
+        let dir = TempDir::new().unwrap();
+        write_skill(
+            &dir,
+            "fork3.md",
+            indoc::indoc! {"
+                ---
+                name: fork-skill3
+                description: Substitution in fork.
+                context: fork
+                arguments: target
+                ---
+                Deploy $target to production.
+            "},
+        )
+        .await;
+
+        let captured = Arc::new(std::sync::Mutex::new(String::new()));
+        let runner = CaptureRunner {
+            captured: Arc::clone(&captured),
+        };
+        let catalog = SkillsCatalog::new(dir.path()).with_fork_runner(runner);
+        let hits = catalog.search("substitution fork", 10).await.unwrap();
+        assert_eq!(hits.len(), 1);
+
+        let ctx = make_ctx();
+        hits[0]
+            .tool
+            .call(serde_json::json!({ "arguments": "staging" }), &ctx)
+            .await;
+
+        let prompt = captured.lock().unwrap().clone();
+        assert!(
+            prompt.contains("Deploy staging to production"),
+            "runner should receive substituted prompt, got: {prompt}"
+        );
+    }
+
+    // ── Shell injection edge cases ────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn shell_injection_absent_leaves_content_unchanged() {
+        let dir = TempDir::new().unwrap();
+        write_skill(
+            &dir,
+            "plain.md",
+            indoc::indoc! {"
+                ---
+                name: plain
+                description: No shell injection.
+                ---
+                Just static content.
+            "},
+        )
+        .await;
+
+        let catalog = SkillsCatalog::new(dir.path());
+        let hits = catalog.search("plain static", 10).await.unwrap();
+        let ctx = make_ctx();
+        let output = hits[0].tool.call(serde_json::json!({}), &ctx).await;
+        assert_eq!(output.injections[0].text, "Just static content.");
+    }
+
+    #[tokio::test]
+    async fn shell_injection_failure_returns_error_output() {
+        let dir = TempDir::new().unwrap();
+        write_skill(
+            &dir,
+            "bad-shell.md",
+            // exit 1 makes the shell command fail.
+            indoc::indoc! {r#"
+                ---
+                name: bad-shell
+                description: Shell command that fails.
+                ---
+                Result: !`exit 1`
+            "#},
+        )
+        .await;
+
+        let catalog = SkillsCatalog::new(dir.path());
+        let hits = catalog.search("shell fails", 10).await.unwrap();
+        let ctx = make_ctx();
+        let output = hits[0].tool.call(serde_json::json!({}), &ctx).await;
+
+        assert!(
+            output.failure.is_some(),
+            "failed shell injection should produce a failure output"
+        );
+    }
+
+    #[tokio::test]
+    async fn shell_injection_in_dir_skill_uses_skill_dir_as_cwd() {
+        let dir = TempDir::new().unwrap();
+        // pwd prints the current working directory.
+        write_skill_dir(
+            &dir,
+            "pwdskill",
+            indoc::indoc! {r#"
+                ---
+                name: pwd-skill
+                description: Prints working directory.
+                ---
+                CWD: !`pwd`
+            "#},
+            &[],
+        );
+
+        let catalog = SkillsCatalog::new(dir.path());
+        let hits = catalog.search("working directory", 10).await.unwrap();
+        assert_eq!(hits.len(), 1);
+
+        let ctx = make_ctx();
+        let output = hits[0].tool.call(serde_json::json!({}), &ctx).await;
+        let text = &output.injections[0].text;
+
+        let expected_dir = dir.path().join("pwdskill");
+        assert!(
+            text.contains(&expected_dir.display().to_string()),
+            "shell injection should run inside skill dir, got: {text}"
+        );
+    }
+
+    // ── Search ranking ────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn search_limit_is_respected() {
+        let dir = TempDir::new().unwrap();
+        for i in 0..5 {
+            write_skill(
+                &dir,
+                &format!("skill{i}.md"),
+                &format!(
+                    "---\nname: skill-{i}\ndescription: A test skill numbered {i}.\n---\nBody.\n"
+                ),
+            )
+            .await;
+        }
+
+        let catalog = SkillsCatalog::new(dir.path());
+        let hits = catalog.search("test skill", 3).await.unwrap();
+        assert!(hits.len() <= 3, "limit not respected: {} hits", hits.len());
+    }
+
+    #[tokio::test]
+    async fn search_returns_hits_sorted_by_relevance() {
+        let dir = TempDir::new().unwrap();
+
+        // Skill A: name contains "deploy", description contains "release" → matches both → score 2/2 = 1.0
+        write_skill(
+            &dir,
+            "a.md",
+            indoc::indoc! {"
+                ---
+                name: deploy
+                description: deploy and release services
+                ---
+                Body.
+            "},
+        )
+        .await;
+
+        // Skill B: only description contains "release" → score 1/2 = 0.5
+        write_skill(
+            &dir,
+            "b.md",
+            indoc::indoc! {"
+                ---
+                name: build
+                description: build and release binaries
+                ---
+                Body.
+            "},
+        )
+        .await;
+
+        let catalog = SkillsCatalog::new(dir.path());
+        // "deploy release": skill A matches both tokens (score 1.0), skill B matches "release" only (score 0.5).
+        let hits = catalog.search("deploy release", 10).await.unwrap();
+        assert_eq!(hits.len(), 2);
+        assert_eq!(
+            hits[0].tool.name(),
+            "deploy",
+            "higher-scoring skill should be first"
+        );
+        assert!(
+            hits[0].score >= hits[1].score,
+            "hits must be sorted descending by score"
+        );
+    }
+
+    #[tokio::test]
+    async fn when_to_use_tokens_increase_score() {
+        let dir = TempDir::new().unwrap();
+
+        // Skill A: "ship" only in when_to_use.
+        write_skill(
+            &dir,
+            "a.md",
+            indoc::indoc! {"
+                ---
+                name: deploy-a
+                description: Push the code out.
+                when_to_use: ship release publish
+                ---
+                Body.
+            "},
+        )
+        .await;
+
+        // Skill B: "ship" nowhere.
+        write_skill(
+            &dir,
+            "b.md",
+            indoc::indoc! {"
+                ---
+                name: build
+                description: Compile and test.
+                ---
+                Body.
+            "},
+        )
+        .await;
+
+        let catalog = SkillsCatalog::new(dir.path());
+
+        // "ship" should only match skill A via when_to_use.
+        let hits = catalog.search("ship", 10).await.unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].tool.name(), "deploy-a");
+
+        // "build" matches only skill B.
+        let hits2 = catalog.search("build", 10).await.unwrap();
+        assert_eq!(hits2.len(), 1);
+        assert_eq!(hits2[0].tool.name(), "build");
+    }
+
+    // ── Combined substitutions ────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn skill_dir_and_arguments_substituted_together() {
+        let dir = TempDir::new().unwrap();
+        write_skill_dir(
+            &dir,
+            "combo",
+            indoc::indoc! {"
+                ---
+                name: combo
+                description: Combined substitutions.
+                arguments: env
+                ---
+                Dir=${SKILL_DIR} Env=$env Full=$ARGUMENTS
+            "},
+            &[],
+        );
+
+        let catalog = SkillsCatalog::new(dir.path());
+        let hits = catalog.search("combined substitutions", 10).await.unwrap();
+        assert_eq!(hits.len(), 1);
+
+        let ctx = make_ctx();
+        let output = hits[0]
+            .tool
+            .call(serde_json::json!({ "arguments": "staging" }), &ctx)
+            .await;
+
+        let text = &output.injections[0].text;
+        let skill_dir = dir.path().join("combo");
+        assert!(
+            text.contains(&skill_dir.display().to_string()),
+            "${{SKILL_DIR}} not substituted: {text}"
+        );
+        assert!(text.contains("Env=staging"), "$env not substituted: {text}");
+        assert!(
+            text.contains("Full=staging"),
+            "$ARGUMENTS not substituted: {text}"
+        );
+    }
 }
