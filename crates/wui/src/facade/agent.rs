@@ -242,11 +242,7 @@ impl Agent {
     /// let session = agent.session_from("conv-42", history).await;
     /// session.send("Continue from here").await;
     /// ```
-    pub async fn session_from(
-        &self,
-        id: impl Into<String>,
-        history: Vec<Message>,
-    ) -> Session {
+    pub async fn session_from(&self, id: impl Into<String>, history: Vec<Message>) -> Session {
         Session::new_with_history(id, self.config.clone(), history).await
     }
 

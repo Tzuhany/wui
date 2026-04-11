@@ -122,29 +122,41 @@ impl HitlRegistry {
 
     /// Approve the request identified by `request_id`. Returns `false` if not found.
     pub fn approve(&self, request_id: &str) -> bool {
-        self.take(request_id).is_some_and(|h| { h.approve(); true })
+        self.take(request_id).is_some_and(|h| {
+            h.approve();
+            true
+        })
     }
 
     /// Approve with a modification note the LLM will see. Returns `false` if not found.
     pub fn approve_with(&self, request_id: &str, modification: impl Into<String>) -> bool {
-        self.take(request_id)
-            .is_some_and(|h| { h.approve_with(modification); true })
+        self.take(request_id).is_some_and(|h| {
+            h.approve_with(modification);
+            true
+        })
     }
 
     /// Approve this tool for all future calls in this session. Returns `false` if not found.
     pub fn approve_always(&self, request_id: &str) -> bool {
-        self.take(request_id).is_some_and(|h| { h.approve_always(); true })
+        self.take(request_id).is_some_and(|h| {
+            h.approve_always();
+            true
+        })
     }
 
     /// Deny the request identified by `request_id`. Returns `false` if not found.
     pub fn deny(&self, request_id: &str, reason: impl Into<String>) -> bool {
-        self.take(request_id)
-            .is_some_and(|h| { h.deny(reason); true })
+        self.take(request_id).is_some_and(|h| {
+            h.deny(reason);
+            true
+        })
     }
 
     /// Deny this tool for all future calls in this session. Returns `false` if not found.
     pub fn deny_always(&self, request_id: &str, reason: impl Into<String>) -> bool {
-        self.take(request_id)
-            .is_some_and(|h| { h.deny_always(reason); true })
+        self.take(request_id).is_some_and(|h| {
+            h.deny_always(reason);
+            true
+        })
     }
 }
