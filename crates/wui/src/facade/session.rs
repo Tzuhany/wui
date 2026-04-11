@@ -322,7 +322,23 @@ impl Session {
             Vec::new()
         };
 
-        // Fire SessionStart notification before returning.
+        Self::init(id, config, messages).await
+    }
+
+    /// Create a session pre-seeded with an explicit message history.
+    ///
+    /// The provided messages become the starting history. The `SessionStore`
+    /// (if configured) is still used to persist subsequent turns, but is NOT
+    /// consulted on creation — the provided history takes precedence.
+    pub(crate) async fn new_with_history(
+        id: impl Into<String>,
+        config: Arc<AgentConfig>,
+        history: Vec<Message>,
+    ) -> Self {
+        Self::init(SessionId::from(id.into()), config, history).await
+    }
+
+    async fn init(id: SessionId, config: Arc<AgentConfig>, messages: Vec<Message>) -> Self {
         let hook_runner = HookRunner::new(config.hooks.clone());
         hook_runner.notify_session_start(&id).await;
 

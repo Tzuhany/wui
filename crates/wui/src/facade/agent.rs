@@ -230,6 +230,26 @@ impl Agent {
         Session::new(id.into(), self.config.clone()).await
     }
 
+    /// Create a session pre-seeded with an existing message history.
+    ///
+    /// Use when resuming a conversation from an external source — a database,
+    /// a serialised proto, or any other store that isn't a [`SessionStore`].
+    /// The provided messages become the initial history; subsequent `send()`
+    /// calls continue from there.
+    ///
+    /// ```rust,ignore
+    /// let history: Vec<Message> = rows.iter().map(|r| r.into_message()).collect();
+    /// let session = agent.session_from("conv-42", history).await;
+    /// session.send("Continue from here").await;
+    /// ```
+    pub async fn session_from(
+        &self,
+        id: impl Into<String>,
+        history: Vec<Message>,
+    ) -> Session {
+        Session::new_with_history(id, self.config.clone(), history).await
+    }
+
     // ── Internal ──────────────────────────────────────────────────────────────
 
     pub(crate) fn stream_with_spawn_depth(
