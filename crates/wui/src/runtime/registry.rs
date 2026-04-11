@@ -39,10 +39,7 @@ impl ToolRegistry {
     /// `tool_search` to fetch the full schema before using them.
     ///
     /// Both sets are stored in the same lookup map for execution.
-    pub fn new(
-        resident: Vec<Arc<dyn Tool>>,
-        deferred: Vec<Arc<dyn Tool>>,
-    ) -> Result<Self, String> {
+    pub fn new(resident: Vec<Arc<dyn Tool>>, deferred: Vec<Arc<dyn Tool>>) -> Result<Self, String> {
         let mut map: HashMap<String, Arc<dyn Tool>> = HashMap::new();
         let mut deferred_names: HashSet<String> = HashSet::new();
 

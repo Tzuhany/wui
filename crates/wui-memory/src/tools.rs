@@ -185,9 +185,7 @@ impl Tool for RememberTool {
             name: inp.optional_str("name").map(str::to_string),
             kind: inp.optional_str("kind").map(str::to_string),
             importance: inp.optional_f64("importance").map(|v| v as f32),
-            pinned: inp
-                .optional_bool("pinned")
-                .unwrap_or(false),
+            pinned: inp.optional_bool("pinned").unwrap_or(false),
         };
 
         ctx.report("storing memory");

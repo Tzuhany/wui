@@ -55,7 +55,10 @@ impl TypedTool for CurrentTimeTool {
             .unwrap_or(0);
         let offset_secs = input.offset_hours.unwrap_or(0) * 3600;
         let adjusted = now as i64 + offset_secs;
-        ToolOutput::success(format!("Current UNIX timestamp (UTC{:+}h): {adjusted}", input.offset_hours.unwrap_or(0)))
+        ToolOutput::success(format!(
+            "Current UNIX timestamp (UTC{:+}h): {adjusted}",
+            input.offset_hours.unwrap_or(0)
+        ))
     }
 }
 

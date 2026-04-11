@@ -543,8 +543,7 @@ impl AgentBuilder {
     /// alternative that returns an error instead of panicking, use
     /// [`try_build`](Self::try_build).
     pub fn build(self) -> Agent {
-        self.try_build()
-            .unwrap_or_else(|e| panic!("{e}"))
+        self.try_build().unwrap_or_else(|e| panic!("{e}"))
     }
 
     /// Finalise the builder and return a ready-to-run `Agent`, or a
@@ -624,7 +623,10 @@ impl std::fmt::Display for BuildError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             BuildError::DuplicateTool(name) => {
-                write!(f, "duplicate tool name '{name}': each tool must have a unique name")
+                write!(
+                    f,
+                    "duplicate tool name '{name}': each tool must have a unique name"
+                )
             }
         }
     }

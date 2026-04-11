@@ -545,7 +545,9 @@ mod tests {
     ) -> Arc<RunConfig> {
         Arc::new(RunConfig {
             provider,
-            tools: Arc::new(ToolRegistry::new(tools, vec![]).expect("duplicate tool name in test_config")),
+            tools: Arc::new(
+                ToolRegistry::new(tools, vec![]).expect("duplicate tool name in test_config"),
+            ),
             hooks: Arc::new(HookRunner::new(Vec::new())),
             compress: Arc::new(CompressPipeline {
                 window_tokens: 1_000_000,
@@ -980,9 +982,7 @@ mod tests {
         // still completes as Completed (streak = 1 < 3).
         let provider = SequenceProvider::new(vec![tiny_end_turn.clone()]);
         let mut config = test_config(Arc::new(provider), vec![], PermissionMode::Auto);
-        Arc::get_mut(&mut config)
-            .unwrap()
-            .expect_long_task = false;
+        Arc::get_mut(&mut config).unwrap().expect_long_task = false;
 
         let mut stream = run(config, vec![Message::user("do stuff")]);
         let mut summary = None;

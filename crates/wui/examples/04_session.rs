@@ -11,9 +11,7 @@ use wui::providers::Anthropic;
 use wui::{Agent, AgentError, AgentEvent, PermissionMode};
 
 /// Drain a session turn stream, printing text and returning on Done or Error.
-async fn print_turn(
-    mut stream: impl Stream<Item = AgentEvent> + Unpin,
-) -> Result<(), AgentError> {
+async fn print_turn(mut stream: impl Stream<Item = AgentEvent> + Unpin) -> Result<(), AgentError> {
     while let Some(event) = stream.next().await {
         match event {
             AgentEvent::TextDelta(text) => print!("{text}"),
@@ -41,7 +39,12 @@ async fn main() -> anyhow::Result<()> {
     let session = agent.session("demo-session").await;
 
     println!("User: My favourite colour is blue.");
-    print_turn(session.send("My favourite colour is blue. Just acknowledge.").await).await?;
+    print_turn(
+        session
+            .send("My favourite colour is blue. Just acknowledge.")
+            .await,
+    )
+    .await?;
 
     // The session remembers the first turn automatically.
     println!("\nUser: What is my favourite colour?");
