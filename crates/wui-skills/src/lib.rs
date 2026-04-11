@@ -208,7 +208,9 @@ impl Tool for SkillTool {
         // Build the injected context: skill content + manifest hints.
         // Substitute ${SKILL_DIR} so directory skills can reference assets.
         let mut injection = match &self.skill_dir {
-            Some(dir) => self.content.replace("${SKILL_DIR}", &dir.display().to_string()),
+            Some(dir) => self
+                .content
+                .replace("${SKILL_DIR}", &dir.display().to_string()),
             None => self.content.clone(),
         };
         if !self.manifest.allowed_tools.is_empty() {
@@ -408,7 +410,10 @@ mod tests {
             on_progress: Box::new(|_| {}),
         };
         let output = hits[0].tool.call(serde_json::json!({}), &ctx).await;
-        assert!(!output.injections.is_empty(), "should have context injection");
+        assert!(
+            !output.injections.is_empty(),
+            "should have context injection"
+        );
         let injection_text = &output.injections[0].text;
         assert!(
             !injection_text.contains("${SKILL_DIR}"),
