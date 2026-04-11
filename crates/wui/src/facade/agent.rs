@@ -233,7 +233,7 @@ impl Agent {
     /// Create a session pre-seeded with an existing message history.
     ///
     /// Use when resuming a conversation from an external source — a database,
-    /// a serialised proto, or any other store that isn't a [`SessionStore`].
+    /// a serialised proto, or any other store that isn't a [`crate::SessionStore`].
     /// The provided messages become the initial history; subsequent `send()`
     /// calls continue from there.
     ///

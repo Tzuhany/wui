@@ -88,7 +88,7 @@ impl HitlRegistry {
     ///
     /// The `Control` event is still yielded to the caller — this is a
     /// transparent intercept. Attach to the stream returned by
-    /// [`Session::send()`] or [`Session::send_with_cancel()`].
+    /// [`crate::Session::send()`] or [`crate::Session::send_with_cancel()`].
     pub fn attach<S>(&self, stream: S) -> impl Stream<Item = AgentEvent> + Unpin
     where
         S: Stream<Item = AgentEvent> + Unpin,
