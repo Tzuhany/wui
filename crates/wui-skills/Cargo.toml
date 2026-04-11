@@ -11,9 +11,10 @@ categories.workspace   = true
 rust-version.workspace = true
 
 [dependencies]
-wui-core   = { workspace = true }
+wui-core    = { workspace = true }
 anyhow      = { workspace = true }
 async-trait = { workspace = true }
+futures     = { workspace = true }
 serde       = { workspace = true }
 serde_json  = { workspace = true }
 tokio       = { workspace = true }
