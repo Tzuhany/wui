@@ -141,7 +141,10 @@ impl Tool for RecallTool {
             Ok(hits) => {
                 let text = hits
                     .iter()
-                    .map(|h| format!("[{}] {}", h.id, h.content))
+                    .map(|h| match &h.name {
+                        Some(name) => format!("[{}] {}: {}", h.id, name, h.content),
+                        None => format!("[{}] {}", h.id, h.content),
+                    })
                     .collect::<Vec<_>>()
                     .join("\n");
                 ToolOutput::success(text).with_structured(json!({ "hits": hits }))
@@ -156,15 +159,17 @@ impl Tool for RememberTool {
         "memory_remember"
     }
     fn description(&self) -> &str {
-        "Store a durable memory for later recall. Use `kind` to categorise (e.g. \"fact\", \"preference\") and `importance` (0.0–1.0) to prioritise."
+        "Store a durable memory for later recall. Use `name` for a short label, `kind` to categorise (e.g. \"fact\", \"preference\"), `importance` (0.0–1.0) to prioritise, and `pinned` to mark entries the backend should always consider."
     }
     fn input_schema(&self) -> serde_json::Value {
         json!({
             "type": "object",
             "properties": {
                 "content":    { "type": "string", "description": "The memory to store." },
+                "name":       { "type": "string", "description": "Short human-readable label for this memory." },
                 "kind":       { "type": "string", "description": "Category tag, e.g. \"preference\" or \"fact\"." },
-                "importance": { "type": "number", "minimum": 0.0, "maximum": 1.0, "description": "Priority weight (default 0.5)." }
+                "importance": { "type": "number", "minimum": 0.0, "maximum": 1.0, "description": "Priority weight (default 0.5)." },
+                "pinned":     { "type": "boolean", "description": "Hint to the backend that this memory should always be considered (default false)." }
             },
             "required": ["content"]
         })
@@ -177,8 +182,12 @@ impl Tool for RememberTool {
         };
         let item = NewMemory {
             content: content.to_string(),
+            name: inp.optional_str("name").map(str::to_string),
             kind: inp.optional_str("kind").map(str::to_string),
             importance: inp.optional_f64("importance").map(|v| v as f32),
+            pinned: inp
+                .optional_bool("pinned")
+                .unwrap_or(false),
         };
 
         ctx.report("storing memory");

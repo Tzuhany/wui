@@ -59,9 +59,6 @@ pub(super) async fn maybe_compress(
             );
             tracing::debug!(?method, freed, %pressure_before, %pressure_after, "context compressed");
             *messages = new_msgs;
-            if method == wui_core::event::CompressMethod::L3Failed {
-                tx.send(AgentEvent::CompressFallback { freed }).await.ok();
-            }
             tx.send(AgentEvent::Compressed {
                 method,
                 freed,

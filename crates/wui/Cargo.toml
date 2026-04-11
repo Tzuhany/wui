@@ -41,6 +41,7 @@ eventsource-stream = { workspace = true, optional = true }
 [dev-dependencies]
 tokio        = { workspace = true }
 wui-eval    = { workspace = true }
+wui-macros  = { workspace = true }
 wui-memory  = { workspace = true }
 proptest      = "1"
 

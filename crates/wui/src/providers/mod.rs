@@ -8,4 +8,4 @@ pub use anthropic::Anthropic;
 pub mod openai;
 
 #[cfg(feature = "openai")]
-pub use openai::OpenAi;
+pub use openai::OpenAI;

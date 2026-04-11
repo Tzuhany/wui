@@ -266,7 +266,7 @@ impl CompressPipeline {
             None => {
                 // L3 failed (network error, etc.) — fall back to L2.
                 let freed = before.saturating_sub(self.total_tokens(&collapsed));
-                Some((collapsed, CompressMethod::L3Failed, freed))
+                Some((collapsed, CompressMethod::SummarizeFailed, freed))
             }
         }
     }

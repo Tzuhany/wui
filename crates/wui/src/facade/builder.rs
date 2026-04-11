@@ -89,7 +89,7 @@ pub struct AgentConfig {
     pub(crate) max_iter: u32,
     pub(crate) retry: RetryPolicy,
     pub(crate) tool_timeout: Option<std::time::Duration>,
-    pub(crate) ignore_diminishing_returns: bool,
+    pub(crate) expect_long_task: bool,
     /// Hard ceiling on cumulative tokens (input + output). `None` = no limit.
     pub(crate) token_budget: Option<u64>,
     /// Extended thinking budget (tokens) sent on every LLM call.
@@ -156,7 +156,7 @@ impl AgentBuilder {
                 max_iter: 20,
                 retry: RetryPolicy::default(),
                 tool_timeout: None,
-                ignore_diminishing_returns: false,
+                expect_long_task: false,
                 token_budget: None,
                 thinking_budget: None,
                 deferred_tools: Vec::new(),
@@ -238,21 +238,29 @@ impl AgentBuilder {
         self
     }
 
-    /// Append a section to the stable (cached) portion of the system prompt.
+    /// **Advanced.** Append a section to the stable (cached) portion of the system prompt.
     ///
     /// Stable sections should not change between turns. When a provider
     /// supports prompt caching, everything in the stable portion is placed
     /// before the cache boundary so it can be reused across requests.
+    ///
+    /// Most agents only need `.system(...)`. Use this method when you have
+    /// multiple prompt sections and want fine-grained control over which ones
+    /// are eligible for caching.
     pub fn system_stable(mut self, section: impl Into<String>) -> Self {
         self.config.system_stable.push(section.into());
         self
     }
 
-    /// Append a section to the dynamic portion of the system prompt.
+    /// **Advanced.** Append a section to the dynamic portion of the system prompt.
     ///
     /// Dynamic sections are placed after the cache boundary and may change
     /// every turn. Content here does not invalidate the cache for the stable
     /// prefix.
+    ///
+    /// Most agents only need `.system(...)`. Use this method when injecting
+    /// per-turn context (e.g. current date, user-specific state) that should
+    /// not interfere with cached stable content.
     pub fn system_dynamic(mut self, section: impl Into<String>) -> Self {
         self.config.system_dynamic.push(section.into());
         self
@@ -451,14 +459,15 @@ impl AgentBuilder {
         self
     }
 
-    /// Disable the diminishing-returns auto-stop heuristic.
+    /// Disable the stall-detection heuristic.
     ///
     /// By default, the engine stops a run after several consecutive turns with
     /// negligible output (< 500 tokens), on the assumption that the agent is
     /// stuck. Call this when long tasks are expected to produce many short
-    /// intermediate steps before a large final result (research, file scans).
-    pub fn ignore_diminishing_returns(mut self) -> Self {
-        self.config.ignore_diminishing_returns = true;
+    /// intermediate steps before a large final result (research, file scans,
+    /// multi-file code generation).
+    pub fn expect_long_task(mut self) -> Self {
+        self.config.expect_long_task = true;
         self
     }
 
@@ -527,7 +536,31 @@ impl AgentBuilder {
     }
 
     /// Finalise the builder and return a ready-to-run `Agent`.
-    pub fn build(mut self) -> Agent {
+    ///
+    /// # Panics
+    ///
+    /// Panics if any tool name is registered more than once. For a fallible
+    /// alternative that returns an error instead of panicking, use
+    /// [`try_build`](Self::try_build).
+    pub fn build(self) -> Agent {
+        self.try_build()
+            .unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// Finalise the builder and return a ready-to-run `Agent`, or a
+    /// [`BuildError`] if the configuration is invalid.
+    ///
+    /// Prefer this over [`build`](Self::build) in library code or anywhere
+    /// a misconfigured agent should be a recoverable error rather than a crash.
+    ///
+    /// ```rust,ignore
+    /// let agent = Agent::builder(provider)
+    ///     .tool(ToolA)
+    ///     .tool(ToolB)
+    ///     .permission(PermissionMode::Auto)
+    ///     .try_build()?;
+    /// ```
+    pub fn try_build(mut self) -> Result<Agent, BuildError> {
         // Auto-calibrate the compression window from provider capabilities
         // when the user hasn't explicitly set a custom strategy.
         if !self.compress_explicitly_set {
@@ -543,17 +576,58 @@ impl AgentBuilder {
             }
         }
 
-        // Validate the tool set early so duplicate names fail at construction
-        // time instead of surfacing later from inside a running stream.
-        let _ = super::agent::build_registry(
+        // Validate the tool set: duplicate names produce a clear error at
+        // construction time instead of surfacing inside a running stream.
+        super::agent::build_registry(
             &self.config.tools,
             &self.config.deferred_tools,
             &self.config.catalogs,
             self.config.catalog_limit,
-        );
+        )
+        .map_err(BuildError::DuplicateTool)?;
 
-        Agent {
+        // Warn when tools are registered under PermissionMode::Ask.
+        // PermissionMode::Ask requires a caller that handles AgentEvent::Control.
+        // Agent::run() cannot do this and will return an error; stream() works
+        // but only if the caller explicitly handles Control events.
+        if matches!(self.config.permission, crate::runtime::PermissionMode::Ask)
+            && !self.config.tools.is_empty()
+        {
+            tracing::warn!(
+                "AgentBuilder: tools are registered but PermissionMode::Ask is active. \
+                 Agent::run() will error on the first tool call. \
+                 Add .permission(PermissionMode::Auto) for headless use, or \
+                 handle AgentEvent::Control in your stream loop for interactive use."
+            );
+        }
+
+        Ok(Agent {
             config: Arc::new(self.config),
+        })
+    }
+}
+
+// ── BuildError ────────────────────────────────────────────────────────────────
+
+/// Error returned by [`AgentBuilder::try_build`] when the agent configuration
+/// is invalid.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum BuildError {
+    /// Two or more tools were registered with the same name.
+    ///
+    /// The inner string is the conflicting tool name.
+    DuplicateTool(String),
+}
+
+impl std::fmt::Display for BuildError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            BuildError::DuplicateTool(name) => {
+                write!(f, "duplicate tool name '{name}': each tool must have a unique name")
+            }
         }
     }
 }
+
+impl std::error::Error for BuildError {}

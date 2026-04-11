@@ -55,11 +55,10 @@ permission flow, context pressure, and long-running sessions.
   </tr>
 </table>
 
-## Hello, Loop
+## Hello, Agent
 
 ```rust
-use futures::StreamExt;
-use wui::{Agent, AgentEvent};
+use wui::{Agent};
 use wui::providers::Anthropic;
 
 #[tokio::main]
@@ -68,12 +67,12 @@ async fn main() -> anyhow::Result<()> {
         .system("You are a helpful assistant.")
         .build();
 
-    let mut stream = agent.stream("What is the capital of France?");
-    while let Some(event) = stream.next().await {
-        if let AgentEvent::TextDelta(text) = event {
-            print!("{text}");
-        }
-    }
+    // Fire-and-forget: run a prompt, get the text back.
+    let text = agent.run("What is the capital of France?").await?;
+    println!("{text}");
+
+    // Stream tokens as they arrive:
+    agent.stream("Tell me a one-sentence joke.").print_text().await?;
 
     Ok(())
 }

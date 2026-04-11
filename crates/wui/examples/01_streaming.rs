@@ -1,7 +1,8 @@
 //! Basic streaming run.
 //!
-//! Shows `Agent::builder`, `.system()`, `.build()`, `agent.stream()`,
-//! and consuming `AgentEvent::TextDelta` events as they arrive.
+//! Shows the three entry points on `Agent`: `run()` for fire-and-forget text,
+//! `stream().print_text()` for streaming output, and the raw event loop when
+//! you need full control over every event.
 //!
 //! Run with:
 //!   ANTHROPIC_API_KEY=sk-... cargo run --example 01_streaming -p wui --features anthropic
@@ -18,8 +19,20 @@ async fn main() -> anyhow::Result<()> {
         .system("You are a concise, helpful assistant.")
         .build();
 
-    let mut stream = agent.stream("What is the capital of France? Answer in one sentence.");
+    // ── Option 1: fire-and-forget — just give me the text ────────────────────
+    let text = agent
+        .run("What is the capital of France? Answer in one sentence.")
+        .await?;
+    println!("{text}");
 
+    // ── Option 2: stream and print as tokens arrive ───────────────────────────
+    agent
+        .stream("Name three programming languages in one sentence.")
+        .print_text()
+        .await?;
+
+    // ── Option 3: full event loop — when you need every event ─────────────────
+    let mut stream = agent.stream("What is 2 + 2?");
     while let Some(event) = stream.next().await {
         match event {
             AgentEvent::TextDelta(text) => print!("{text}"),

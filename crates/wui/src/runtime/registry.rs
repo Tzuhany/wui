@@ -39,23 +39,26 @@ impl ToolRegistry {
     /// `tool_search` to fetch the full schema before using them.
     ///
     /// Both sets are stored in the same lookup map for execution.
-    pub fn new(resident: Vec<Arc<dyn Tool>>, deferred: Vec<Arc<dyn Tool>>) -> Self {
+    pub fn new(
+        resident: Vec<Arc<dyn Tool>>,
+        deferred: Vec<Arc<dyn Tool>>,
+    ) -> Result<Self, String> {
         let mut map: HashMap<String, Arc<dyn Tool>> = HashMap::new();
         let mut deferred_names: HashSet<String> = HashSet::new();
 
         for t in resident {
-            insert_unique(&mut map, t, "resident");
+            insert_unique(&mut map, t)?;
         }
         for t in deferred {
             let name = t.name().to_string();
             deferred_names.insert(name.clone());
-            insert_unique(&mut map, t, "deferred");
+            insert_unique(&mut map, t)?;
         }
 
-        Self {
+        Ok(Self {
             tools: map,
             deferred_names,
-        }
+        })
     }
 
     pub fn get(&self, name: &str) -> Option<Arc<dyn Tool>> {
@@ -152,14 +155,16 @@ impl ToolRegistry {
     }
 }
 
-fn insert_unique(map: &mut HashMap<String, Arc<dyn Tool>>, tool: Arc<dyn Tool>, source: &str) {
+fn insert_unique(
+    map: &mut HashMap<String, Arc<dyn Tool>>,
+    tool: Arc<dyn Tool>,
+) -> Result<(), String> {
     let name = tool.name().to_string();
     match map.entry(name.clone()) {
         Entry::Vacant(entry) => {
             entry.insert(tool);
+            Ok(())
         }
-        Entry::Occupied(_) => {
-            panic!("duplicate tool name '{name}' encountered while building {source} tools")
-        }
+        Entry::Occupied(_) => Err(name),
     }
 }

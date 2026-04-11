@@ -30,17 +30,17 @@ use wui_core::provider::{ChatRequest, Provider, ProviderCapabilities, ProviderEr
 use self::parser::SseParser;
 use self::serialize::build_request_body;
 
-// ── OpenAi ──────────────────────────────────────────────────────────────────
+// ── OpenAI ──────────────────────────────────────────────────────────────────
 
 #[derive(Clone)]
-pub struct OpenAi {
+pub struct OpenAI {
     client: reqwest::Client,
     api_key: String,
     api_url: String,
     default_model: String,
 }
 
-impl OpenAi {
+impl OpenAI {
     /// Create a provider using the official OpenAI API endpoint.
     pub fn new(api_key: impl Into<String>) -> Self {
         Self::with_base_url(api_key, "https://api.openai.com")
@@ -83,7 +83,7 @@ fn chat_completions_url(base: &str) -> String {
 }
 
 #[async_trait]
-impl Provider for OpenAi {
+impl Provider for OpenAI {
     async fn stream(
         &self,
         req: ChatRequest,

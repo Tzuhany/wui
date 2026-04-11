@@ -1,54 +1,61 @@
-//! Custom tool with `ToolMeta`.
+//! Custom tool with `TypedTool` and `#[derive(ToolInput)]`.
 //!
-//! Shows implementing the `Tool` trait with `fn meta()` returning a
-//! `ToolMeta { readonly: true, ..Default::default() }`, registering the
-//! tool via `.tool()`, and running the agent with `PermissionMode::Auto`.
+//! Shows the preferred way to write Rust tools: derive the input schema and
+//! parser automatically, implement `TypedTool` with strongly-typed input, and
+//! register via `.tool()`. No manual schema JSON or `ToolInput` calls needed.
 //!
 //! Run with:
 //!   ANTHROPIC_API_KEY=sk-... cargo run --example 02_tools -p wui --features anthropic
 
 use async_trait::async_trait;
-use futures::StreamExt;
-use serde_json::{json, Value};
 use wui::providers::Anthropic;
-use wui::{Agent, AgentEvent, PermissionMode, Tool, ToolCtx, ToolMeta, ToolOutput};
+use wui::{Agent, PermissionMode, ToolCtx, ToolMeta, ToolOutput, TypedTool};
+use wui_macros::ToolInput;
 
-// ── A simple read-only tool ───────────────────────────────────────────────────
+// ── Input type ────────────────────────────────────────────────────────────────
+
+/// #[derive(ToolInput)] generates the JSON schema and parser automatically.
+/// Doc comments on fields become `"description"` entries in the schema.
+/// `Option<T>` fields are optional; all others are required.
+#[derive(ToolInput)]
+struct CurrentTimeInput {
+    /// Optional timezone offset in hours from UTC (e.g. 9 for JST). Defaults to UTC.
+    offset_hours: Option<i64>,
+}
+
+// ── Tool implementation ───────────────────────────────────────────────────────
 
 struct CurrentTimeTool;
 
 #[async_trait]
-impl Tool for CurrentTimeTool {
+impl TypedTool for CurrentTimeTool {
+    type Input = CurrentTimeInput;
+
     fn name(&self) -> &str {
         "current_time"
     }
 
     fn description(&self) -> &str {
-        "Returns the current UTC time as an ISO 8601 string."
+        "Returns the current UTC time as a UNIX timestamp, with optional timezone offset."
     }
 
-    fn input_schema(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {},
-            "required": []
-        })
-    }
-
-    fn meta(&self, _input: &Value) -> ToolMeta {
+    fn meta(&self, _input: &CurrentTimeInput) -> ToolMeta {
         // Read-only: no external state is modified. Safe to run concurrently.
         ToolMeta {
             readonly: true,
+            concurrent: true,
             ..ToolMeta::default()
         }
     }
 
-    async fn call(&self, _input: Value, _ctx: &ToolCtx) -> ToolOutput {
+    async fn call_typed(&self, input: CurrentTimeInput, _ctx: &ToolCtx) -> ToolOutput {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        ToolOutput::success(format!("Current UNIX timestamp: {now}"))
+        let offset_secs = input.offset_hours.unwrap_or(0) * 3600;
+        let adjusted = now as i64 + offset_secs;
+        ToolOutput::success(format!("Current UNIX timestamp (UTC{:+}h): {adjusted}", input.offset_hours.unwrap_or(0)))
     }
 }
 
@@ -64,20 +71,12 @@ async fn main() -> anyhow::Result<()> {
         .permission(PermissionMode::Auto)
         .build();
 
-    let mut stream = agent.stream("What is the current UNIX timestamp?");
+    // collect_text() replaces the manual while-let event loop for the common case.
+    let response = agent
+        .stream("What is the current time in Tokyo (UTC+9)?")
+        .collect_text()
+        .await?;
 
-    while let Some(event) = stream.next().await {
-        match event {
-            AgentEvent::TextDelta(text) => print!("{text}"),
-            AgentEvent::ToolStart { name, .. } => eprintln!("\n[tool call: {name}]"),
-            AgentEvent::ToolDone { name, output, .. } => {
-                eprintln!("[tool done: {name}] → {output}")
-            }
-            AgentEvent::Done(_) => println!(),
-            AgentEvent::Error(e) => return Err(e.into()),
-            _ => {}
-        }
-    }
-
+    println!("{response}");
     Ok(())
 }

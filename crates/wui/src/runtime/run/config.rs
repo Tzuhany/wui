@@ -38,14 +38,14 @@ pub(crate) struct RunConfig {
     /// its own `Tool::timeout()`. `None` means tools may run indefinitely.
     pub(crate) tool_timeout: Option<Duration>,
 
-    /// Disable the diminishing-returns auto-stop heuristic.
+    /// Disable the stall-detection heuristic.
     ///
     /// When `false` (default), the engine stops a run after
     /// `MAX_LOW_OUTPUT_TURNS` consecutive turns with fewer than
     /// `MIN_USEFUL_OUTPUT_TOKENS` output tokens. Set this to `true` for
     /// long-running tasks where many short intermediate steps are expected
     /// before a large final result (e.g. research tasks, file-heavy writes).
-    pub(crate) ignore_diminishing_returns: bool,
+    pub(crate) expect_long_task: bool,
 
     /// Hard ceiling on cumulative tokens (input + output) for this run.
     ///

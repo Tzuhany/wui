@@ -108,9 +108,24 @@ impl SubAgent {
     /// - `agent`: a fully configured `Agent` — must use `PermissionMode::Auto`
     ///   or a suitable allow-list for headless delegation
     pub fn new(name: impl Into<String>, description: impl Into<String>, agent: Agent) -> Self {
+        let name = name.into();
+        let description = description.into();
+
+        // Warn early: Ask mode requires a caller that handles AgentEvent::Control.
+        // Sub-agents run headlessly — interactive approval is not possible and the
+        // run will error the moment the inner agent requests permission.
+        if matches!(agent.config.permission, crate::runtime::PermissionMode::Ask) {
+            tracing::warn!(
+                "SubAgent '{name}': the inner agent uses PermissionMode::Ask, which is not \
+                 supported in delegation mode. The sub-agent will fail the first time it \
+                 tries to call a tool. Build the inner agent with PermissionMode::Auto or \
+                 add allow_tool() rules for every tool it uses."
+            );
+        }
+
         Self {
-            tool_name: name.into(),
-            tool_desc: description.into(),
+            tool_name: name,
+            tool_desc: description,
             agent,
         }
     }

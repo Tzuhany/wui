@@ -1,23 +1,32 @@
 //! Human-in-the-loop (HITL) approval flow.
 //!
 //! Shows `PermissionMode::Ask`, handling `AgentEvent::Control`, and
-//! responding with `handle.approve()` or `handle.deny()`.
+//! responding with `handle.approve()` or `handle.deny("reason")`.
 //!
 //! Run with:
 //!   ANTHROPIC_API_KEY=sk-... cargo run --example 03_hitl -p wui --features anthropic
 
 use async_trait::async_trait;
 use futures::StreamExt;
-use serde_json::{json, Value};
 use wui::providers::Anthropic;
-use wui::{Agent, AgentEvent, PermissionMode, Tool, ToolCtx, ToolMeta, ToolOutput};
+use wui::{Agent, AgentEvent, PermissionMode, ToolCtx, ToolMeta, ToolOutput, TypedTool};
+use wui_macros::ToolInput;
 
-// ── A tool that always asks for permission ────────────────────────────────────
+// ── Tool definition ───────────────────────────────────────────────────────────
 
+#[derive(ToolInput)]
+struct DeleteFileInput {
+    /// Absolute path to the file to delete.
+    path: String,
+}
+
+/// Simulates deleting a file — requires human approval on every call.
 struct DeleteFileTool;
 
 #[async_trait]
-impl Tool for DeleteFileTool {
+impl TypedTool for DeleteFileTool {
+    type Input = DeleteFileInput;
+
     fn name(&self) -> &str {
         "delete_file"
     }
@@ -26,28 +35,17 @@ impl Tool for DeleteFileTool {
         "Delete a file at the given path."
     }
 
-    fn input_schema(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "path": { "type": "string", "description": "Path to delete." }
-            },
-            "required": ["path"]
-        })
-    }
-
-    fn meta(&self, _input: &Value) -> ToolMeta {
-        // Destructive: the runtime shows this context in the HITL prompt.
+    fn meta(&self, _: &DeleteFileInput) -> ToolMeta {
+        // destructive: true — shown in the HITL approval prompt.
         ToolMeta {
             destructive: true,
             ..ToolMeta::default()
         }
     }
 
-    async fn call(&self, input: Value, _ctx: &ToolCtx) -> ToolOutput {
-        let path = input["path"].as_str().unwrap_or("(unknown)");
+    async fn call_typed(&self, input: DeleteFileInput, _ctx: &ToolCtx) -> ToolOutput {
         // Simulated — not actually deleting anything.
-        ToolOutput::success(format!("Deleted {path}"))
+        ToolOutput::success(format!("Deleted {}", input.path))
     }
 }
 
@@ -74,15 +72,12 @@ async fn main() -> anyhow::Result<()> {
             AgentEvent::Control(handle) => {
                 let tool_name = handle.request.tool_name().unwrap_or("unknown");
                 let description = handle.request.description();
-                println!("\n[HITL] Tool '{tool_name}' is requesting permission.");
-                println!("[HITL] Description: {description}");
+                println!("\n[HITL] '{tool_name}' is requesting permission.");
+                println!("[HITL] {description}");
 
                 // In a real application: show a UI prompt and await user input.
-                // Here we simulate approval with a simple heuristic.
-                // For destructive tools we deny; for others we approve.
-                let is_destructive = tool_name == "delete_file";
-
-                if is_destructive {
+                // Here we deny destructive operations and approve everything else.
+                if tool_name == "delete_file" {
                     println!("[HITL] Denied — destructive tools require manual review.");
                     handle.deny("User declined the destructive operation.");
                 } else {

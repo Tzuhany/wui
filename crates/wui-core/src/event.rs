@@ -187,7 +187,7 @@ pub enum RunStopReason {
     ContextOverflow,
     /// Output tokens per turn fell below the useful threshold for too many
     /// consecutive turns. The agent is no longer making progress.
-    DiminishingReturns,
+    Stalled,
     /// Output was truncated at `max_tokens` even after escalation and
     /// continuation injection.
     MaxTokensExhausted,
@@ -325,8 +325,9 @@ pub enum AgentEvent {
     // ── HITL ──────────────────────────────────────────────────────────
     /// The agent has paused and is waiting for a human decision.
     ///
-    /// Call `handle.approve()`, `handle.approve_always()`,
-    /// `handle.deny("reason")`, or `handle.deny_always("reason")` to resume.
+    /// Call `handle.approve()`, `handle.approve_with("note")`,
+    /// `handle.approve_always()`, `handle.deny("reason")`, or
+    /// `handle.deny_always("reason")` to resume.
     Control(ControlHandle),
 
     // ── Artifacts ─────────────────────────────────────────────────────
@@ -363,13 +364,6 @@ pub enum AgentEvent {
         pressure_before: f64,
         /// Context pressure after compression (0.0–1.0).
         pressure_after: f64,
-    },
-
-    /// L3 (LLM summarization) was attempted but failed and the pipeline fell
-    /// back to L2 collapse. The `freed` field shows how many tokens were
-    /// reclaimed by the fallback L2 pass.
-    CompressFallback {
-        freed: usize,
     },
 
     // ── Retry ─────────────────────────────────────────────────────────
@@ -409,7 +403,7 @@ pub enum CompressMethod {
     /// L3: the LLM was asked to summarise old messages.
     Summarize,
     /// L3 summarization was attempted but failed; fell back to L2 collapse.
-    L3Failed,
+    SummarizeFailed,
 }
 
 // ── ControlHandle ────────────────────────────────────────────────────────────
@@ -426,10 +420,11 @@ pub enum CompressMethod {
 /// ```rust,ignore
 /// AgentEvent::Control(handle) => {
 ///     println!("Agent wants to: {}", handle.request.description());
-///     handle.approve();            // once
-///     handle.approve_always();     // for all future calls to this tool
-///     handle.deny("not allowed");  // once
-///     handle.deny_always("never"); // for all future calls to this tool
+///     handle.approve();                        // once
+///     handle.approve_with("use /tmp instead"); // once, with a note the LLM sees
+///     handle.approve_always();                 // for all future calls in this session
+///     handle.deny("not allowed");              // once
+///     handle.deny_always("never");             // for all future calls in this session
 /// }
 /// ```
 #[must_use = "ControlHandle must be responded to; dropping it auto-denies the request"]

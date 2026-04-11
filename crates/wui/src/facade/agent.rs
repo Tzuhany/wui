@@ -102,13 +102,18 @@ impl Agent {
         run(Arc::new(self.make_run_config()), messages)
     }
 
-    // ── Typed output ─────────────────────────────────────────────────────────
+    // ── JSON output ───────────────────────────────────────────────────────────
 
     /// Run a single prompt and deserialise the response into `T`.
     ///
-    /// Instructs the LLM to respond with JSON conforming to `T`'s schema,
+    /// Constrains the LLM to respond with JSON matching `T`'s schema (via
+    /// provider-native JSON mode when available, prompt injection otherwise),
     /// then parses the response. The schema is derived at compile time via
     /// `schemars::JsonSchema`.
+    ///
+    /// Use this when you want the **entire response** as a typed Rust value.
+    /// For extracting a typed value from a larger natural-language response,
+    /// see [`run_structured`](Agent::run_structured).
     ///
     /// ```rust,ignore
     /// #[derive(serde::Deserialize, schemars::JsonSchema)]
@@ -119,10 +124,10 @@ impl Agent {
     /// }
     ///
     /// let analysis: Analysis = agent
-    ///     .run_typed("Analyse the sentiment of: 'Great product!'")
+    ///     .run_as("Analyse the sentiment of: 'Great product!'")
     ///     .await?;
     /// ```
-    pub async fn run_typed<T>(
+    pub async fn run_as<T>(
         &self,
         input: impl Into<Message>,
     ) -> Result<T, wui_core::event::AgentError>
@@ -325,12 +330,15 @@ pub(crate) fn build_run_config(
 
     RunConfig {
         provider: config.provider.clone(),
-        tools: Arc::new(build_registry(
-            &config.tools,
-            &config.deferred_tools,
-            &config.catalogs,
-            config.catalog_limit,
-        )),
+        tools: Arc::new(
+            build_registry(
+                &config.tools,
+                &config.deferred_tools,
+                &config.catalogs,
+                config.catalog_limit,
+            )
+            .expect("tool registry invalid: this is a bug — AgentBuilder::try_build() should have caught duplicate tool names"),
+        ),
         hooks: Arc::new(HookRunner::new(config.hooks.clone())),
         compress: config.compress.clone(),
         permission: config.permission.clone(),
@@ -343,7 +351,7 @@ pub(crate) fn build_run_config(
         max_iter: config.max_iter,
         retry: config.retry.clone(),
         tool_timeout: config.tool_timeout,
-        ignore_diminishing_returns: config.ignore_diminishing_returns,
+        expect_long_task: config.expect_long_task,
         token_budget: config.token_budget,
         thinking_budget: config.thinking_budget,
         checkpoint_store: config.checkpoint_store.clone(),
@@ -370,7 +378,7 @@ pub(crate) fn build_registry(
     deferred: &[Arc<dyn wui_core::tool::Tool>],
     catalogs: &[Arc<dyn crate::catalog::ToolCatalog>],
     catalog_limit: usize,
-) -> ToolRegistry {
+) -> Result<ToolRegistry, String> {
     let has_deferred = !deferred.is_empty();
     let has_catalogs = !catalogs.is_empty();
 

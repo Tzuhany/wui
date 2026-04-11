@@ -7,7 +7,7 @@ use tracing::Instrument as _;
 
 use std::sync::Arc;
 
-use wui_core::event::AgentEvent;
+use wui_core::event::{AgentError, AgentEvent};
 use wui_core::message::Message;
 
 use super::run_loop;
@@ -60,6 +60,55 @@ impl RunStream {
     /// the handle for later (e.g., a cancel button in a UI).
     pub fn cancel_token(&self) -> CancellationToken {
         self.cancel.clone()
+    }
+
+    // ── Convenience helpers ───────────────────────────────────────────────────
+
+    /// Consume the stream and collect the final text response.
+    ///
+    /// Equivalent to driving the event loop manually and accumulating
+    /// `TextDelta` events. Tool events are silently ignored.
+    ///
+    /// ```rust,ignore
+    /// let text = agent.stream("What is 2 + 2?").collect_text().await?;
+    /// println!("{text}");
+    /// ```
+    pub async fn collect_text(mut self) -> Result<String, AgentError> {
+        use futures::StreamExt as _;
+        let mut text = String::new();
+        while let Some(event) = self.next().await {
+            match event {
+                AgentEvent::TextDelta(t) => text.push_str(&t),
+                AgentEvent::Done(_) => break,
+                AgentEvent::Error(e) => return Err(e),
+                _ => {}
+            }
+        }
+        Ok(text)
+    }
+
+    /// Consume the stream, printing text deltas to stdout as they arrive.
+    ///
+    /// Prints a trailing newline after the run completes. Tool events are
+    /// silently ignored.
+    ///
+    /// ```rust,ignore
+    /// agent.stream("Write a haiku about Rust.").print_text().await?;
+    /// ```
+    pub async fn print_text(mut self) -> Result<(), AgentError> {
+        use futures::StreamExt as _;
+        while let Some(event) = self.next().await {
+            match event {
+                AgentEvent::TextDelta(t) => print!("{t}"),
+                AgentEvent::Done(_) => {
+                    println!();
+                    break;
+                }
+                AgentEvent::Error(e) => return Err(e),
+                _ => {}
+            }
+        }
+        Ok(())
     }
 }
 

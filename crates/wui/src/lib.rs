@@ -29,7 +29,7 @@ pub(crate) mod runtime;
 pub mod providers;
 
 pub use facade::agent::Agent;
-pub use facade::builder::{AgentBuilder, Effort};
+pub use facade::builder::{AgentBuilder, BuildError, Effort};
 pub use facade::hitl_registry::HitlRegistry;
 pub use facade::session::{Session, SessionHooks};
 pub use facade::sub_agent::{SubAgent, SubAgentSummary, SubAgentToolCall};
@@ -50,7 +50,7 @@ pub use wui_core::provider::Provider;
 pub use wui_core::tool::ToolCallId;
 pub use wui_core::tool::{
     Artifact, ArtifactContent, ArtifactKind, ContextInjection, FailureKind, InterruptBehavior,
-    Tool, ToolCtx, ToolInput, ToolInputError, ToolMeta, ToolOutput, TypedTool,
+    Tool, ToolArgs, ToolCtx, ToolInput, ToolInputError, ToolMeta, ToolOutput, TypedTool,
 };
 
 pub use facade::agent::StructuredRun;
@@ -85,12 +85,12 @@ pub use wui_core::runner::AgentRunner;
 /// `use wui::prelude::*` to bring the most-used types into scope.
 pub mod prelude {
     pub use super::{
-        Agent, AgentBuilder, AgentError, AgentEvent, Artifact, ArtifactContent, CancellationToken,
-        CompressPipeline, ContextInjection, ControlResponse, DenyList, Effort, HitlRegistry, Hook,
-        HookDecision, HookEvent, InMemorySessionStore, Message, PermissionMode, PermissionRules,
-        Provider, RetryPolicy, RunStopReason, RunStream, Session, SessionHooks, SessionStore,
-        SubAgent, SubAgentSummary, SubAgentToolCall, Tool, ToolCtx, ToolInput, ToolInputError,
-        ToolMeta, ToolOutput, TypedTool,
+        Agent, AgentBuilder, AgentError, AgentEvent, Artifact, ArtifactContent, BuildError,
+        CancellationToken, CompressPipeline, ContextInjection, ControlResponse, DenyList, Effort,
+        HitlRegistry, Hook, HookDecision, HookEvent, InMemorySessionStore, Message, PermissionMode,
+        PermissionRules, Provider, RetryPolicy, RunStopReason, RunStream, Session, SessionHooks,
+        SessionStore, SubAgent, SubAgentSummary, SubAgentToolCall, Tool, ToolArgs, ToolCtx,
+        ToolInput, ToolInputError, ToolMeta, ToolOutput, TypedTool,
     };
     pub use futures::StreamExt;
 }

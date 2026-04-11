@@ -98,14 +98,14 @@ use parsing::parse_stream;
 use provider::{call_with_retry, is_prompt_too_long, ProviderStream};
 use tool_batch::{authorize_and_dispatch, run_post_hooks};
 
-// ── Diminishing-returns constants ─────────────────────────────────────────────
+// ── Stall-detection constants ─────────────────────────────────────────────────
 
 /// Minimum output tokens in a single assistant turn to be considered "productive".
 /// Turns below this threshold count toward the [`MAX_LOW_OUTPUT_TURNS`] streak.
 const MIN_USEFUL_OUTPUT_TOKENS: u32 = 500;
 
 /// Consecutive low-output turns before the run auto-stops with
-/// [`RunStopReason::DiminishingReturns`].
+/// [`RunStopReason::Stalled`].
 ///
 /// If the LLM produces fewer than [`MIN_USEFUL_OUTPUT_TOKENS`] output tokens
 /// for this many turns in a row the run terminates to avoid burning budget on
@@ -379,7 +379,7 @@ async fn handle_diminishing_returns(
     s: &mut RunState,
     outcome: &IterationOutcome,
 ) -> Option<LoopControl> {
-    if config.ignore_diminishing_returns {
+    if config.expect_long_task {
         return None;
     }
 
@@ -398,7 +398,7 @@ async fn handle_diminishing_returns(
         stop_with_hooks(
             config,
             s,
-            RunStopReason::DiminishingReturns,
+            RunStopReason::Stalled,
             |state| state.recovery.low_output_streak = 0,
             |_, _| {},
         )
@@ -545,7 +545,7 @@ mod tests {
     ) -> Arc<RunConfig> {
         Arc::new(RunConfig {
             provider,
-            tools: Arc::new(ToolRegistry::new(tools, vec![])),
+            tools: Arc::new(ToolRegistry::new(tools, vec![]).expect("duplicate tool name in test_config")),
             hooks: Arc::new(HookRunner::new(Vec::new())),
             compress: Arc::new(CompressPipeline {
                 window_tokens: 1_000_000,
@@ -564,7 +564,7 @@ mod tests {
                 ..RetryPolicy::default()
             },
             tool_timeout: None,
-            ignore_diminishing_returns: true,
+            expect_long_task: true,
             token_budget: None,
             thinking_budget: None,
             checkpoint_store: None,
@@ -937,12 +937,12 @@ mod tests {
 
     #[tokio::test]
     async fn diminishing_returns_stops_after_low_output_streak() {
-        // The diminishing-returns heuristic tracks consecutive EndTurn responses
+        // The stall-detection heuristic tracks consecutive EndTurn responses
         // with output_tokens < MIN_USEFUL_OUTPUT_TOKENS (500). The streak
         // accumulates across iterations that are extended by PreStop hooks
         // blocking the Completed stop reason.
         //
-        // To trigger DiminishingReturns:
+        // To trigger Stalled:
         //   - EndTurn with low output → streak increments → Completed blocked by hook
         //   - Next EndTurn → stop_hook_active is true, so Completed returns
         //     (the hook can only block once before stop_hook_active prevents it)
@@ -958,9 +958,9 @@ mod tests {
         // (which reset stop_hook_active) with EndTurn turns (which accumulate
         // the streak). A PreStop hook blocks Completed to keep the loop going.
         // Because ToolUse resets the streak, we cannot reach 3 in this test;
-        // instead we verify that with ignore_diminishing_returns=false, a
+        // instead we verify that with expect_long_task=false, a
         // single low-output EndTurn still completes normally as Completed,
-        // and with ignore_diminishing_returns=true it likewise completes,
+        // and with expect_long_task=true it likewise completes,
         // confirming the flag is wired correctly.
 
         let tiny_end_turn = vec![
@@ -976,13 +976,13 @@ mod tests {
             },
         ];
 
-        // With ignore_diminishing_returns = false: a single low-output EndTurn
+        // With expect_long_task = false: a single low-output EndTurn
         // still completes as Completed (streak = 1 < 3).
         let provider = SequenceProvider::new(vec![tiny_end_turn.clone()]);
         let mut config = test_config(Arc::new(provider), vec![], PermissionMode::Auto);
         Arc::get_mut(&mut config)
             .unwrap()
-            .ignore_diminishing_returns = false;
+            .expect_long_task = false;
 
         let mut stream = run(config, vec![Message::user("do stuff")]);
         let mut summary = None;
@@ -1002,11 +1002,11 @@ mod tests {
             wui_core::event::RunStopReason::Completed,
         );
 
-        // With ignore_diminishing_returns = true (default): same response,
+        // With expect_long_task = true (default): same response,
         // same outcome, confirming the flag doesn't break normal completion.
         let provider2 = SequenceProvider::new(vec![tiny_end_turn]);
         let config2 = test_config(Arc::new(provider2), vec![], PermissionMode::Auto);
-        // ignore_diminishing_returns defaults to true in test_config
+        // expect_long_task defaults to true in test_config
 
         let mut stream2 = run(config2, vec![Message::user("do stuff")]);
         let mut summary2 = None;

@@ -22,8 +22,10 @@ use crate::{
 struct StoredEntry {
     id: String,
     content: String,
+    name: Option<String>,
     kind: Option<String>,
     importance: f32,
+    pinned: bool,
 }
 
 #[derive(Clone, Default)]
@@ -57,9 +59,11 @@ impl RecallBackend for InMemoryStore {
                 (occurrences > 0).then(|| MemoryHit {
                     id: e.id.clone(),
                     content: e.content.clone(),
+                    name: e.name.clone(),
                     kind: e.kind.clone(),
                     importance: Some(e.importance),
                     score: Some(occurrences as f32 * e.importance),
+                    pinned: e.pinned,
                 })
             })
             .collect();
@@ -85,8 +89,10 @@ impl RememberBackend for InMemoryStore {
         self.entries.write().await.push(StoredEntry {
             id: id.clone(),
             content: item.content,
+            name: item.name,
             kind: item.kind,
             importance: item.importance.unwrap_or(0.5).clamp(0.0, 1.0),
+            pinned: item.pinned,
         });
         Ok(MemoryRef { id })
     }
@@ -110,16 +116,20 @@ mod tests {
         let r1 = store
             .remember(NewMemory {
                 content: "Alice likes matcha".into(),
+                name: Some("alice-pref".into()),
                 kind: Some("preference".into()),
                 importance: Some(0.8),
+                pinned: false,
             })
             .await
             .unwrap();
         let _r2 = store
             .remember(NewMemory {
                 content: "Bob likes coffee".into(),
+                name: None,
                 kind: Some("preference".into()),
                 importance: Some(0.5),
+                pinned: false,
             })
             .await
             .unwrap();
@@ -137,8 +147,10 @@ mod tests {
         let r = store
             .remember(NewMemory {
                 content: "temporary note".into(),
+                name: None,
                 kind: None,
                 importance: None,
+                pinned: false,
             })
             .await
             .unwrap();
@@ -158,16 +170,20 @@ mod tests {
         store
             .remember(NewMemory {
                 content: "rust rust rust".into(),
+                name: None,
                 kind: None,
                 importance: Some(0.5),
+                pinned: false,
             })
             .await
             .unwrap();
         store
             .remember(NewMemory {
                 content: "rust".into(),
+                name: None,
                 kind: None,
                 importance: Some(0.9),
+                pinned: false,
             })
             .await
             .unwrap();

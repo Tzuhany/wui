@@ -1,25 +1,33 @@
-//! Concurrent vs sequential tool execution.
+//! Concurrent vs sequential tool execution with `TypedTool`.
 //!
 //! Shows two tools: one with `concurrent: true` (the default) and one with
-//! `concurrent: false`. When the LLM calls both, the concurrent tool starts
-//! immediately while the sequential tool waits its turn.
+//! `concurrent: false`. When the LLM calls both in one turn, the concurrent
+//! tool starts immediately while the sequential tool waits its turn.
 //!
 //! Run with:
 //!   ANTHROPIC_API_KEY=sk-... cargo run --example 06_concurrent -p wui --features anthropic
 
 use async_trait::async_trait;
 use futures::StreamExt;
-use serde_json::{json, Value};
 use wui::providers::Anthropic;
-use wui::{Agent, AgentEvent, PermissionMode, Tool, ToolCtx, ToolMeta, ToolOutput};
+use wui::{Agent, AgentEvent, PermissionMode, ToolCtx, ToolMeta, ToolOutput, TypedTool};
+use wui_macros::ToolInput;
 
 // ── A fast, safe, concurrent tool ────────────────────────────────────────────
 
-/// Simulates a read-only database lookup. Safe to run alongside other tools.
+#[derive(ToolInput)]
+struct LookupInput {
+    /// Cache key to look up.
+    key: String,
+}
+
+/// Simulates a read-only cache lookup. Safe to run alongside other tools.
 struct FastLookupTool;
 
 #[async_trait]
-impl Tool for FastLookupTool {
+impl TypedTool for FastLookupTool {
+    type Input = LookupInput;
+
     fn name(&self) -> &str {
         "fast_lookup"
     }
@@ -28,17 +36,7 @@ impl Tool for FastLookupTool {
         "Look up a value from the read-only cache. Fast and safe to run concurrently."
     }
 
-    fn input_schema(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "key": { "type": "string" }
-            },
-            "required": ["key"]
-        })
-    }
-
-    fn meta(&self, _input: &Value) -> ToolMeta {
+    fn meta(&self, _: &LookupInput) -> ToolMeta {
         // concurrent: true (already the default) — may run alongside other tools.
         ToolMeta {
             concurrent: true,
@@ -47,19 +45,26 @@ impl Tool for FastLookupTool {
         }
     }
 
-    async fn call(&self, input: Value, _ctx: &ToolCtx) -> ToolOutput {
-        let key = input["key"].as_str().unwrap_or("?");
-        ToolOutput::success(format!("cache[{key}] = 42"))
+    async fn call_typed(&self, input: LookupInput, _ctx: &ToolCtx) -> ToolOutput {
+        ToolOutput::success(format!("cache[{}] = 42", input.key))
     }
 }
 
 // ── A slow, stateful, sequential tool ────────────────────────────────────────
 
+#[derive(ToolInput)]
+struct WriteLogInput {
+    /// Message to append to the audit log.
+    message: String,
+}
+
 /// Simulates writing to a shared resource. Must not overlap with other writers.
 struct WriteLogTool;
 
 #[async_trait]
-impl Tool for WriteLogTool {
+impl TypedTool for WriteLogTool {
+    type Input = WriteLogInput;
+
     fn name(&self) -> &str {
         "write_log"
     }
@@ -68,17 +73,7 @@ impl Tool for WriteLogTool {
         "Append an entry to the shared audit log. Must run sequentially."
     }
 
-    fn input_schema(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "message": { "type": "string" }
-            },
-            "required": ["message"]
-        })
-    }
-
-    fn meta(&self, _input: &Value) -> ToolMeta {
+    fn meta(&self, _: &WriteLogInput) -> ToolMeta {
         // concurrent: false — the executor places this in the serial queue.
         // It will not start until all currently running concurrent tools finish.
         ToolMeta {
@@ -87,9 +82,8 @@ impl Tool for WriteLogTool {
         }
     }
 
-    async fn call(&self, input: Value, _ctx: &ToolCtx) -> ToolOutput {
-        let msg = input["message"].as_str().unwrap_or("(empty)");
-        ToolOutput::success(format!("Logged: {msg}"))
+    async fn call_typed(&self, input: WriteLogInput, _ctx: &ToolCtx) -> ToolOutput {
+        ToolOutput::success(format!("Logged: {}", input.message))
     }
 }
 
@@ -112,6 +106,7 @@ async fn main() -> anyhow::Result<()> {
     let mut stream =
         agent.stream("Look up key 'user_count' and write 'session started' to the log.");
 
+    // Stream manually here so we can observe tool start/done events.
     while let Some(event) = stream.next().await {
         match event {
             AgentEvent::TextDelta(text) => print!("{text}"),
