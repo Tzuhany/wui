@@ -9,20 +9,20 @@
 //   1. Check context pressure → compress if needed → check for overflow.
 //   2. Build ChatRequest.
 //   3. Call provider.stream() with retry → receive StreamEvents.
-//   4. Process stream:
+//   4. Process stream with eager dispatch:
 //        - TextDelta / ThinkingDelta → emit AgentEvent immediately
-//        - ToolUseEnd → validate + collect into pending_auths (no auth yet)
+//        - ToolUseEnd → run PreToolUse hook + evaluate permissions:
+//            • auto-approved → submit to executor immediately (while stream continues)
+//            • needs HITL   → queue for deferred approval
 //        - MessageEnd → break inner loop
-//   5. Authorize all collected tools concurrently (JoinSet).
-//        - HITL prompts fire after the LLM has finished speaking.
-//        - Each tool starts executing the moment its own auth resolves.
-//   5. collect_remaining() — await any still-running tools.
-//   6. Run PostToolUse hooks — may inject system notices for blocked outputs.
-//   7. Append tool results as a single user message (closes the loop).
-//   8. Append context injections as system reminders.
-//   9. Run PreStop hook.
-//   10. Evaluate stop condition.
-//   11. Continue or return RunSummary.
+//   5. Approve deferred tools (HITL prompts fire after the LLM has finished).
+//   6. collect_remaining() — await any still-running tools.
+//   7. Run PostToolUse hooks — may inject system notices for blocked outputs.
+//   8. Append tool results as a single user message (closes the loop).
+//   9. Append context injections as system reminders.
+//   10. Run PreStop hook.
+//   11. Evaluate stop condition.
+//   12. Continue or return RunSummary.
 //
 // ── Bounded channel ───────────────────────────────────────────────────────────
 //
@@ -94,9 +94,9 @@ use super::registry::{self, ToolRegistry};
 // ── Submodule imports used in this file ─────────────────────────────────────
 use compression::{emergency_compress, maybe_compress};
 use history::{last_assistant_text, replace_last_assistant_text, system_reminder_msg};
-use parsing::parse_stream;
+use parsing::{approve_deferred, stream_and_dispatch};
 use provider::{call_with_retry, is_prompt_too_long, ProviderStream};
-use tool_batch::{authorize_and_dispatch, run_post_hooks};
+use tool_batch::run_post_hooks;
 
 // ── Stall-detection constants ─────────────────────────────────────────────────
 
@@ -281,14 +281,31 @@ async fn execute_iteration(
         config.max_concurrent_tools,
     );
     let mut ctx = IterationCtx::new();
+    let mut deferred = Vec::new();
     futures::pin_mut!(stream);
 
-    let got_message_end = parse_stream(&mut stream, &mut ctx, &registry, tx).await?;
+    // Phase 1: Parse stream + eagerly dispatch auto-approved tools.
+    // Tools needing HITL are collected in `deferred`.
+    let got_message_end = stream_and_dispatch(
+        &mut stream,
+        &mut ctx,
+        config,
+        &registry,
+        &mut executor,
+        &s.messages,
+        &mut deferred,
+        tx,
+    )
+    .await?;
     if !got_message_end {
         return handle_stream_drop(s, &ctx);
     }
 
-    authorize_and_dispatch(&mut ctx, config, &registry, &mut executor, &s.messages, tx).await;
+    // Phase 2: HITL approval for deferred tools (after the LLM finishes speaking).
+    if !deferred.is_empty() {
+        approve_deferred(deferred, &mut ctx, config, &mut executor, &s.messages, tx).await;
+    }
+
     let outcome = IterationOutcome {
         stop_reason: ctx.stop_reason.clone(),
         usage: ctx.usage.clone(),

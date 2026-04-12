@@ -1,6 +1,4 @@
-// ── Tool authorization, hooks, and event emission ───────────────────────────
-
-use std::sync::Arc;
+// ── Post-tool hooks and event emission ──────────────────────────────────────
 
 use tokio::sync::mpsc;
 
@@ -8,51 +6,9 @@ use wui_core::event::AgentEvent;
 use wui_core::hook::HookDecision;
 use wui_core::message::Message;
 
-use super::auth::{self, AuthOutcome, AuthRequest};
 use super::history::system_reminder_msg;
-use super::registry::ToolRegistry;
 use super::RunConfig;
-use super::{CompletedTool, IterationCtx, PendingTool, ToolExecutor};
-
-/// Authorize all collected tools concurrently and dispatch approved ones to
-/// the executor. Denied tools are recorded immediately with their events.
-pub(super) async fn authorize_and_dispatch(
-    ctx: &mut IterationCtx,
-    config: &Arc<RunConfig>,
-    active_registry: &Arc<ToolRegistry>,
-    executor: &mut ToolExecutor,
-    messages: &[Message],
-    tx: &mpsc::Sender<AgentEvent>,
-) {
-    let mut auth_tasks: tokio::task::JoinSet<AuthOutcome> = tokio::task::JoinSet::new();
-    let history_snapshot: Arc<[Message]> = Arc::from(messages.to_vec());
-
-    for (id, name, input) in std::mem::take(&mut ctx.pending_auths) {
-        let config_c = Arc::clone(config);
-        let registry_c = Arc::clone(active_registry);
-        let tx_c = tx.clone();
-        auth_tasks.spawn(async move {
-            auth::authorize_tool(
-                &config_c,
-                &registry_c,
-                AuthRequest { id, name, input },
-                &tx_c,
-            )
-            .await
-        });
-    }
-
-    while let Some(outcome) = auth_tasks.join_next().await {
-        let outcome = match outcome {
-            Ok(o) => o,
-            Err(e) => {
-                tracing::error!(error = %e, "auth task panicked — skipping tool");
-                continue;
-            }
-        };
-        handle_auth_outcome(ctx, executor, &history_snapshot, outcome, tx).await;
-    }
-}
+use super::{CompletedTool, IterationCtx, ToolExecutor};
 
 /// Collect remaining executor results and run post-tool hooks.
 /// Emits tool events in submission order, after hook mutations are applied.
@@ -140,46 +96,6 @@ pub(super) async fn emit_tool_event(done: &CompletedTool, tx: &mpsc::Sender<Agen
         }
     };
     tx.send(event).await.ok();
-}
-
-async fn handle_auth_outcome(
-    ctx: &mut IterationCtx,
-    executor: &mut ToolExecutor,
-    history_snapshot: &Arc<[Message]>,
-    outcome: AuthOutcome,
-    tx: &mpsc::Sender<AgentEvent>,
-) {
-    match outcome {
-        AuthOutcome::Allowed {
-            id,
-            name,
-            input,
-            injections,
-        } => {
-            ctx.auth_injections.extend(injections);
-            ctx.remember_tool_input(&id, input.clone());
-            tracing::debug!(tool = %name, "tool dispatched");
-            tx.send(AgentEvent::ToolStart {
-                id: id.clone(),
-                name: name.clone(),
-                input: input.clone(),
-            })
-            .await
-            .ok();
-            executor.submit(PendingTool {
-                id,
-                name,
-                input,
-                messages: Arc::clone(history_snapshot),
-            });
-        }
-        AuthOutcome::Denied { tool, injections } => {
-            ctx.auth_injections.extend(injections);
-            ctx.emission_guard.first_time(&tool.id);
-            emit_tool_event(&tool, tx).await;
-            ctx.completed_map.insert(tool.id.clone(), tool);
-        }
-    }
 }
 
 /// Guards against double-emission of tool events.

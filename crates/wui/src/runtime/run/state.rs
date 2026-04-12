@@ -170,7 +170,6 @@ pub(super) struct IterationCtx {
     pub(super) thinking_buf: String,
     pub(super) stop_reason: StopReason,
     pub(super) usage: TokenUsage,
-    pub(super) pending_auths: Vec<(ToolCallId, String, serde_json::Value)>,
     pub(super) emission_guard: EmissionGuard,
     pub(super) auth_injections: Vec<Message>,
 }
@@ -187,7 +186,6 @@ impl IterationCtx {
             thinking_buf: String::new(),
             stop_reason: StopReason::EndTurn,
             usage: TokenUsage::default(),
-            pending_auths: Vec::new(),
             emission_guard: EmissionGuard::new(),
             auth_injections: Vec::new(),
         }

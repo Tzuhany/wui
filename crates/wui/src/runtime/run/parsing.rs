@@ -1,28 +1,67 @@
-// ── Stream event parsing ────────────────────────────────────────────────────
+// ── Stream parsing with eager tool dispatch ─────────────────────────────────
+//
+// Processes the provider's stream event by event. When a tool's input is
+// complete (ToolUseEnd), it is prepared immediately — hooks run, permissions
+// are evaluated. Tools that can proceed without human approval are submitted
+// to the executor right away, while the stream continues. Tools that need
+// HITL approval are queued for after MessageEnd.
+//
+// This implements the "Streaming Before Orchestration" principle: work
+// starts as soon as it is describable, not after the LLM finishes speaking.
+//
+// ── Timeline ────────────────────────────────────────────────────────────────
+//
+//   stream: [text...] [tool₁ input complete → hook → auto-approve → execute]
+//                      [text...] [tool₂ input complete → hook → needs HITL → queue]
+//           [MessageEnd]
+//   post:   [tool₂ HITL prompt → approve/deny → execute/skip]
+//           [collect all results]
+
+use std::sync::Arc;
 
 use futures::StreamExt;
 use tokio::sync::mpsc;
 
 use wui_core::event::{AgentError, AgentEvent};
+use wui_core::message::Message;
 use wui_core::provider::ProviderError;
+use wui_core::tool::ToolCallId;
 
+use super::auth::{self, AuthOutcome, AuthRequest, PrepareOutcome};
 use super::registry::ToolRegistry;
 use super::tool_batch::emit_tool_event;
-use super::CompletedTool;
-use super::IterationCtx;
+use super::RunConfig;
+use super::{CompletedTool, IterationCtx, PendingTool, ToolExecutor};
 
-/// Parse all stream events, accumulating tool calls, text, and thinking into
-/// the iteration context. Returns `Ok(true)` when `MessageEnd` was received,
-/// `Ok(false)` when the stream ended without it, `Err` on fatal errors.
-pub(super) async fn parse_stream(
+/// A tool that passed preparation but needs interactive approval.
+pub(super) struct DeferredApproval {
+    pub id: ToolCallId,
+    pub name: String,
+    pub input: serde_json::Value,
+    pub session_pattern: String,
+    pub ctrl_req: wui_core::event::ControlRequest,
+}
+
+/// Parse the provider stream, eagerly dispatching tools that don't need
+/// human approval. Returns `Ok(true)` on `MessageEnd`, `Ok(false)` on
+/// premature stream end.
+///
+/// Tools needing HITL are collected in `deferred` for the caller to
+/// handle after the stream completes.
+pub(super) async fn stream_and_dispatch(
     stream: &mut (impl futures::Stream<Item = Result<wui_core::event::StreamEvent, ProviderError>>
               + Unpin),
     ctx: &mut IterationCtx,
-    active_registry: &ToolRegistry,
+    config: &Arc<RunConfig>,
+    active_registry: &Arc<ToolRegistry>,
+    executor: &mut ToolExecutor,
+    messages: &[Message],
+    deferred: &mut Vec<DeferredApproval>,
     tx: &mpsc::Sender<AgentEvent>,
 ) -> Result<bool, AgentError> {
     use wui_core::event::StreamEvent::*;
 
+    let history_snapshot: Arc<[Message]> = Arc::from(messages.to_vec());
     let mut text_chunk_count: u32 = 0;
 
     while let Some(event) = stream.next().await {
@@ -66,7 +105,7 @@ pub(super) async fn parse_stream(
                 let input: serde_json::Value = match serde_json::from_str(&json) {
                     Ok(v) => v,
                     Err(e) => {
-                        tracing::warn!(tool = %name, error = %e, "malformed tool input JSON from provider");
+                        tracing::warn!(tool = %name, error = %e, "malformed tool input JSON");
                         ctx.record_tool_use(
                             id.clone(),
                             name.clone(),
@@ -92,8 +131,33 @@ pub(super) async fn parse_stream(
                     .and_then(|t| t.executor_hints(&input).summary);
                 ctx.record_tool_use(id.clone(), name.clone(), input.clone(), tool_summary);
 
-                // Queue for authorization after MessageEnd.
-                ctx.pending_auths.push((id, name, input));
+                // ── Eager dispatch: prepare immediately, dispatch if ready ──
+                let req = AuthRequest {
+                    id: id.clone(),
+                    name: name.clone(),
+                    input,
+                };
+                match auth::prepare_tool(config, active_registry, req).await {
+                    PrepareOutcome::Ready(outcome) => {
+                        handle_ready_outcome(ctx, executor, &history_snapshot, outcome, tx).await;
+                    }
+                    PrepareOutcome::NeedsApproval {
+                        id,
+                        name,
+                        input,
+                        session_pattern,
+                        ctrl_req,
+                        ..
+                    } => {
+                        deferred.push(DeferredApproval {
+                            id,
+                            name,
+                            input,
+                            session_pattern,
+                            ctrl_req,
+                        });
+                    }
+                }
             }
 
             MessageEnd {
@@ -119,4 +183,71 @@ pub(super) async fn parse_stream(
         }
     }
     Ok(false)
+}
+
+/// Process tools deferred for HITL approval (after the LLM finishes speaking).
+pub(super) async fn approve_deferred(
+    deferred: Vec<DeferredApproval>,
+    ctx: &mut IterationCtx,
+    config: &Arc<RunConfig>,
+    executor: &mut ToolExecutor,
+    messages: &[Message],
+    tx: &mpsc::Sender<AgentEvent>,
+) {
+    let history_snapshot: Arc<[Message]> = Arc::from(messages.to_vec());
+
+    for tool in deferred {
+        let outcome = auth::approve_tool(
+            config,
+            tool.id,
+            tool.name,
+            tool.input,
+            tool.session_pattern,
+            tool.ctrl_req,
+            tx,
+        )
+        .await;
+        handle_ready_outcome(ctx, executor, &history_snapshot, outcome, tx).await;
+    }
+}
+
+/// Handle an authorization outcome: dispatch allowed tools, record denied ones.
+async fn handle_ready_outcome(
+    ctx: &mut IterationCtx,
+    executor: &mut ToolExecutor,
+    history_snapshot: &Arc<[Message]>,
+    outcome: AuthOutcome,
+    tx: &mpsc::Sender<AgentEvent>,
+) {
+    match outcome {
+        AuthOutcome::Allowed {
+            id,
+            name,
+            input,
+            injections,
+        } => {
+            ctx.auth_injections.extend(injections);
+            ctx.remember_tool_input(&id, input.clone());
+            tracing::debug!(tool = %name, "tool dispatched");
+            tx.send(AgentEvent::ToolStart {
+                id: id.clone(),
+                name: name.clone(),
+                input: input.clone(),
+            })
+            .await
+            .ok();
+            executor.submit(PendingTool {
+                id,
+                name,
+                input,
+                messages: Arc::clone(history_snapshot),
+            });
+        }
+        AuthOutcome::Denied { tool, injections } => {
+            ctx.auth_injections.extend(injections);
+            ctx.emission_guard.first_time(&tool.id);
+            emit_tool_event(&tool, tx).await;
+            ctx.completed_map.insert(tool.id.clone(), tool);
+        }
+    }
 }

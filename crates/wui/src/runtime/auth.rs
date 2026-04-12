@@ -59,20 +59,42 @@ pub(super) enum AuthOutcome {
     },
 }
 
-/// Verify that a tool call is permitted to run.
-pub(super) async fn authorize_tool(
+/// Outcome of the preparation phase (hook + verdict, no HITL).
+pub(super) enum PrepareOutcome {
+    /// Hook and rules allow — ready to execute immediately.
+    Ready(AuthOutcome),
+    /// Needs interactive human approval — defer to after MessageEnd.
+    NeedsApproval {
+        id: ToolCallId,
+        name: String,
+        input: serde_json::Value,
+        session_pattern: String,
+        ctrl_req: ControlRequest,
+    },
+}
+
+/// Phase 1: Run hooks and evaluate permission verdict.
+///
+/// Returns immediately with `Ready` (allowed or denied) or `NeedsApproval`
+/// (must wait for HITL). This is the part that can run during streaming —
+/// no user interaction, no blocking.
+pub(super) async fn prepare_tool(
     config: &RunConfig,
     registry: &ToolRegistry,
     req: AuthRequest,
-    tx: &mpsc::Sender<AgentEvent>,
-) -> AuthOutcome {
+) -> PrepareOutcome {
     let AuthRequest { id, name, input } = req;
     tracing::info!(tool.id = %id, tool.name = %name, "wui.tool.auth.start");
 
     // 1. Pre-tool hook — may allow, mutate, or block.
     let input = match config.hooks.pre_tool_use(&name, &input).await {
         HookDecision::Block { reason } => {
-            return denied_outcome(id, name, output_hook_blocked(reason), vec![]);
+            return PrepareOutcome::Ready(denied_outcome(
+                id,
+                name,
+                output_hook_blocked(reason),
+                vec![],
+            ));
         }
         HookDecision::Mutate { input: new } => new,
         HookDecision::Allow | HookDecision::MutateOutput { .. } => input,
@@ -86,27 +108,57 @@ pub(super) async fn authorize_tool(
     match verdict {
         PermissionVerdict::Allowed { source } => {
             tracing::debug!(tool = %name, ?source, "permission granted");
-            return allowed_outcome(id, name, input, vec![]);
+            PrepareOutcome::Ready(allowed_outcome(id, name, input, vec![]))
         }
         PermissionVerdict::Denied { reason, source } => {
             tracing::debug!(tool = %name, ?source, %reason, "permission denied");
-            return denied_outcome(id, name, output_permission_denied(reason), vec![]);
+            PrepareOutcome::Ready(denied_outcome(
+                id,
+                name,
+                output_permission_denied(reason),
+                vec![],
+            ))
         }
-        PermissionVerdict::NeedsApproval => {}
-    }
+        PermissionVerdict::NeedsApproval => {
+            let ctrl_req = build_control_request(&name, perm_key.as_deref(), is_destructive);
 
-    // 3. HITL approval.
-    let ctrl_req = build_control_request(&name, perm_key.as_deref(), is_destructive);
-
-    match permission::check(&config.permission, &ctrl_req, tool_is_readonly, &input) {
-        PermissionOutcome::Allowed => allowed_outcome(id, name, input, vec![]),
-        PermissionOutcome::Denied { reason } => {
-            denied_outcome(id, name, output_permission_denied(reason), vec![])
-        }
-        PermissionOutcome::NeedsApproval => {
-            await_approval(config, id, name, session_pattern, input, ctrl_req, tx).await
+            // Try the mode-level check (Callback mode resolves here).
+            match permission::check(&config.permission, &ctrl_req, tool_is_readonly, &input) {
+                PermissionOutcome::Allowed => {
+                    PrepareOutcome::Ready(allowed_outcome(id, name, input, vec![]))
+                }
+                PermissionOutcome::Denied { reason } => PrepareOutcome::Ready(denied_outcome(
+                    id,
+                    name,
+                    output_permission_denied(reason),
+                    vec![],
+                )),
+                PermissionOutcome::NeedsApproval => PrepareOutcome::NeedsApproval {
+                    id,
+                    name,
+                    input,
+                    session_pattern,
+                    ctrl_req,
+                },
+            }
         }
     }
+}
+
+/// Phase 2: HITL approval for tools that need interactive consent.
+///
+/// Emits a `ControlHandle`, waits for the human's decision, and returns
+/// the final `AuthOutcome`. Only called after the LLM finishes speaking.
+pub(super) async fn approve_tool(
+    config: &RunConfig,
+    id: ToolCallId,
+    name: String,
+    input: serde_json::Value,
+    session_pattern: String,
+    ctrl_req: ControlRequest,
+    tx: &mpsc::Sender<AgentEvent>,
+) -> AuthOutcome {
+    await_approval(config, id, name, session_pattern, input, ctrl_req, tx).await
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
