@@ -66,6 +66,7 @@ mod tool_batch;
 // continue to resolve unchanged.
 pub(crate) use config::RunConfig;
 pub use provider::RetryPolicy;
+pub use state::IterationTransition;
 pub(crate) use stream::run;
 pub use stream::RunStream;
 
@@ -95,7 +96,7 @@ use super::registry::{self, ToolRegistry};
 use compression::{emergency_compress, maybe_compress};
 use history::{last_assistant_text, replace_last_assistant_text, system_reminder_msg};
 use parsing::{approve_deferred, stream_and_dispatch};
-use provider::{call_with_retry, is_prompt_too_long, ProviderStream};
+use provider::{call_with_retry, is_prompt_too_long, parse_token_gap, ProviderStream};
 use tool_batch::run_post_hooks;
 
 // ── Stall-detection constants ─────────────────────────────────────────────────
@@ -189,7 +190,7 @@ async fn prepare_iteration(
     tx: &mpsc::Sender<AgentEvent>,
 ) -> Result<IterationSetup, AgentError> {
     config.hooks.notify_turn_start(&s.messages).await;
-    maybe_compress(config, &mut s.messages, tx).await;
+    maybe_compress(config, &mut s.messages, &mut s.recovery, tx).await;
 
     if config.compress.is_critically_full(&s.messages) {
         // Give the on_context_overflow callback a chance to relieve pressure
@@ -215,7 +216,9 @@ async fn prepare_iteration(
     match call_with_retry(config, &req, tx).await {
         Ok(stream) => Ok(IterationSetup::Ready { registry, stream }),
         Err(error) if is_prompt_too_long(&error) => {
-            if emergency_compress(config, &mut s.messages, tx).await {
+            let token_gap = parse_token_gap(&error);
+            if emergency_compress(config, &mut s.messages, &mut s.recovery, token_gap, tx).await {
+                s.recovery.last_transition = Some(state::IterationTransition::EmergencyCompress);
                 Ok(IterationSetup::Continue)
             } else {
                 Err(error)
@@ -358,6 +361,7 @@ async fn evaluate_stop_conditions(
     }
 
     s.recovery.reset_stop_hook();
+    s.recovery.last_transition = Some(state::IterationTransition::ToolUse);
     LoopControl::Continue
 }
 
@@ -381,12 +385,16 @@ async fn handle_max_tokens(
         .recovery
         .on_max_tokens(TOKEN_ESCALATION_FACTOR, MAX_TOKEN_ESCALATIONS)
     {
-        MaxTokensAction::Escalate => Some(LoopControl::Continue),
+        MaxTokensAction::Escalate => {
+            s.recovery.last_transition = Some(state::IterationTransition::MaxTokensEscalated);
+            Some(LoopControl::Continue)
+        }
         MaxTokensAction::InjectContinuation => {
             s.messages.push(Message::user(
                 "Your previous response was truncated due to length limits. \
                  Continue exactly where you left off. Do not repeat what you already said.",
             ));
+            s.recovery.last_transition = Some(state::IterationTransition::ContinuationInjected);
             Some(LoopControl::Continue)
         }
         MaxTokensAction::Exhausted => Some(
@@ -458,6 +466,7 @@ where
         HookDecision::Block { reason } if !s.recovery.stop_hook_active => {
             s.messages.push(system_reminder_msg(&reason));
             s.recovery.stop_hook_active = true;
+            s.recovery.last_transition = Some(state::IterationTransition::HookRetry);
             on_block(s);
             LoopControl::Continue
         }

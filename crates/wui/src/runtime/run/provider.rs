@@ -134,3 +134,28 @@ pub(super) fn is_prompt_too_long(e: &AgentError) -> bool {
         || msg.contains("maximum context length")
         || msg.contains("context_length_exceeded")
 }
+
+/// Try to extract the token overage from a prompt-too-long error message.
+///
+/// Anthropic errors typically contain strings like "your prompt is 150000 tokens,
+/// which exceeds the maximum of 128000 tokens". We parse both numbers and return
+/// the difference. Returns `None` if the pattern isn't found.
+pub(super) fn parse_token_gap(e: &AgentError) -> Option<usize> {
+    let msg = &e.message;
+    // Look for patterns like "N tokens" appearing twice in the message.
+    let mut numbers = Vec::new();
+    for word in msg.split_whitespace() {
+        if let Ok(n) = word.replace(',', "").parse::<usize>() {
+            numbers.push(n);
+        }
+    }
+    // We need at least two numbers: the prompt size and the maximum.
+    if numbers.len() >= 2 {
+        let max_pair = numbers.iter().copied().max().unwrap_or(0);
+        let min_pair = numbers.iter().copied().min().unwrap_or(0);
+        if max_pair > min_pair && min_pair > 0 {
+            return Some(max_pair - min_pair);
+        }
+    }
+    None
+}

@@ -6,11 +6,40 @@ use wui_core::hook::HookDecision;
 use wui_core::message::{ContentBlock, Message};
 use wui_core::tool::ToolCallId;
 
+use serde::{Deserialize, Serialize};
+
 use super::history::{last_assistant_text, system_reminder_msg};
 use super::tool_batch::EmissionGuard;
 use super::RunConfig;
 use crate::runtime::executor::CompletedTool;
 use crate::runtime::registry::ToolRegistry;
+
+/// Consecutive compression failures before the circuit breaker opens.
+const MAX_COMPRESS_FAILURES: u32 = 3;
+
+// ── IterationTransition ─────────────────────────────────────────────────────
+
+/// Why the run loop continued after a given iteration.
+///
+/// Recorded in `RecoveryState::last_transition` for observability. Test
+/// harnesses and logging can inspect this to understand the loop's decisions
+/// without parsing tracing output.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IterationTransition {
+    /// Normal continuation — the LLM returned tool calls.
+    ToolUse,
+    /// Context was compressed to relieve pressure.
+    Compressed,
+    /// `max_tokens` was escalated after a truncated response.
+    MaxTokensEscalated,
+    /// A "continue where you left off" message was injected.
+    ContinuationInjected,
+    /// A PreStop hook blocked the stop and forced another iteration.
+    HookRetry,
+    /// Emergency compression after a prompt-too-long rejection.
+    EmergencyCompress,
+}
 
 // ── MaxTokensAction ─────────────────────────────────────────────────────────
 
@@ -39,6 +68,13 @@ pub(super) struct RecoveryState {
     pub(super) effective_max_tokens: u32,
     /// True when a PreStop hook already blocked — prevents infinite loops.
     pub(super) stop_hook_active: bool,
+    /// Consecutive compression attempts that failed to relieve pressure.
+    /// After `MAX_COMPRESS_FAILURES` the circuit opens and compression is
+    /// skipped, letting `ContextOverflow` fire instead of looping.
+    pub(super) compress_failures: u32,
+    /// Why the loop continued at the end of the last iteration.
+    /// Recorded for observability — accessible from `RunSummary`.
+    pub(super) last_transition: Option<IterationTransition>,
 }
 
 impl RecoveryState {
@@ -49,7 +85,21 @@ impl RecoveryState {
             low_output_streak: 0,
             effective_max_tokens: base_max_tokens,
             stop_hook_active: false,
+            compress_failures: 0,
+            last_transition: None,
         }
+    }
+
+    /// Record a compression that relieved pressure — resets the circuit breaker.
+    pub(super) fn on_compress_success(&mut self) {
+        self.compress_failures = 0;
+    }
+
+    /// Record a compression that failed to relieve pressure.
+    /// Returns `true` when the circuit breaker has opened.
+    pub(super) fn on_compress_failure(&mut self) -> bool {
+        self.compress_failures += 1;
+        self.compress_failures >= MAX_COMPRESS_FAILURES
     }
 
     /// Handle a `MaxTokens` stop reason. Returns the action the run loop
@@ -128,6 +178,13 @@ impl RunState {
             iterations: self.iterations,
             usage: self.total_usage.clone(),
             messages: self.messages.clone(),
+            last_transition: self
+                .recovery
+                .last_transition
+                .as_ref()
+                .map(|t| serde_json::to_value(t).ok())
+                .flatten()
+                .and_then(|v| v.as_str().map(String::from)),
         }
     }
 

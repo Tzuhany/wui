@@ -105,6 +105,17 @@ impl HookRunner {
         self.run_blocking_only(&event).await
     }
 
+    /// Fire the `PostCompact` hook after successful compression.
+    ///
+    /// Returns `Block { reason }` when the hook wants to re-inject context
+    /// that was lost during compression. The caller inserts the reason as
+    /// a system message after the compressed history.
+    #[must_use]
+    pub async fn post_compact(&self, messages: &[Message], freed: usize) -> HookDecision {
+        let event = HookEvent::PostCompact { messages, freed };
+        self.run_blocking_only(&event).await
+    }
+
     /// Fire the `PreStop` hook before any run termination.
     ///
     /// `stop_reason` tells the hook why the run is ending.

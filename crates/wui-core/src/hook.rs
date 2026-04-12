@@ -196,6 +196,32 @@ pub enum HookEvent<'a> {
         messages: &'a [Message],
     },
 
+    /// The context window was just compressed.
+    ///
+    /// Fires after a successful L2 or L3 compression. Use this to re-inject
+    /// critical context that was lost during compression — recent file
+    /// snapshots, task summaries, or any state the LLM needs to continue.
+    ///
+    /// The `Block` reason is inserted as a system message after the
+    /// compressed history, giving the LLM a "recovery briefing".
+    /// `Allow` skips re-injection.
+    ///
+    /// ```rust,ignore
+    /// async fn evaluate(&self, event: &HookEvent<'_>) -> HookDecision {
+    ///     if let HookEvent::PostCompact { messages, .. } = event {
+    ///         let briefing = build_recovery_context(messages);
+    ///         return HookDecision::block(briefing);
+    ///     }
+    ///     HookDecision::Allow
+    /// }
+    /// ```
+    PostCompact {
+        /// The compressed message history.
+        messages: &'a [Message],
+        /// How many tokens were freed by compression.
+        freed: usize,
+    },
+
     // ── Lifecycle events (informational, decision is ignored) ──────────
     /// A session has started (or resumed from a store).
     SessionStart { session_id: &'a SessionId },
@@ -256,6 +282,7 @@ pub enum HookEvent<'a> {
 /// | PostToolUse       | yes   | yes   | ignored        | **yes**      |
 /// | PostToolFailure   | yes   | yes   | ignored        | ignored      |
 /// | PreCompact        | yes   | **yes** (inject) | ignored | ignored |
+/// | PostCompact       | yes   | **yes** (inject) | ignored | ignored |
 /// | PreStop           | yes   | **yes** (retry)  | ignored | **yes** (Completed only) |
 /// | SessionStart      | ignored | ignored | ignored   | ignored      |
 /// | TurnStart         | ignored | ignored | ignored   | ignored      |

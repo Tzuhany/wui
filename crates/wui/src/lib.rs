@@ -59,9 +59,9 @@ pub use facade::agent::StructuredRun;
 
 pub use runtime::{
     CheckpointStore, ExecutorHints, FileCheckpointStore, InMemoryCheckpointStore,
-    InMemorySessionStore, PermissionMode, PermissionRules, PermissionSource, PermissionVerdict,
-    ResultStore, RetryPolicy, RunCheckpoint, RunStream, SessionPermissions, SessionStore,
-    SessionStoreError, StoredSession,
+    InMemorySessionStore, IterationTransition, PermissionMode, PermissionRules, PermissionSource,
+    PermissionVerdict, ResultStore, RetryPolicy, RunCheckpoint, RunStream, SessionPermissions,
+    SessionStore, SessionStoreError, StoredSession,
 };
 
 // ── Compress ──────────────────────────────────────────────────────────────────

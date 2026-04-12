@@ -1274,6 +1274,7 @@ mod tests {
                     iterations: 1,
                     usage: TokenUsage::default(),
                     messages: vec![],
+                    last_transition: None,
                 }),
             ]))
         }
@@ -1298,6 +1299,7 @@ mod tests {
                     iterations: 1,
                     usage: TokenUsage::default(),
                     messages: vec![],
+                    last_transition: None,
                 }),
             ]))
         }

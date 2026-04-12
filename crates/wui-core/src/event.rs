@@ -171,6 +171,12 @@ pub struct RunSummary {
     pub usage: TokenUsage,
     /// The full conversation at the time the run ended (user + assistant turns).
     pub messages: Vec<Message>,
+    /// Why the loop continued after its last iteration (before stopping).
+    ///
+    /// `None` for single-iteration runs. Useful for observability and tests
+    /// to understand the loop's recovery decisions without parsing logs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_transition: Option<String>,
 }
 
 /// Why the run ended.

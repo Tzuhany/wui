@@ -87,6 +87,7 @@ mod tests {
                 ..Default::default()
             },
             messages: vec![],
+            last_transition: None,
         })
     }
 
