@@ -24,6 +24,6 @@ mod harness;
 mod mock_provider;
 mod scenario;
 
-pub use harness::AgentHarness;
+pub use harness::{AgentHarness, SessionHarness};
 pub use mock_provider::{MockProvider, MockResponse};
 pub use scenario::{Check, Scenario, ScenarioResult, ScenarioRunner};
