@@ -102,10 +102,7 @@ impl PermissionRules {
         // 1. Structural: interaction-requiring tools can't run headlessly.
         if check.requires_interaction && matches!(mode, PermissionMode::Auto) {
             return PermissionVerdict::denied(
-                format!(
-                    "tool '{name}' requires user interaction and cannot run in Auto mode; \
-                         switch to PermissionMode::Ask or disable this tool for headless runs"
-                ),
+                format!("tool '{name}' requires user interaction and cannot run in this mode"),
                 PermissionSource::StructuralDeny,
                 name,
             );
@@ -200,19 +197,28 @@ pub fn check(
 
 // ── Response conversion ─────────────────────────────────────────────────────
 
-/// Convert a human's `ControlResponse` into a message the LLM will see.
+/// Convert a human's `ControlResponse` into a factual message the LLM will see.
+///
+/// Messages state what happened — no directives about what the LLM should do.
 pub fn response_to_system_message(response: &ControlResponse) -> String {
     let body = match &response.decision {
-        ControlDecision::Approve { modification: None } =>
-            "The user approved your request. You may proceed.".to_string(),
-        ControlDecision::Approve { modification: Some(m) } =>
-            format!("The user approved your request with the following modification: {m}. Proceed accordingly."),
-        ControlDecision::ApproveAlways =>
-            "The user approved your request and will always allow this tool. You may proceed.".to_string(),
-        ControlDecision::Deny { reason } =>
-            format!("The user denied your request. Reason: {reason}. Do not attempt this action again."),
-        ControlDecision::DenyAlways { reason } =>
-            format!("The user denied your request and will never allow this tool. Reason: {reason}. Do not attempt this action again."),
+        ControlDecision::Approve { modification: None } => {
+            "The user approved your request.".to_string()
+        }
+        ControlDecision::Approve {
+            modification: Some(m),
+        } => format!("The user approved your request with a modification: {m}"),
+        ControlDecision::ApproveAlways => {
+            "The user approved your request. This tool is now always-allowed for this session."
+                .to_string()
+        }
+        ControlDecision::Deny { reason } => {
+            format!("The user denied your request. Reason: {reason}")
+        }
+        ControlDecision::DenyAlways { reason } => format!(
+            "The user denied your request. Reason: {reason}. \
+             This tool is now always-denied for this session."
+        ),
     };
     wui_core::fmt::system_reminder(&body)
 }

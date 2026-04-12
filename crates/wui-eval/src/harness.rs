@@ -347,6 +347,89 @@ impl AgentHarness {
         self
     }
 
+    // ── Snapshots ─────────────────────────────────────────────────────────────
+
+    /// Serialize the event timeline to a deterministic JSON string.
+    ///
+    /// Skips non-deterministic fields (elapsed time, tool ms) so that
+    /// snapshots from MockProvider runs are reproducible across test runs.
+    pub fn snapshot(&self) -> String {
+        let entries: Vec<serde_json::Value> = self
+            .events
+            .iter()
+            .filter_map(|e| match e {
+                AgentEvent::TextDelta(t) => {
+                    Some(serde_json::json!({"type": "text", "content": t}))
+                }
+                AgentEvent::ThinkingDelta(t) => {
+                    Some(serde_json::json!({"type": "thinking", "content": t}))
+                }
+                AgentEvent::ToolStart { name, input, .. } => {
+                    Some(serde_json::json!({"type": "tool_start", "name": name, "input": input}))
+                }
+                AgentEvent::ToolDone {
+                    name,
+                    output,
+                    attempts,
+                    ..
+                } => Some(
+                    serde_json::json!({"type": "tool_done", "name": name, "output": output, "attempts": attempts}),
+                ),
+                AgentEvent::ToolError {
+                    name, error, kind, ..
+                } => Some(
+                    serde_json::json!({"type": "tool_error", "name": name, "error": error, "kind": format!("{kind:?}")}),
+                ),
+                AgentEvent::Done(s) => Some(serde_json::json!({
+                    "type": "done",
+                    "stop_reason": format!("{:?}", s.stop_reason),
+                    "iterations": s.iterations,
+                })),
+                AgentEvent::Error(e) => Some(serde_json::json!({
+                    "type": "error",
+                    "message": e.message,
+                })),
+                _ => None, // Skip Control, Compressed, Retrying, etc.
+            })
+            .collect();
+
+        serde_json::to_string_pretty(&entries).unwrap_or_else(|_| "[]".to_string())
+    }
+
+    /// Compare against a saved snapshot file.
+    ///
+    /// - If the file does not exist, writes the current snapshot and passes.
+    /// - If the file exists, asserts that the current snapshot matches.
+    /// - Set env var `UPDATE_SNAPSHOTS=1` to overwrite existing snapshots.
+    pub fn assert_matches_snapshot(&self, path: impl AsRef<std::path::Path>) {
+        let path = path.as_ref();
+        let current = self.snapshot();
+
+        if std::env::var("UPDATE_SNAPSHOTS").is_ok() || !path.exists() {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).ok();
+            }
+            std::fs::write(path, &current).unwrap_or_else(|e| {
+                panic!("failed to write snapshot to {}: {e}", path.display());
+            });
+            return;
+        }
+
+        let saved = std::fs::read_to_string(path).unwrap_or_else(|e| {
+            panic!("failed to read snapshot from {}: {e}", path.display());
+        });
+
+        if current != saved {
+            panic!(
+                "snapshot mismatch for {}.\n\
+                 Run with UPDATE_SNAPSHOTS=1 to update.\n\n\
+                 --- saved ---\n{saved}\n\n\
+                 --- current ---\n{current}",
+                path.display()
+            );
+        }
+    }
+
     // ── Diagnostic ───────────────────────────────────────────────────────────
 
     /// Compact event timeline for error messages.

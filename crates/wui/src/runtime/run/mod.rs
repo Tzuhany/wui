@@ -178,7 +178,17 @@ async fn run_loop(
         };
 
         match evaluate_stop_conditions(&config, &mut s, outcome).await {
-            LoopControl::Continue => continue,
+            LoopControl::Continue => {
+                // PostIteration hook: inject dynamic context between iterations.
+                if let HookDecision::Block { reason } = config
+                    .hooks
+                    .post_iteration(s.iterations, &s.messages, &s.total_usage)
+                    .await
+                {
+                    s.messages.push(system_reminder_msg(&reason));
+                }
+                continue;
+            }
             LoopControl::Finish(summary) => return Ok(summary),
         }
     }
@@ -391,8 +401,7 @@ async fn handle_max_tokens(
         }
         MaxTokensAction::InjectContinuation => {
             s.messages.push(Message::user(
-                "Your previous response was truncated due to length limits. \
-                 Continue exactly where you left off. Do not repeat what you already said.",
+                "Your previous response was truncated due to length limits.",
             ));
             s.recovery.last_transition = Some(state::IterationTransition::ContinuationInjected);
             Some(LoopControl::Continue)

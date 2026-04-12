@@ -164,11 +164,19 @@ pub(super) async fn stream_and_dispatch(
                 usage: u,
                 stop_reason: sr,
             } => {
-                ctx.usage = u;
+                ctx.usage = u.clone();
                 ctx.stop_reason = sr;
                 let span = tracing::Span::current();
                 span.record("text_chunks_count", text_chunk_count);
                 span.record("total_text_len", ctx.text_buf.len() as u64);
+
+                // ResponseEnd notification for audit/metrics.
+                let tool_count = ctx.submission_order.len();
+                config
+                    .hooks
+                    .notify_response_end(&ctx.text_buf, &ctx.thinking_buf, tool_count, &u)
+                    .await;
+
                 return Ok(true);
             }
 

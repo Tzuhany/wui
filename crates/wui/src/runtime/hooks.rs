@@ -116,6 +116,44 @@ impl HookRunner {
         self.run_blocking_only(&event).await
     }
 
+    /// Fire the `PostIteration` hook between iterations.
+    ///
+    /// Returns `Block { reason }` to inject a system message before the
+    /// next LLM call.
+    #[must_use]
+    pub async fn post_iteration(
+        &self,
+        iteration: u32,
+        messages: &[Message],
+        usage: &wui_core::event::TokenUsage,
+    ) -> HookDecision {
+        let event = HookEvent::PostIteration {
+            iteration,
+            messages,
+            usage,
+        };
+        self.run_blocking_only(&event).await
+    }
+
+    /// Fire the `ResponseEnd` notification after the LLM finishes a response.
+    ///
+    /// Informational — the decision is ignored. Use for audit and metrics.
+    pub async fn notify_response_end(
+        &self,
+        text: &str,
+        thinking: &str,
+        tool_count: usize,
+        usage: &wui_core::event::TokenUsage,
+    ) {
+        let event = HookEvent::ResponseEnd {
+            text,
+            thinking,
+            tool_count,
+            usage,
+        };
+        self.notify(&event).await;
+    }
+
     /// Fire the `PreStop` hook before any run termination.
     ///
     /// `stop_reason` tells the hook why the run is ending.

@@ -123,6 +123,9 @@ async fn collect_tool_history(
             s.dynamic_tools
                 .insert(tool.name().to_string(), Arc::clone(tool));
         }
+        for name in &done.output.retract_tools {
+            s.dynamic_tools.remove(name);
+        }
         for artifact in &done.output.artifacts {
             tx.send(AgentEvent::Artifact {
                 tool_id: done.id.clone(),

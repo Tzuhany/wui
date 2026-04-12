@@ -365,6 +365,13 @@ pub struct ToolOutput {
     /// of the current run. Use this in `tool_search` implementations to
     /// dynamically inject discovered tools.
     pub expose_tools: Vec<Arc<dyn Tool>>,
+
+    /// Tool names to remove from the active tool set after this tool completes.
+    ///
+    /// The inverse of `expose_tools`. Use when a tool's context is no longer
+    /// relevant (e.g. a "disconnect" tool that removes a previously exposed
+    /// integration).
+    pub retract_tools: Vec<String>,
 }
 
 impl std::fmt::Debug for ToolOutput {
@@ -375,6 +382,7 @@ impl std::fmt::Debug for ToolOutput {
             .field("artifacts", &self.artifacts)
             .field("structured", &self.structured)
             .field("expose_tools_count", &self.expose_tools.len())
+            .field("retract_tools", &self.retract_tools)
             .finish()
     }
 }
@@ -448,6 +456,15 @@ impl ToolOutput {
     /// dynamically inject discovered tools.
     pub fn expose(mut self, tools: impl IntoIterator<Item = Arc<dyn Tool>>) -> Self {
         self.expose_tools = tools.into_iter().collect();
+        self
+    }
+
+    /// Remove tools from the active tool set after this tool completes.
+    ///
+    /// The inverse of [`expose`](ToolOutput::expose). The run loop removes
+    /// these tools from the dynamic registry for the remainder of the run.
+    pub fn retract(mut self, names: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.retract_tools = names.into_iter().map(Into::into).collect();
         self
     }
 

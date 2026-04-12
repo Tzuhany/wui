@@ -223,6 +223,29 @@ pub enum HookEvent<'a> {
     },
 
     // ── Lifecycle events (informational, decision is ignored) ──────────
+    /// Fires after each completed iteration (tool execution + history
+    /// assembly), before the next iteration begins.
+    ///
+    /// Use to inject dynamic context that changes between iterations
+    /// (current time, remaining budget, external state). `Block` injects
+    /// the reason as a system message before the next LLM call.
+    PostIteration {
+        iteration: u32,
+        messages: &'a [Message],
+        usage: &'a crate::event::TokenUsage,
+    },
+
+    /// Fires when the LLM finishes a response (MessageEnd received).
+    ///
+    /// Informational — decision is ignored. Use for audit logging,
+    /// content analysis, or metrics collection on raw LLM output.
+    ResponseEnd {
+        text: &'a str,
+        thinking: &'a str,
+        tool_count: usize,
+        usage: &'a crate::event::TokenUsage,
+    },
+
     /// A session has started (or resumed from a store).
     SessionStart { session_id: &'a SessionId },
 
@@ -283,6 +306,8 @@ pub enum HookEvent<'a> {
 /// | PostToolFailure   | yes   | yes   | ignored        | ignored      |
 /// | PreCompact        | yes   | **yes** (inject) | ignored | ignored |
 /// | PostCompact       | yes   | **yes** (inject) | ignored | ignored |
+/// | PostIteration     | yes   | **yes** (inject) | ignored | ignored |
+/// | ResponseEnd       | ignored | ignored | ignored   | ignored      |
 /// | PreStop           | yes   | **yes** (retry)  | ignored | **yes** (Completed only) |
 /// | SessionStart      | ignored | ignored | ignored   | ignored      |
 /// | TurnStart         | ignored | ignored | ignored   | ignored      |

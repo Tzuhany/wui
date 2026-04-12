@@ -45,8 +45,7 @@ pub(super) async fn run_post_hooks(
             HookDecision::Block { reason } => {
                 tracing::debug!(tool = %tool_name, %reason, "post-tool hook blocked output");
                 messages.push(system_reminder_msg(&format!(
-                    "The output of tool '{tool_name}' was blocked by policy: {reason}. \
-                     Do not use this output.",
+                    "The output of tool '{tool_name}' was blocked by policy: {reason}",
                 )));
             }
             HookDecision::MutateOutput { content } => {
