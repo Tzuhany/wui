@@ -124,7 +124,7 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use serde_json::{json, Value};
-    use wui_core::tool::{ToolCtx, ToolMeta, ToolOutput};
+    use wui_core::tool::{ToolCtx, ToolOutput};
 
     struct DummyTool {
         name: &'static str,
