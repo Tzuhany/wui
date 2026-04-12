@@ -186,6 +186,10 @@ pub(super) async fn stream_and_dispatch(
 }
 
 /// Process tools deferred for HITL approval (after the LLM finishes speaking).
+///
+/// All deferred tools are authorized concurrently via a `JoinSet`. Each tool's
+/// HITL prompt fires independently, and approved tools start executing as soon
+/// as their own approval resolves — no head-of-line blocking.
 pub(super) async fn approve_deferred(
     deferred: Vec<DeferredApproval>,
     ctx: &mut IterationCtx,
@@ -196,17 +200,33 @@ pub(super) async fn approve_deferred(
 ) {
     let history_snapshot: Arc<[Message]> = Arc::from(messages.to_vec());
 
+    let mut auth_tasks: tokio::task::JoinSet<AuthOutcome> = tokio::task::JoinSet::new();
+
     for tool in deferred {
-        let outcome = auth::approve_tool(
-            config,
-            tool.id,
-            tool.name,
-            tool.input,
-            tool.session_pattern,
-            tool.ctrl_req,
-            tx,
-        )
-        .await;
+        let config_c = Arc::clone(config);
+        let tx_c = tx.clone();
+        auth_tasks.spawn(async move {
+            auth::approve_tool(
+                &config_c,
+                tool.id,
+                tool.name,
+                tool.input,
+                tool.session_pattern,
+                tool.ctrl_req,
+                &tx_c,
+            )
+            .await
+        });
+    }
+
+    while let Some(outcome) = auth_tasks.join_next().await {
+        let outcome = match outcome {
+            Ok(o) => o,
+            Err(e) => {
+                tracing::error!(error = %e, "deferred auth task panicked — skipping tool");
+                continue;
+            }
+        };
         handle_ready_outcome(ctx, executor, &history_snapshot, outcome, tx).await;
     }
 }
