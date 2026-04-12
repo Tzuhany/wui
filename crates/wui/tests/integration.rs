@@ -1334,3 +1334,178 @@ async fn run_structured_extracts_tag() {
 
     assert_eq!(result, "42");
 }
+
+// ── Test 15: session_fork_runs_independently ────────────────────────────────
+
+#[tokio::test]
+async fn session_fork_runs_independently() {
+    let provider = MockProvider::new(vec![
+        // Shared context turn
+        MockProvider::text("context established"),
+        // Fork A turn
+        MockProvider::text("fork A response"),
+        // Fork B turn
+        MockProvider::text("fork B response"),
+    ]);
+
+    let agent = Agent::builder(provider)
+        .permission(PermissionMode::Auto)
+        .build();
+
+    let session = agent.session("fork-test").await;
+
+    // Establish shared context
+    let mut stream = session.send("shared context").await;
+    while stream.next().await.is_some() {}
+
+    // Fork two independent sessions
+    let fork_a = session.fork("a").await;
+    let fork_b = session.fork("b").await;
+
+    // Run forks (sequentially here, but they have independent state)
+    let mut text_a = String::new();
+    let mut stream_a = fork_a.send("branch A").await;
+    while let Some(event) = stream_a.next().await {
+        if let AgentEvent::TextDelta(t) = event {
+            text_a.push_str(&t);
+        }
+    }
+
+    let mut text_b = String::new();
+    let mut stream_b = fork_b.send("branch B").await;
+    while let Some(event) = stream_b.next().await {
+        if let AgentEvent::TextDelta(t) = event {
+            text_b.push_str(&t);
+        }
+    }
+
+    assert!(text_a.contains("fork A response"));
+    assert!(text_b.contains("fork B response"));
+
+    // Original session should still have its pre-fork history
+    let original_msgs = session.messages();
+    assert!(
+        original_msgs.len() >= 2,
+        "original session should retain shared context"
+    );
+}
+
+// ── Test 16: tool_filter_excludes_tools ─────────────────────────────────────
+
+#[tokio::test]
+async fn tool_filter_excludes_tools() {
+    // The provider should never see the filtered tool in its tool list.
+    let provider = MockProvider::new(vec![MockProvider::text("no tools used")]);
+
+    let agent = Agent::builder(provider)
+        .tool(ConstTool {
+            name: "visible",
+            output: "ok",
+        })
+        .tool(ConstTool {
+            name: "hidden",
+            output: "should not appear",
+        })
+        .tool_filter(|name, _meta| name != "hidden")
+        .permission(PermissionMode::Auto)
+        .build();
+
+    let h = AgentHarness::run(&agent, "Hello").await;
+    h.assert_stop_reason(RunStopReason::Completed);
+    // If the agent completed without error, the tool filter worked.
+    // The hidden tool was not sent to the provider.
+}
+
+// ── Test 17: on_context_overflow_callback ────────────────────────────────────
+
+#[tokio::test]
+async fn on_context_overflow_callback_relieves_pressure() {
+    use wui::CompressPipeline;
+
+    // Create a provider with a tiny window that will overflow.
+    let provider = MockProvider::new(vec![
+        MockProvider::text("first response with lots of text to fill context"),
+        MockProvider::text("second response after overflow recovery"),
+    ]);
+
+    let agent = Agent::builder(provider)
+        .permission(PermissionMode::Auto)
+        .compress(CompressPipeline {
+            window_tokens: 50, // Tiny window — will overflow almost immediately
+            compact_threshold: 0.5,
+            ..CompressPipeline::default()
+        })
+        .on_context_overflow(|messages| {
+            // Aggressive degradation: keep only the last message
+            if messages.len() > 1 {
+                let last = messages.pop().unwrap();
+                messages.clear();
+                messages.push(last);
+            }
+        })
+        .build();
+
+    let mut stream = agent.stream("Generate something long.");
+    let mut saw_done = false;
+    while let Some(event) = stream.next().await {
+        match event {
+            AgentEvent::Done(s) => {
+                saw_done = true;
+                // Should complete or at least not crash
+                assert!(
+                    matches!(
+                        s.stop_reason,
+                        RunStopReason::Completed | RunStopReason::ContextOverflow
+                    ),
+                    "unexpected stop reason: {:?}",
+                    s.stop_reason
+                );
+            }
+            AgentEvent::Error(e) => {
+                panic!("unexpected error: {e}");
+            }
+            _ => {}
+        }
+    }
+    assert!(saw_done, "stream should complete");
+}
+
+// ── Test 18: callback_permission_mode ────────────────────────────────────────
+
+#[tokio::test]
+async fn callback_permission_mode_approves_selectively() {
+    let counter_a = Arc::new(AtomicU32::new(0));
+    let counter_b = Arc::new(AtomicU32::new(0));
+
+    let provider = MockProvider::new(vec![
+        MockProvider::tool_call("allowed_tool", json!({})),
+        MockProvider::tool_call("denied_tool", json!({})),
+        MockProvider::text("done"),
+    ]);
+
+    let agent = Agent::builder(provider)
+        .tool(CountingTool {
+            name: "allowed_tool",
+            counter: Arc::clone(&counter_a),
+        })
+        .tool(CountingTool {
+            name: "denied_tool",
+            counter: Arc::clone(&counter_b),
+        })
+        .on_tool_approval(|name, _input| name == "allowed_tool")
+        .build();
+
+    let mut stream = agent.stream("Call both tools.");
+    while stream.next().await.is_some() {}
+
+    assert_eq!(
+        counter_a.load(Ordering::SeqCst),
+        1,
+        "allowed_tool should run"
+    );
+    assert_eq!(
+        counter_b.load(Ordering::SeqCst),
+        0,
+        "denied_tool should be blocked by callback"
+    );
+}

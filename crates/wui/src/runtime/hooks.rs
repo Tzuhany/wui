@@ -193,3 +193,124 @@ impl HookRunner {
         HookDecision::Allow
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_trait::async_trait;
+    use wui_core::hook::Hook;
+
+    struct BlockAllHook;
+    #[async_trait]
+    impl Hook for BlockAllHook {
+        async fn evaluate(&self, _event: &HookEvent<'_>) -> HookDecision {
+            HookDecision::block("blocked by test hook")
+        }
+    }
+
+    struct AllowAllHook;
+    #[async_trait]
+    impl Hook for AllowAllHook {
+        async fn evaluate(&self, _event: &HookEvent<'_>) -> HookDecision {
+            HookDecision::Allow
+        }
+    }
+
+    struct MutateInputHook;
+    #[async_trait]
+    impl Hook for MutateInputHook {
+        fn handles(&self, event: &HookEvent<'_>) -> bool {
+            matches!(event, HookEvent::PreToolUse { .. })
+        }
+        async fn evaluate(&self, _event: &HookEvent<'_>) -> HookDecision {
+            HookDecision::mutate(serde_json::json!({"mutated": true}))
+        }
+    }
+
+    struct MutateOutputHook {
+        content: String,
+    }
+    #[async_trait]
+    impl Hook for MutateOutputHook {
+        fn handles(&self, event: &HookEvent<'_>) -> bool {
+            matches!(event, HookEvent::PreStop { .. })
+        }
+        async fn evaluate(&self, _event: &HookEvent<'_>) -> HookDecision {
+            HookDecision::mutate_output(self.content.clone())
+        }
+    }
+
+    #[tokio::test]
+    async fn pre_tool_use_block() {
+        let runner = HookRunner::new(vec![Arc::new(BlockAllHook)]);
+        let input = serde_json::json!({});
+        let result = runner.pre_tool_use("bash", &input).await;
+        assert!(result.is_blocked());
+    }
+
+    #[tokio::test]
+    async fn pre_tool_use_allow() {
+        let runner = HookRunner::new(vec![Arc::new(AllowAllHook)]);
+        let input = serde_json::json!({});
+        let result = runner.pre_tool_use("bash", &input).await;
+        assert!(!result.is_blocked());
+    }
+
+    #[tokio::test]
+    async fn pre_tool_use_mutate_input() {
+        let runner = HookRunner::new(vec![Arc::new(MutateInputHook)]);
+        let input = serde_json::json!({"original": true});
+        let result = runner.pre_tool_use("bash", &input).await;
+        assert!(matches!(result, HookDecision::Mutate { input } if input["mutated"] == true));
+    }
+
+    #[tokio::test]
+    async fn block_short_circuits() {
+        // BlockAllHook runs first, MutateInputHook should never run.
+        let runner = HookRunner::new(vec![Arc::new(BlockAllHook), Arc::new(MutateInputHook)]);
+        let input = serde_json::json!({});
+        let result = runner.pre_tool_use("bash", &input).await;
+        assert!(result.is_blocked());
+    }
+
+    #[tokio::test]
+    async fn pre_stop_mutate_output() {
+        let runner = HookRunner::new(vec![Arc::new(MutateOutputHook {
+            content: "rewritten".to_string(),
+        })]);
+        let result = runner
+            .pre_stop("original", RunStopReason::Completed, false, &[])
+            .await;
+        assert!(matches!(result, HookDecision::MutateOutput { content } if content == "rewritten"));
+    }
+
+    #[tokio::test]
+    async fn pre_stop_block() {
+        let runner = HookRunner::new(vec![Arc::new(BlockAllHook)]);
+        let result = runner
+            .pre_stop("text", RunStopReason::Completed, false, &[])
+            .await;
+        assert!(result.is_blocked());
+    }
+
+    #[tokio::test]
+    async fn handles_filter_skips_irrelevant_hooks() {
+        // MutateInputHook only handles PreToolUse; should not affect PreStop.
+        let runner = HookRunner::new(vec![Arc::new(MutateInputHook)]);
+        let result = runner
+            .pre_stop("text", RunStopReason::Completed, false, &[])
+            .await;
+        assert!(matches!(result, HookDecision::Allow));
+    }
+
+    #[tokio::test]
+    async fn no_hooks_allows_all() {
+        let runner = HookRunner::new(vec![]);
+        let input = serde_json::json!({});
+        assert!(!runner.pre_tool_use("bash", &input).await.is_blocked());
+        assert!(!runner
+            .pre_stop("text", RunStopReason::Completed, false, &[])
+            .await
+            .is_blocked());
+    }
+}

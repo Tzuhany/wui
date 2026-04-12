@@ -132,3 +132,87 @@ pub(super) fn matches_rule_with_matcher(
     // Fall back to prefix matching on permission_key.
     permission_key.is_some_and(|k| k.starts_with(rule_key))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bare_tool_name_matches() {
+        let rules = PermissionRules::new().deny("bash");
+        assert_eq!(rules.evaluate("bash", None), Some(false));
+    }
+
+    #[test]
+    fn bare_tool_name_no_match() {
+        let rules = PermissionRules::new().deny("bash");
+        assert_eq!(rules.evaluate("fetch", None), None);
+    }
+
+    #[test]
+    fn sub_tool_prefix_match() {
+        let rules = PermissionRules::new().deny("bash(rm -rf)");
+        assert_eq!(rules.evaluate("bash", Some("rm -rf /")), Some(false));
+    }
+
+    #[test]
+    fn sub_tool_prefix_no_match() {
+        let rules = PermissionRules::new().deny("bash(rm -rf)");
+        assert_eq!(rules.evaluate("bash", Some("ls -la")), None);
+    }
+
+    #[test]
+    fn deny_takes_precedence_over_allow() {
+        let rules = PermissionRules::new().allow("bash").deny("bash");
+        assert_eq!(rules.evaluate("bash", None), Some(false));
+    }
+
+    #[test]
+    fn allow_returns_true() {
+        let rules = PermissionRules::new().allow("fetch");
+        assert_eq!(rules.evaluate("fetch", None), Some(true));
+    }
+
+    #[test]
+    fn no_rules_returns_none() {
+        let rules = PermissionRules::new();
+        assert_eq!(rules.evaluate("bash", None), None);
+    }
+
+    #[test]
+    fn invocation_pattern_with_key() {
+        assert_eq!(invocation_pattern("bash", Some("ls")), "bash(ls)");
+    }
+
+    #[test]
+    fn invocation_pattern_without_key() {
+        assert_eq!(invocation_pattern("bash", None), "bash");
+    }
+
+    #[test]
+    fn matcher_callback_overrides_prefix() {
+        let rules = PermissionRules::new().allow("bash(git *)");
+        // Prefix matching would fail since "commit" doesn't start with "git *"
+        assert_eq!(rules.evaluate("bash", Some("commit")), None);
+        // But a matcher can accept it
+        let matcher: &(dyn Fn(&str) -> bool + Send + Sync) = &|_rule_key| true;
+        assert_eq!(
+            rules.evaluate_with_matcher("bash", Some("commit"), Some(matcher)),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn is_empty() {
+        assert!(PermissionRules::new().is_empty());
+        assert!(!PermissionRules::new().allow("x").is_empty());
+        assert!(!PermissionRules::new().deny("x").is_empty());
+    }
+
+    #[test]
+    fn rule_without_closing_paren_does_not_match() {
+        // "bash(ls" without closing paren — does NOT match (requires closing paren)
+        let rules = PermissionRules::new().deny("bash(ls");
+        assert_eq!(rules.evaluate("bash", Some("ls -la")), None);
+    }
+}

@@ -49,6 +49,11 @@ pub mod remote_tools;
 mod tools;
 pub mod transport;
 
+#[cfg(feature = "http")]
+mod http_transport;
+#[cfg(feature = "http")]
+pub use http_transport::HttpTransport;
+
 use std::sync::Arc;
 
 pub use registry::{AgentRegistry, JobStatus};

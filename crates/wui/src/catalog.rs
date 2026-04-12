@@ -118,3 +118,97 @@ pub async fn search_catalogs(
     merged.truncate(limit);
     merged
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_trait::async_trait;
+    use serde_json::{json, Value};
+    use wui_core::tool::{ToolCtx, ToolMeta, ToolOutput};
+
+    struct DummyTool {
+        name: &'static str,
+        desc: &'static str,
+    }
+
+    #[async_trait]
+    impl Tool for DummyTool {
+        fn name(&self) -> &str {
+            self.name
+        }
+        fn description(&self) -> &str {
+            self.desc
+        }
+        fn input_schema(&self) -> Value {
+            json!({"type": "object"})
+        }
+        async fn call(&self, _input: Value, _ctx: &ToolCtx) -> ToolOutput {
+            ToolOutput::success("ok")
+        }
+    }
+
+    fn dummy(name: &'static str, desc: &'static str) -> Arc<dyn Tool> {
+        Arc::new(DummyTool { name, desc })
+    }
+
+    #[tokio::test]
+    async fn static_catalog_search_returns_results() {
+        let cat = StaticCatalog::new(
+            "test",
+            vec![
+                dummy("read_file", "Read a file from disk"),
+                dummy("write_file", "Write content to a file"),
+                dummy("search", "Search for text in files"),
+            ],
+        );
+        let results = cat.search("file", 10).await.unwrap();
+        assert!(!results.is_empty());
+        // "read_file" and "write_file" both mention "file"
+        let names: Vec<&str> = results.iter().map(|h| h.tool.name()).collect();
+        assert!(names.contains(&"read_file"));
+        assert!(names.contains(&"write_file"));
+    }
+
+    #[tokio::test]
+    async fn static_catalog_search_respects_limit() {
+        let cat = StaticCatalog::new(
+            "test",
+            vec![
+                dummy("a", "tool a"),
+                dummy("b", "tool b"),
+                dummy("c", "tool c"),
+            ],
+        );
+        let results = cat.search("tool", 2).await.unwrap();
+        assert!(results.len() <= 2);
+    }
+
+    #[tokio::test]
+    async fn multi_catalog_deduplicates() {
+        let cat1 = Arc::new(StaticCatalog::new(
+            "cat1",
+            vec![dummy("shared", "shared tool")],
+        )) as Arc<dyn ToolCatalog>;
+        let cat2 = Arc::new(StaticCatalog::new(
+            "cat2",
+            vec![dummy("shared", "shared tool copy")],
+        )) as Arc<dyn ToolCatalog>;
+
+        let results = search_catalogs(&[cat1, cat2], "shared", 10).await;
+        let names: Vec<&str> = results.iter().map(|h| h.tool.name()).collect();
+        // "shared" should appear only once
+        assert_eq!(names.iter().filter(|n| **n == "shared").count(), 1);
+    }
+
+    #[tokio::test]
+    async fn multi_catalog_empty() {
+        let results = search_catalogs(&[], "anything", 10).await;
+        assert!(results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn catalog_name() {
+        let cat = StaticCatalog::new("my-catalog", vec![]);
+        assert_eq!(cat.name(), "my-catalog");
+    }
+}

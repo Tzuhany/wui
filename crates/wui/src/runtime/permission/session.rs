@@ -98,3 +98,52 @@ impl SessionPermissions {
         inner.always_deny.remove(pattern);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn allow_and_deny_are_mutually_exclusive() {
+        let perms = SessionPermissions::new();
+        perms.set_always_allow("bash").await;
+        assert!(perms.is_always_allowed("bash").await);
+        assert!(!perms.is_always_denied("bash").await);
+
+        perms.set_always_deny("bash").await;
+        assert!(!perms.is_always_allowed("bash").await);
+        assert!(perms.is_always_denied("bash").await);
+    }
+
+    #[tokio::test]
+    async fn revoke_clears_both() {
+        let perms = SessionPermissions::new();
+        perms.set_always_allow("fetch").await;
+        perms.revoke("fetch").await;
+        assert!(!perms.is_always_allowed("fetch").await);
+        assert!(!perms.is_always_denied("fetch").await);
+    }
+
+    #[tokio::test]
+    async fn allows_matches_sub_tool_pattern() {
+        let perms = SessionPermissions::new();
+        perms.set_always_allow("bash(ls)").await;
+        assert!(perms.allows("bash", Some("ls -la"), None).await);
+        assert!(!perms.allows("bash", Some("rm -rf"), None).await);
+    }
+
+    #[tokio::test]
+    async fn denies_matches_sub_tool_pattern() {
+        let perms = SessionPermissions::new();
+        perms.set_always_deny("bash(rm)").await;
+        assert!(perms.denies("bash", Some("rm -rf /"), None).await);
+        assert!(!perms.denies("bash", Some("ls"), None).await);
+    }
+
+    #[tokio::test]
+    async fn empty_session_matches_nothing() {
+        let perms = SessionPermissions::new();
+        assert!(!perms.allows("bash", None, None).await);
+        assert!(!perms.denies("bash", None, None).await);
+    }
+}

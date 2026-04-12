@@ -216,3 +216,182 @@ pub fn response_to_system_message(response: &ControlResponse) -> String {
     };
     wui_core::fmt::system_reminder(&body)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn simple_check(name: &str) -> PermissionCheck<'_> {
+        PermissionCheck {
+            tool_name: name,
+            permission_key: None,
+            is_readonly: false,
+            requires_interaction: false,
+            matcher: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn auto_mode_allows_all() {
+        let rules = PermissionRules::new();
+        let session = SessionPermissions::new();
+        let v = rules
+            .verdict(&session, &PermissionMode::Auto, &simple_check("bash"))
+            .await;
+        assert!(matches!(
+            v,
+            PermissionVerdict::Allowed {
+                source: PermissionSource::ModeAuto
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn static_deny_overrides_auto() {
+        let rules = PermissionRules::new().deny("bash");
+        let session = SessionPermissions::new();
+        let v = rules
+            .verdict(&session, &PermissionMode::Auto, &simple_check("bash"))
+            .await;
+        assert!(matches!(
+            v,
+            PermissionVerdict::Denied {
+                source: PermissionSource::StaticDeny,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn static_allow_in_ask_mode() {
+        let rules = PermissionRules::new().allow("fetch");
+        let session = SessionPermissions::new();
+        let v = rules
+            .verdict(&session, &PermissionMode::Ask, &simple_check("fetch"))
+            .await;
+        assert!(matches!(
+            v,
+            PermissionVerdict::Allowed {
+                source: PermissionSource::StaticAllow
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn ask_mode_needs_approval() {
+        let rules = PermissionRules::new();
+        let session = SessionPermissions::new();
+        let v = rules
+            .verdict(&session, &PermissionMode::Ask, &simple_check("bash"))
+            .await;
+        assert!(matches!(v, PermissionVerdict::NeedsApproval));
+    }
+
+    #[tokio::test]
+    async fn session_deny_overrides_static_allow() {
+        // Session deny is checked BEFORE static allow in the pipeline
+        // (step 3 before step 4), so session deny wins.
+        let rules = PermissionRules::new().allow("bash");
+        let session = SessionPermissions::new();
+        session.set_always_deny("bash").await;
+        let v = rules
+            .verdict(&session, &PermissionMode::Auto, &simple_check("bash"))
+            .await;
+        assert!(matches!(
+            v,
+            PermissionVerdict::Denied {
+                source: PermissionSource::SessionDeny,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn session_allow_in_ask_mode() {
+        let rules = PermissionRules::new();
+        let session = SessionPermissions::new();
+        session.set_always_allow("bash").await;
+        let v = rules
+            .verdict(&session, &PermissionMode::Ask, &simple_check("bash"))
+            .await;
+        assert!(matches!(
+            v,
+            PermissionVerdict::Allowed {
+                source: PermissionSource::SessionAllow
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn readonly_allows_readonly_tool() {
+        let rules = PermissionRules::new();
+        let session = SessionPermissions::new();
+        let check = PermissionCheck {
+            tool_name: "read_file",
+            permission_key: None,
+            is_readonly: true,
+            requires_interaction: false,
+            matcher: None,
+        };
+        let v = rules
+            .verdict(&session, &PermissionMode::Readonly, &check)
+            .await;
+        assert!(matches!(
+            v,
+            PermissionVerdict::Allowed {
+                source: PermissionSource::ModeReadonly
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn readonly_denies_non_readonly_tool() {
+        let rules = PermissionRules::new();
+        let session = SessionPermissions::new();
+        let v = rules
+            .verdict(&session, &PermissionMode::Readonly, &simple_check("bash"))
+            .await;
+        assert!(matches!(
+            v,
+            PermissionVerdict::Denied {
+                source: PermissionSource::ModeReadonlyDenied,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn structural_deny_for_interactive_in_auto() {
+        let rules = PermissionRules::new();
+        let session = SessionPermissions::new();
+        let check = PermissionCheck {
+            tool_name: "prompt_user",
+            permission_key: None,
+            is_readonly: false,
+            requires_interaction: true,
+            matcher: None,
+        };
+        let v = rules.verdict(&session, &PermissionMode::Auto, &check).await;
+        assert!(matches!(
+            v,
+            PermissionVerdict::Denied {
+                source: PermissionSource::StructuralDeny,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn callback_mode_delegates() {
+        let rules = PermissionRules::new();
+        let session = SessionPermissions::new();
+        let mode = PermissionMode::Callback(std::sync::Arc::new(|name, _| name == "allowed_tool"));
+
+        let v = rules
+            .verdict(&session, &mode, &simple_check("allowed_tool"))
+            .await;
+        // Callback mode falls into NeedsApproval in the verdict pipeline,
+        // the actual callback is evaluated at a higher level (auth.rs).
+        assert!(matches!(v, PermissionVerdict::NeedsApproval));
+    }
+}
