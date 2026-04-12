@@ -491,6 +491,39 @@ impl Session {
         recover_mutex(&self.messages, "session messages").clone()
     }
 
+    /// Create an independent copy of this session that shares the current
+    /// history snapshot but has its own turn guard, permissions, and cancel
+    /// token.
+    ///
+    /// Forked sessions run independently — each has its own `Semaphore(1)`,
+    /// so the original and the fork (or multiple forks) can execute turns
+    /// concurrently without interfering with each other.
+    ///
+    /// The forked session's ID is `"{original_id}:{suffix}"`. Its history
+    /// is a snapshot taken at the moment of the fork — subsequent turns on
+    /// the original do not affect the fork, and vice versa.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let session = agent.session("main").await;
+    /// session.send("shared context").await;  // consume the stream...
+    ///
+    /// let fork_a = session.fork("branch-a").await;
+    /// let fork_b = session.fork("branch-b").await;
+    ///
+    /// // Run in parallel — each fork has independent history from here.
+    /// let (_, _) = tokio::join!(
+    ///     async { fork_a.send("explore option A").await; /* consume... */ },
+    ///     async { fork_b.send("explore option B").await; /* consume... */ },
+    /// );
+    /// ```
+    pub async fn fork(&self, suffix: &str) -> Session {
+        let forked_id = SessionId::new(format!("{}:{}", self.id, suffix));
+        let messages = recover_mutex(&self.messages, "session messages").clone();
+        Session::init(forked_id, self.config.clone(), messages).await
+    }
+
     /// The session's permission memory.
     ///
     /// Inspect or programmatically update which tools are always-allowed or

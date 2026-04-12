@@ -89,4 +89,8 @@ pub(crate) struct RunConfig {
 
     /// Maximum number of tools executing concurrently. `None` = unlimited.
     pub(crate) max_concurrent_tools: Option<usize>,
+
+    /// Callback for custom degradation when context overflows.
+    pub(crate) on_context_overflow:
+        Option<Arc<dyn Fn(&mut Vec<wui_core::message::Message>) + Send + Sync>>,
 }

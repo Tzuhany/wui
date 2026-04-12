@@ -111,12 +111,15 @@ impl HookRunner {
     /// `stop_hook_active` is `true` when this hook already blocked the current
     /// stop attempt once — a signal that the hook should return `Allow` to
     /// avoid an infinite loop.
+    /// `messages` is the current message history, available to hooks for
+    /// inspection (e.g. to decide whether to block a `ContextOverflow`).
     #[must_use]
     pub async fn pre_stop(
         &self,
         response: &str,
         stop_reason: RunStopReason,
         stop_hook_active: bool,
+        messages: &[Message],
     ) -> HookDecision {
         let mut current_response = None;
 
@@ -126,6 +129,7 @@ impl HookRunner {
                 response: response_ref,
                 stop_reason: stop_reason.clone(),
                 stop_hook_active,
+                messages,
             };
             if !hook.handles(&event) {
                 continue;

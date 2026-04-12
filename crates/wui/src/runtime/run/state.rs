@@ -143,6 +143,7 @@ impl RunState {
                     last_assistant_text(&self.messages),
                     RunStopReason::MaxIterations,
                     false,
+                    &self.messages,
                 )
                 .await
             {

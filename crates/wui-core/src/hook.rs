@@ -226,6 +226,11 @@ pub enum HookEvent<'a> {
     /// - `stop_hook_active`: `true` when this hook already blocked this stop
     ///   attempt once. A well-written hook should return `Allow` when this
     ///   flag is set to prevent an infinite loop.
+    /// - `messages`: the current message history. Hooks can read this to
+    ///   make informed decisions. For `ContextOverflow`, a hook that returns
+    ///   `Block` may implement a custom degradation strategy (e.g. dropping
+    ///   old tool results) — the runtime will re-check pressure after the
+    ///   hook runs and continue if it was relieved.
     ///
     /// Block to force an additional iteration. MutateOutput to rewrite the
     /// final assistant response before it is delivered (honoured for
@@ -234,6 +239,8 @@ pub enum HookEvent<'a> {
         response: &'a str,
         stop_reason: RunStopReason,
         stop_hook_active: bool,
+        /// The current message history at the time of stopping.
+        messages: &'a [Message],
     },
 }
 

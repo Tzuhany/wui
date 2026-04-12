@@ -108,12 +108,15 @@ impl Agent {
     ///
     /// Constrains the LLM to respond with JSON matching `T`'s schema (via
     /// provider-native JSON mode when available, prompt injection otherwise),
-    /// then parses the response. The schema is derived at compile time via
-    /// `schemars::JsonSchema`.
+    /// then parses and **validates** the response against the JSON Schema
+    /// before deserialising. When validation fails, the LLM is retried with
+    /// a corrective message (up to 2 retries by default).
     ///
     /// Use this when you want the **entire response** as a typed Rust value.
     /// For extracting a typed value from a larger natural-language response,
     /// see [`run_structured`](Agent::run_structured).
+    ///
+    /// For control over retry count, use [`run_as_with_retries`](Agent::run_as_with_retries).
     ///
     /// ```rust,ignore
     /// #[derive(serde::Deserialize, schemars::JsonSchema)]
@@ -130,6 +133,26 @@ impl Agent {
     pub async fn run_as<T>(
         &self,
         input: impl Into<Message>,
+    ) -> Result<T, wui_core::event::AgentError>
+    where
+        T: serde::de::DeserializeOwned + JsonSchema,
+    {
+        self.run_as_with_retries::<T>(input, 2).await
+    }
+
+    /// Like [`run_as`](Agent::run_as), but with an explicit retry count for
+    /// schema validation failures.
+    ///
+    /// When the LLM's response fails JSON Schema validation, a corrective
+    /// message is sent (via a session) describing the validation errors.
+    /// The LLM gets `max_retries` additional attempts to produce valid output.
+    ///
+    /// Set `max_retries` to `0` to disable validation retries (validation
+    /// still runs — errors are reported, just not retried).
+    pub async fn run_as_with_retries<T>(
+        &self,
+        input: impl Into<Message>,
+        max_retries: u32,
     ) -> Result<T, wui_core::event::AgentError>
     where
         T: serde::de::DeserializeOwned + JsonSchema,
@@ -162,7 +185,7 @@ impl Agent {
                 .unwrap_or("Response");
             config.response_format = Some(wui_core::provider::ResponseFormat::JsonSchema {
                 name: type_name.to_string(),
-                schema: schema_json,
+                schema: schema_json.clone(),
             });
             config.system.push_str(
                 "\n\nIMPORTANT: Respond with a single valid JSON value. \
@@ -182,17 +205,55 @@ impl Agent {
             config: Arc::new(config),
         };
 
-        let text = typed_agent.run(input).await?;
+        // Build the JSON Schema validator once, reuse across retries.
+        let validator = jsonschema::validator_for(&schema_json).ok();
 
-        // Strip markdown fences (```json ... ```) that some models emit
-        // despite being asked not to.
-        let json_str = strip_json_fences(text.trim());
+        let input_msg: Message = input.into();
 
-        serde_json::from_str(json_str).map_err(|e| {
-            wui_core::event::AgentError::fatal(format!(
-                "response is not valid JSON for the requested type: {e}\nRaw: {text}"
-            ))
-        })
+        if max_retries == 0 {
+            // No retries — single-shot run.
+            let text = typed_agent.run(input_msg).await?;
+            return parse_and_validate::<T>(&text, validator.as_ref());
+        }
+
+        // Use a session for multi-turn retry on validation failure.
+        let session = typed_agent
+            .session(format!("run_as_{}", uuid_v4_short()))
+            .await;
+
+        let text = collect_session_text(&session, input_msg).await?;
+
+        match parse_and_validate::<T>(&text, validator.as_ref()) {
+            Ok(value) => return Ok(value),
+            Err(first_error) => {
+                // Retry loop: send corrective messages.
+                let mut last_error = first_error;
+                for attempt in 1..=max_retries {
+                    let correction = Message::user(format!(
+                        "Your previous response did not match the required JSON schema.\n\
+                         Error: {}\n\n\
+                         Please try again. Respond with ONLY a valid JSON value, no explanation.",
+                        last_error
+                    ));
+                    tracing::debug!(
+                        attempt,
+                        max_retries,
+                        error = %last_error,
+                        "run_as: retrying after schema validation failure"
+                    );
+                    let retry_text = collect_session_text(&session, correction).await?;
+
+                    match parse_and_validate::<T>(&retry_text, validator.as_ref()) {
+                        Ok(value) => return Ok(value),
+                        Err(e) => last_error = e,
+                    }
+                }
+                Err(wui_core::event::AgentError::fatal(format!(
+                    "response did not match the required schema after {max_retries} retries: \
+                     {last_error}"
+                )))
+            }
+        }
     }
 
     // ── Structured output (XML extraction) ───────────────────────────────────
@@ -362,6 +423,7 @@ pub(crate) fn build_run_config(
         tool_filter: config.tool_filter.clone(),
         response_format: config.response_format.clone(),
         max_concurrent_tools: config.max_concurrent_tools,
+        on_context_overflow: config.on_context_overflow.clone(),
     }
 }
 
@@ -482,4 +544,65 @@ impl wui_core::runner::AgentRunner for Agent {
     fn run_stream(&self, prompt: String) -> futures::stream::BoxStream<'static, AgentEvent> {
         Box::pin(self.stream(prompt))
     }
+}
+
+// ── Helpers for run_as ──────────────────────────────────────────────────────
+
+/// Collect streaming text from a session turn.
+async fn collect_session_text(session: &Session, input: Message) -> Result<String, AgentError> {
+    let mut text = String::new();
+    let mut stream = session.send(input).await;
+    while let Some(event) = stream.next().await {
+        match event {
+            AgentEvent::TextDelta(t) => text.push_str(&t),
+            AgentEvent::Control(handle) => {
+                let tool_name = handle.request.tool_name().map(str::to_owned);
+                handle.deny("run_as does not support interactive approvals");
+                return Err(AgentError::permission_required(tool_name.as_deref()));
+            }
+            AgentEvent::Done(_) => break,
+            AgentEvent::Error(e) => return Err(e),
+            _ => {}
+        }
+    }
+    Ok(text)
+}
+
+/// Parse JSON text, optionally validate against a JSON Schema, then
+/// deserialise into `T`.
+fn parse_and_validate<T: serde::de::DeserializeOwned>(
+    raw: &str,
+    validator: Option<&jsonschema::Validator>,
+) -> Result<T, AgentError> {
+    let json_str = strip_json_fences(raw.trim());
+
+    // Parse as a generic JSON value first so we can validate.
+    let value: serde_json::Value = serde_json::from_str(json_str)
+        .map_err(|e| AgentError::fatal(format!("response is not valid JSON: {e}\nRaw: {raw}")))?;
+
+    // Validate against the schema if a validator is available.
+    if let Some(v) = validator {
+        if let Err(error) = v.validate(&value) {
+            return Err(AgentError::fatal(format!(
+                "JSON schema validation failed: {error}\nRaw: {raw}",
+            )));
+        }
+    }
+
+    // Deserialise from the validated value.
+    serde_json::from_value(value).map_err(|e| {
+        AgentError::fatal(format!(
+            "response is valid JSON but does not match the target type: {e}\nRaw: {raw}"
+        ))
+    })
+}
+
+/// Generate a short pseudo-random ID for internal session naming.
+fn uuid_v4_short() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .subsec_nanos();
+    format!("{nanos:08x}")
 }

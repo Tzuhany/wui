@@ -192,6 +192,17 @@ async fn prepare_iteration(
     maybe_compress(config, &mut s.messages, tx).await;
 
     if config.compress.is_critically_full(&s.messages) {
+        // Give the on_context_overflow callback a chance to relieve pressure
+        // by modifying the message history (dropping old messages, truncating
+        // tool results, etc.). If pressure is relieved, continue the loop.
+        if let Some(ref callback) = config.on_context_overflow {
+            tracing::info!("wui.compress.overflow_callback — invoking on_context_overflow");
+            callback(&mut s.messages);
+            if !config.compress.is_critically_full(&s.messages) {
+                return Ok(IterationSetup::Continue);
+            }
+        }
+
         return Ok(IterationSetup::Finish(
             s.summary(RunStopReason::ContextOverflow),
         ));
@@ -423,6 +434,7 @@ where
             last_assistant_text(&s.messages),
             stop_reason.clone(),
             s.recovery.stop_hook_active,
+            &s.messages,
         )
         .await
     {
@@ -577,6 +589,7 @@ mod tests {
             tool_filter: None,
             response_format: None,
             max_concurrent_tools: None,
+            on_context_overflow: None,
         })
     }
 

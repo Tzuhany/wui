@@ -125,6 +125,16 @@ pub struct AgentConfig {
     pub(crate) response_format: Option<wui_core::provider::ResponseFormat>,
     /// Maximum number of tools executing concurrently. `None` = unlimited.
     pub(crate) max_concurrent_tools: Option<usize>,
+    /// Callback invoked when context pressure is critically full after all
+    /// compression tiers have been exhausted. Receives the message history
+    /// as a mutable reference — the callback can drop messages, truncate
+    /// tool results, or apply any other degradation strategy.
+    ///
+    /// If the callback relieves enough pressure, the run continues.
+    /// If pressure remains critical after the callback, the run stops
+    /// with `RunStopReason::ContextOverflow`.
+    pub(crate) on_context_overflow:
+        Option<Arc<dyn Fn(&mut Vec<wui_core::message::Message>) + Send + Sync>>,
 }
 
 /// Fluent builder for `Agent`.
@@ -170,6 +180,7 @@ impl AgentBuilder {
                 tool_filter: None,
                 response_format: None,
                 max_concurrent_tools: None,
+                on_context_overflow: None,
             },
         }
     }
@@ -532,6 +543,37 @@ impl AgentBuilder {
     /// `None` (default) = unlimited concurrency.
     pub fn max_concurrent_tools(mut self, n: usize) -> Self {
         self.config.max_concurrent_tools = Some(n);
+        self
+    }
+
+    /// Set a callback for when the context window overflows.
+    ///
+    /// Called after all compression tiers (L1 trim → L2 collapse → L3
+    /// summarize) have been exhausted and the context is still critically
+    /// full. The callback receives the message history as `&mut Vec<Message>`
+    /// and can apply a custom degradation strategy — for example, dropping
+    /// old tool results, truncating long messages, or removing all but the
+    /// most recent N messages.
+    ///
+    /// If the callback relieves enough pressure, the run continues
+    /// automatically. If pressure remains critical, the run stops with
+    /// `RunStopReason::ContextOverflow`.
+    ///
+    /// ```rust,ignore
+    /// Agent::builder(provider)
+    ///     .on_context_overflow(|messages| {
+    ///         // Keep only the last 4 messages
+    ///         if messages.len() > 4 {
+    ///             messages.drain(..messages.len() - 4);
+    ///         }
+    ///     })
+    ///     .build();
+    /// ```
+    pub fn on_context_overflow(
+        mut self,
+        f: impl Fn(&mut Vec<wui_core::message::Message>) + Send + Sync + 'static,
+    ) -> Self {
+        self.config.on_context_overflow = Some(Arc::new(f));
         self
     }
 
