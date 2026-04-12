@@ -24,6 +24,9 @@ use super::sub_agent::SubAgent;
 /// Predicate that decides whether a tool should be sent to the provider.
 pub(crate) type ToolFilterFn = Arc<dyn Fn(&str, &wui_core::tool::ToolMeta) -> bool + Send + Sync>;
 
+/// Callback invoked when context pressure is critically full.
+pub(crate) type ContextOverflowFn = Arc<dyn Fn(&mut Vec<wui_core::message::Message>) + Send + Sync>;
+
 // ── Effort ────────────────────────────────────────────────────────────────────
 
 /// Reasoning effort level — controls the extended thinking budget sent to the
@@ -133,8 +136,7 @@ pub struct AgentConfig {
     /// If the callback relieves enough pressure, the run continues.
     /// If pressure remains critical after the callback, the run stops
     /// with `RunStopReason::ContextOverflow`.
-    pub(crate) on_context_overflow:
-        Option<Arc<dyn Fn(&mut Vec<wui_core::message::Message>) + Send + Sync>>,
+    pub(crate) on_context_overflow: Option<ContextOverflowFn>,
 }
 
 /// Fluent builder for `Agent`.

@@ -91,6 +91,5 @@ pub(crate) struct RunConfig {
     pub(crate) max_concurrent_tools: Option<usize>,
 
     /// Callback for custom degradation when context overflows.
-    pub(crate) on_context_overflow:
-        Option<Arc<dyn Fn(&mut Vec<wui_core::message::Message>) + Send + Sync>>,
+    pub(crate) on_context_overflow: Option<crate::facade::builder::ContextOverflowFn>,
 }

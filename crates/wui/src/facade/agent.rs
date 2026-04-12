@@ -224,7 +224,7 @@ impl Agent {
         let text = collect_session_text(&session, input_msg).await?;
 
         match parse_and_validate::<T>(&text, validator.as_ref()) {
-            Ok(value) => return Ok(value),
+            Ok(value) => Ok(value),
             Err(first_error) => {
                 // Retry loop: send corrective messages.
                 let mut last_error = first_error;

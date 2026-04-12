@@ -182,8 +182,7 @@ impl RunState {
                 .recovery
                 .last_transition
                 .as_ref()
-                .map(|t| serde_json::to_value(t).ok())
-                .flatten()
+                .and_then(|t| serde_json::to_value(t).ok())
                 .and_then(|v| v.as_str().map(String::from)),
         }
     }

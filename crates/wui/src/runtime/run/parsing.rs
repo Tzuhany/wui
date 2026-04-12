@@ -48,6 +48,7 @@ pub(super) struct DeferredApproval {
 ///
 /// Tools needing HITL are collected in `deferred` for the caller to
 /// handle after the stream completes.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn stream_and_dispatch(
     stream: &mut (impl futures::Stream<Item = Result<wui_core::event::StreamEvent, ProviderError>>
               + Unpin),
