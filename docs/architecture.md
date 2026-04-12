@@ -161,17 +161,16 @@ loop {
     1. check_context_pressure() → compress if needed
     2. build ChatRequest
     3. provider.stream(request) with retry
-    4. process stream:
+    4. process stream (eager dispatch):
          TextDelta / ThinkingDelta  → emit AgentEvent immediately
-         ToolUseEnd                 → collect into pending_auths (no execution yet)
+         ToolUseEnd                 → run pre-tool hook + permission verdict:
+                                        - ready now (allow/deny) → dispatch/record immediately
+                                        - needs approval         → queue for deferred HITL
          MessageEnd                 → break inner loop
-    5. authorize all collected tools concurrently (JoinSet):
-         - pre-tool hook may block
-         - requires_interaction + Auto mode → structural denial
-         - static deny rules / session deny → hard block
-         - static allow rules / session allow → fast pass
-         - PermissionMode check → HITL prompt fires here (after LLM finished speaking)
-         - each tool begins executing the moment its own auth resolves
+    5. approve deferred tools concurrently (JoinSet):
+         - only tools requiring interactive approval reach this phase
+         - HITL prompts fire after MessageEnd
+         - each approved tool begins executing when its own auth resolves
     6. executor.collect_remaining() — await all still-running tools
     7. run PostToolUse hooks — may inject system notices for blocked outputs
     8. append tool results to message history (in submission order)
@@ -184,14 +183,14 @@ loop {
 
 ### HITL timing: after the LLM finishes speaking
 
-Auth — including any HITL prompt — fires only after `MessageEnd`. The LLM's
-full response lands before the user is interrupted. This matches how humans
-naturally expect to review tool calls: you read the assistant's intent first,
-then decide whether to allow it.
+HITL prompts fire only after `MessageEnd`, so the user reads the assistant's
+full intent before deciding. Tools that do not require interactive approval
+(static/session allow, Auto/Readonly/Callback allow, immediate deny paths)
+can be dispatched while streaming is still in progress.
 
-Multiple tool authorizations in the same turn run concurrently in a `JoinSet`.
-Once a tool's auth resolves, it begins executing immediately — it doesn't wait
-for other tools in the same batch.
+When multiple deferred tools need HITL in one turn, their approval tasks run
+concurrently in a `JoinSet`. One slow decision does not block others from
+prompting or starting execution.
 
 ### Concurrent Execution
 

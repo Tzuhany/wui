@@ -79,10 +79,12 @@ invariant is enforced. If you find a violation, it is a bug.
     `ApproveAlways` cannot override a builder-level `.deny_tool()`.
     (`permission.rs` — deny checked before session memory)
 
-16. **HITL after LLM finishes** — permission prompts are never shown while
-    the LLM is still streaming. Tool calls are collected during streaming
-    and authorized after MessageEnd. (`runtime/run/tool_batch.rs`
-    pending_auths + auth_tasks)
+16. **HITL prompt timing + deferred auth concurrency** — permission prompts
+    are never shown while the LLM is still streaming. Tools that do not need
+    interactive approval may dispatch during streaming; tools that do need
+    approval are processed after `MessageEnd`, and deferred approvals in the
+    same turn run concurrently (no head-of-line blocking). (`runtime/run/parsing.rs`
+    `stream_and_dispatch` + `approve_deferred`)
 
 ## Compression
 
