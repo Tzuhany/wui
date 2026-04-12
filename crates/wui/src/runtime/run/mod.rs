@@ -1140,4 +1140,279 @@ mod tests {
         // Give the background task a moment to clean up.
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+
+    // ── Eager dispatch ─────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn auto_mode_dispatches_tool_before_message_end() {
+        // The provider sends: tool call → more text → MessageEnd.
+        // In eager dispatch, ToolStart should appear BEFORE the post-tool text.
+        let provider = SequenceProvider::new(vec![
+            vec![
+                // Tool completes first.
+                StreamEvent::ToolUseStart {
+                    id: "eager-id".into(),
+                    name: "eager_tool".into(),
+                },
+                StreamEvent::ToolInputDelta {
+                    id: "eager-id".into(),
+                    chunk: "{}".into(),
+                },
+                StreamEvent::ToolUseEnd {
+                    id: "eager-id".into(),
+                },
+                // More text arrives AFTER the tool input is complete.
+                StreamEvent::TextDelta {
+                    text: "after-tool-text".into(),
+                },
+                StreamEvent::MessageEnd {
+                    usage: TokenUsage {
+                        input_tokens: 10,
+                        output_tokens: 10,
+                        cache_read_tokens: 0,
+                        cache_write_tokens: 0,
+                    },
+                    stop_reason: StopReason::ToolUse,
+                },
+            ],
+            // Second call: LLM responds with final text.
+            vec![
+                StreamEvent::TextDelta {
+                    text: "done".into(),
+                },
+                StreamEvent::MessageEnd {
+                    usage: TokenUsage {
+                        input_tokens: 10,
+                        output_tokens: 10,
+                        cache_read_tokens: 0,
+                        cache_write_tokens: 0,
+                    },
+                    stop_reason: StopReason::EndTurn,
+                },
+            ],
+        ]);
+
+        let config = test_config(
+            Arc::new(provider),
+            vec![Arc::new(SleepTool {
+                name: "eager_tool",
+                delay_ms: 1,
+                output: "eager result",
+                readonly: true,
+            })],
+            PermissionMode::Auto,
+        );
+
+        let mut stream = run(config, vec![Message::user("call eager_tool")]);
+        let mut event_names = Vec::new();
+
+        while let Some(event) = stream.next().await {
+            match &event {
+                AgentEvent::ToolStart { name, .. } => event_names.push(format!("start:{name}")),
+                AgentEvent::TextDelta(t) => event_names.push(format!("text:{t}")),
+                AgentEvent::ToolDone { name, .. } => event_names.push(format!("done:{name}")),
+                AgentEvent::Done(_) => break,
+                AgentEvent::Error(e) => panic!("unexpected error: {e}"),
+                _ => {}
+            }
+        }
+
+        // ToolStart must appear before "after-tool-text", proving eager dispatch.
+        let tool_start_pos = event_names
+            .iter()
+            .position(|e| e == "start:eager_tool")
+            .expect("ToolStart should be emitted");
+        let after_text_pos = event_names
+            .iter()
+            .position(|e| e == "text:after-tool-text")
+            .expect("post-tool text should be emitted");
+
+        assert!(
+            tool_start_pos < after_text_pos,
+            "ToolStart should appear before post-tool text (eager dispatch).\n\
+             Events: {event_names:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn ask_mode_defers_tool_until_after_message_end() {
+        // In Ask mode with no allow rules, the tool needs HITL approval.
+        // ToolStart should NOT appear during streaming — it should appear
+        // only after the stream completes and the control handle is resolved.
+        let provider = SequenceProvider::new(vec![
+            vec![
+                StreamEvent::ToolUseStart {
+                    id: "deferred-id".into(),
+                    name: "deferred_tool".into(),
+                },
+                StreamEvent::ToolInputDelta {
+                    id: "deferred-id".into(),
+                    chunk: "{}".into(),
+                },
+                StreamEvent::ToolUseEnd {
+                    id: "deferred-id".into(),
+                },
+                StreamEvent::TextDelta {
+                    text: "thinking...".into(),
+                },
+                StreamEvent::MessageEnd {
+                    usage: TokenUsage {
+                        input_tokens: 10,
+                        output_tokens: 10,
+                        cache_read_tokens: 0,
+                        cache_write_tokens: 0,
+                    },
+                    stop_reason: StopReason::ToolUse,
+                },
+            ],
+            vec![
+                StreamEvent::TextDelta {
+                    text: "done".into(),
+                },
+                StreamEvent::MessageEnd {
+                    usage: TokenUsage {
+                        input_tokens: 10,
+                        output_tokens: 10,
+                        cache_read_tokens: 0,
+                        cache_write_tokens: 0,
+                    },
+                    stop_reason: StopReason::EndTurn,
+                },
+            ],
+        ]);
+
+        let config = test_config(
+            Arc::new(provider),
+            vec![Arc::new(SleepTool {
+                name: "deferred_tool",
+                delay_ms: 1,
+                output: "deferred result",
+                readonly: false,
+            })],
+            PermissionMode::Ask,
+        );
+
+        let mut stream = run(config, vec![Message::user("call deferred_tool")]);
+        let mut event_names = Vec::new();
+
+        while let Some(event) = stream.next().await {
+            match &event {
+                AgentEvent::ToolStart { name, .. } => event_names.push(format!("start:{name}")),
+                AgentEvent::TextDelta(t) => event_names.push(format!("text:{t}")),
+                AgentEvent::Control(handle) => {
+                    event_names.push("control".to_string());
+                    handle.approve();
+                }
+                AgentEvent::Done(_) => break,
+                AgentEvent::Error(e) => panic!("unexpected error: {e}"),
+                _ => {}
+            }
+        }
+
+        // Control (HITL prompt) must appear AFTER "thinking..." text,
+        // proving the tool was deferred until after streaming completed.
+        let text_pos = event_names
+            .iter()
+            .position(|e| e == "text:thinking...")
+            .expect("text should be emitted");
+        let control_pos = event_names
+            .iter()
+            .position(|e| e == "control")
+            .expect("control should be emitted");
+
+        assert!(
+            control_pos > text_pos,
+            "HITL prompt should appear after all streaming text.\n\
+             Events: {event_names:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn allowed_rule_enables_eager_dispatch_in_ask_mode() {
+        // Even in Ask mode, a statically-allowed tool should dispatch eagerly.
+        let provider = SequenceProvider::new(vec![
+            vec![
+                StreamEvent::ToolUseStart {
+                    id: "allowed-id".into(),
+                    name: "pre_approved".into(),
+                },
+                StreamEvent::ToolInputDelta {
+                    id: "allowed-id".into(),
+                    chunk: "{}".into(),
+                },
+                StreamEvent::ToolUseEnd {
+                    id: "allowed-id".into(),
+                },
+                StreamEvent::TextDelta {
+                    text: "post-tool".into(),
+                },
+                StreamEvent::MessageEnd {
+                    usage: TokenUsage {
+                        input_tokens: 10,
+                        output_tokens: 10,
+                        cache_read_tokens: 0,
+                        cache_write_tokens: 0,
+                    },
+                    stop_reason: StopReason::ToolUse,
+                },
+            ],
+            vec![
+                StreamEvent::TextDelta {
+                    text: "done".into(),
+                },
+                StreamEvent::MessageEnd {
+                    usage: TokenUsage {
+                        input_tokens: 10,
+                        output_tokens: 10,
+                        cache_read_tokens: 0,
+                        cache_write_tokens: 0,
+                    },
+                    stop_reason: StopReason::EndTurn,
+                },
+            ],
+        ]);
+
+        let mut config = test_config(
+            Arc::new(provider),
+            vec![Arc::new(SleepTool {
+                name: "pre_approved",
+                delay_ms: 1,
+                output: "result",
+                readonly: true,
+            })],
+            PermissionMode::Ask,
+        );
+        // Pre-approve this tool so it can dispatch eagerly even in Ask mode.
+        Arc::get_mut(&mut config).unwrap().rules = PermissionRules::new().allow("pre_approved");
+
+        let mut stream = run(config, vec![Message::user("call pre_approved")]);
+        let mut event_names = Vec::new();
+
+        while let Some(event) = stream.next().await {
+            match &event {
+                AgentEvent::ToolStart { name, .. } => event_names.push(format!("start:{name}")),
+                AgentEvent::TextDelta(t) => event_names.push(format!("text:{t}")),
+                AgentEvent::Control(_) => panic!("should not need HITL for pre-approved tool"),
+                AgentEvent::Done(_) => break,
+                AgentEvent::Error(e) => panic!("unexpected error: {e}"),
+                _ => {}
+            }
+        }
+
+        // ToolStart should appear before post-tool text (eager, no HITL).
+        let tool_start_pos = event_names
+            .iter()
+            .position(|e| e == "start:pre_approved")
+            .expect("ToolStart should be emitted");
+        let post_text_pos = event_names
+            .iter()
+            .position(|e| e == "text:post-tool")
+            .expect("post-tool text should be emitted");
+
+        assert!(
+            tool_start_pos < post_text_pos,
+            "Pre-approved tool should dispatch eagerly even in Ask mode.\n\
+             Events: {event_names:?}"
+        );
+    }
 }
